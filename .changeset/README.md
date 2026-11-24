@@ -28,7 +28,7 @@ bun run version:packages
 
 ## Publishing
 
-`@deployments-ai/sdk` and `@deployments-ai/cli` are public packages on
+`@agentifiers/deployments-sdk` and `@agentifiers/deployments-cli` are public packages on
 npmjs.com. Check the staged artifacts locally with:
 
 ```sh

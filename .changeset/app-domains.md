@@ -1,6 +1,6 @@
 ---
-"@deployments-ai/cli": minor
-"@deployments-ai/sdk": minor
+"@agentifiers/deployments-cli": minor
+"@agentifiers/deployments-sdk": minor
 ---
 
 Add custom domains to agent-built apps. Four operations manage them. `listAppDomains` (`GET /v1/apps/{appId}/domains`) needs `apps:read`. `attachAppDomain` (`POST /v1/apps/{appId}/domains`), `refreshAppDomain` (`POST /v1/apps/{appId}/domains/{domainId}/refresh`), and `detachAppDomain` (`DELETE /v1/apps/{appId}/domains/{domainId}`) need `apps:publish` and admit the same members and API keys as `setAppPublication`. The CLI calls them with `deployments app-domain list|attach|refresh|detach`.

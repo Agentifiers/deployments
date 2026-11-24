@@ -1,5 +1,5 @@
 ---
-"@deployments-ai/cli": patch
+"@agentifiers/deployments-cli": patch
 ---
 
 A device token refresh that fails for a transient reason no longer logs the CLI out. Before, a network error, timeout, or `5xx` from `/v1/device-authorizations/token`, or a failed `/v1/whoami` check after the exchange, removed the stored refresh token, so the next command asked for `deployments auth login`. Now the profile keeps its refresh token and the next command refreshes again. When the exchange succeeded but the identity check failed, the profile keeps the rotated refresh token and not the unchecked bearer. Only `invalid_grant`, `invalid_client`, or `unauthorized_client` marks the profile for a new login. Concurrent commands still share one token exchange through the per-profile refresh lock.

@@ -1,6 +1,6 @@
 ---
-"@deployments-ai/cli": minor
-"@deployments-ai/sdk": minor
+"@agentifiers/deployments-cli": minor
+"@agentifiers/deployments-sdk": minor
 ---
 
 Serve public apps to visitors. An app whose `audience` is `public`, that is active, and that has a live release now serves its pages to people who do not sign in and runs its `visitor` functions for them as the app's visitor role. A visitor who is not signed in and calls an `api` function or an unknown name gets 401 `unauthenticated`, and a person whose session the app refuses gets that refusal, such as 403 `not_a_member`. Visitor calls must come from the app's own pages unless they carry a bearer token. The gateway limits them per address and app (a burst of 10, then 10 per minute), per app (120, then 300 per minute), by body size (16 KiB), by concurrency (2 per app, 16 per gateway task), and by time (2 seconds, after which the call is rolled back and answers 504 `deadline_exceeded`). A call that sent its commit and got no answer from the database answers 504 `outcome_unknown`, because its changes may have been saved, so retrying it may write twice. A migration that gives a function its own `statement_timeout`, `transaction_timeout`, `idle_in_transaction_session_timeout` or `client_connection_check_interval` is refused. The gateway limits visitor pages to a burst of 60, then 300 per minute, per address, and does not count redirects: the 307s that send asset paths to the release's files and the 308s that add or remove a trailing slash. A session now works only on the host where the person signed in. The generated TypeScript client sends the browser to sign-in only on 401 `unauthenticated`, and `PlatformApiError` gains `retryAfter`, the seconds from the `Retry-After` header.

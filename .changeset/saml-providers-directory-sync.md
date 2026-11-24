@@ -1,6 +1,6 @@
 ---
-"@deployments-ai/cli": minor
-"@deployments-ai/sdk": minor
+"@agentifiers/deployments-cli": minor
+"@agentifiers/deployments-sdk": minor
 ---
 
 Add SAML 2.0 identity providers and SCIM 2.0 directory sync. `putIdentityProvider` (`PUT /v1/identity-provider`) takes an optional `protocol`. Without it the body is an OIDC provider, as before. With `protocol: "saml"` it takes `displayName`, `jit`, `metadata` as `{ url }` or `{ document }`, an optional `emailAttribute`, and an optional `unsolicitedSignIn` of `disabled` (the default) or `enabled` for IdP-initiated sign-in. `getIdentityProvider` returns either shape, discriminated by `protocol`. A SAML provider includes `serviceProvider` with the `entityId`, `acsUrl`, and `metadataUrl` to register with the identity provider, plus `singleSignOnUrl` and the signing certificates' `sha256Fingerprint` and `notAfter`. `deployments identity-provider set` takes `--protocol oidc|saml`, which defaults to `oidc`. For SAML it takes `--metadata-url` or `--metadata-file`, `--email-attribute`, and `--unsolicited-sign-in disabled|enabled`. The client secret flags apply only to OIDC.

@@ -1,6 +1,6 @@
 ---
-"@deployments-ai/cli": minor
-"@deployments-ai/sdk": minor
+"@agentifiers/deployments-cli": minor
+"@agentifiers/deployments-sdk": minor
 ---
 
 Platform administrators can disable or re-enable a person with `replaceSystemPrincipalStatus` (`PUT /v1/system/principals/{principalId}/status`, body `{ status: "active" | "disabled", reason }`) or `deployments system set-principal-status`. Disabling ends the person's sessions and refresh tokens, and their next request returns 401. Re-enabling does not revive them. The response reports `changed: false` when the status was already set. Administrators cannot disable themselves (`403 cannot_disable_self`), machine services cannot call the route, and an install without platform identity answers `409 principal_status_unmanaged`.

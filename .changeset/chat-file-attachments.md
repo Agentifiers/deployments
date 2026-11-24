@@ -1,6 +1,6 @@
 ---
-"@deployments-ai/cli": minor
-"@deployments-ai/sdk": minor
+"@agentifiers/deployments-cli": minor
+"@agentifiers/deployments-sdk": minor
 ---
 
 `deployments chat` attaches files with `--file <path>`, which replaces `--image`. `--image` is removed with no alias. `--file` takes a PDF, Word (.docx), Excel (.xlsx), CSV, text, Markdown, JSON, HTML, or ZIP file, or a JPEG, PNG, or WebP image, and repeats for up to eight files. Before it calls the API, the CLI refuses a file over 10 MiB, images and audio that total more than 20 MiB, and a legacy Office file (`.doc`, `.xls`, `.ppt`) or a `.pptx` file, with the same reason text the API uses. The CLI declares each file's content type from its extension. A file whose extension it doesn't know uploads as `application/octet-stream`, and the platform types it from its bytes. Without `--thread`, the CLI creates the thread first. Each file uploads to the thread with `type: "input"` and a 30-day retention. When an upload completes with `input.kind` `unusable`, the command exits with code 7 and the platform's message, and it does not submit the run. For example: `scan.pdf can't be attached: the file has no readable text. If it is a scan, OCR found no text or isn't turned on.` A rerun uploads the files again, so a retry with the same `--idempotency-key` after a submission that went through fails with an idempotency conflict.

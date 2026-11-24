@@ -1,6 +1,6 @@
 ---
-"@deployments-ai/cli": minor
-"@deployments-ai/sdk": minor
+"@agentifiers/deployments-cli": minor
+"@agentifiers/deployments-sdk": minor
 ---
 
 Runs accept documents. `inputArtifacts` takes any `type: "input"` upload whose `input.kind` is `image`, `audio`, or `document`, and the model receives each document's extracted text ahead of the message: at most 64 KiB across a turn's documents, and at most half of the context the rest of the request leaves. When a document's text is longer, the model reads the rest with the platform-managed `attachment.read` tool, which reads only documents that a message in the same thread attached, uploaded by the same person or service account and still within retention. A file that resolved to `unusable` fails the submission with `422 input_file_<reason>`, for example `input_file_no_text`, and the message names the file. An artifact not uploaded with `type: "input"` fails with `400 invalid_input_artifacts`. A `type: "input"` upload completed before uploads carried `input` fails with `404 input_artifact_unavailable`, so upload that file again. Only images and audio count toward the 20 MiB aggregate limit, and a release whose model cannot read images still accepts documents. A release that declares `attachment.read` fails validation with `platform_managed_tool`. A user message from a channel or agent email turn carries `inputOmissions`, which names up to eight attached files the turn left out, skipped files included, with the reason. `unlistedInputOmissions` counts the files past those eight, and the agent is told the same.

@@ -1,6 +1,6 @@
 ---
-"@deployments-ai/cli": minor
-"@deployments-ai/sdk": minor
+"@agentifiers/deployments-cli": minor
+"@agentifiers/deployments-sdk": minor
 ---
 
 Activate custom domains of agent-built apps automatically. A new `apps-domains` Lambda converges CloudFront distribution tenants and their managed certificates to the domain records every 5 minutes and on demand. A `verified` domain gets a tenant with a CloudFront-managed certificate; once the certificate is issued it is attached, and once CloudFront serves the hostname the domain moves to `active`. `refreshAppDomain` now also queues that convergence for the domain and answers the domain as it stands, without waiting; the queued run re-requests a failed or timed-out certificate. Poll the domain to follow the setup. `detachAppDomain` queues the convergence, so the tenant is disabled within seconds and deleted, with its certificate, on a later run.

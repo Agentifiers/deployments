@@ -1,6 +1,6 @@
 ---
-"@deployments-ai/cli": minor
-"@deployments-ai/sdk": minor
+"@agentifiers/deployments-cli": minor
+"@agentifiers/deployments-sdk": minor
 ---
 
 Members can read their organization's standing. `getOrganizationStanding` (`GET /v1/organizations/{id}/standing`, CLI `deployments org standing <id>`) returns `state` (`active` or `suspended`), `suspendedAt`, each hold's `reason`, `customerMessage`, and `since`, and the effective tenant limits and operator-funded model spend ceiling. It never shows who placed a hold or the operator's notes.

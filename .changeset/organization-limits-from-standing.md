@@ -1,6 +1,6 @@
 ---
-"@deployments-ai/cli": minor
-"@deployments-ai/sdk": minor
+"@agentifiers/deployments-cli": minor
+"@agentifiers/deployments-sdk": minor
 ---
 
 Breaking change: the system organization limits routes and commands are removed. `getSystemOrganizationLimits`, `replaceSystemOrganizationLimits`, and `clearSystemOrganizationLimits` (`GET|PUT|DELETE /v1/system/organizations/{organizationId}/limits`) and `deployments system limits`, `set-limits`, and `clear-limits` no longer exist. Set an organization's limits with its operator grant instead: `replaceSystemOrganizationEntitlements` and `clearSystemOrganizationEntitlements` (`PUT|DELETE /v1/system/organizations/{organizationId}/entitlements`, `deployments system set-entitlements --tenant-limits <json>` and `clear-entitlements`), and read them with `getSystemOrganizationStanding` (`deployments system standing`). The request rate, concurrent runs, and active sandboxes now enforce the effective limits of the organization's standing: the operator grant, then the service grant, then the install defaults. The deploy that ships this change folds each existing override into that organization's operator grant once and deletes the override. `getOrganizationLimits` is unchanged; a limit's `source` is `override` when any grant sets it.
