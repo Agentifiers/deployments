@@ -1,0 +1,28 @@
+{
+  "name": "@deployments-ai/tools",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./browser": "./src/browser.ts",
+    "./catalog": "./src/catalog.ts",
+    "./platform-skills": "./src/platform-skills.ts",
+    "./provider-native": "./src/provider-native/index.ts",
+    "./types": "./src/types.ts",
+    "./web": "./src/web.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@deployments-ai/agent-manifest": "workspace:*",
+    "@deployments-ai/channel-adapters": "workspace:*",
+    "@deployments-ai/db": "workspace:*",
+    "@deployments-ai/net-security": "workspace:*",
+    "@deployments-ai/providers": "workspace:*",
+    "effect": "4.0.0-beta.92"
+  }
+}

@@ -1,0 +1,276 @@
+---
+title: "Artifacts"
+description: "Upload files for runs, read files that runs produce, and control who can download them and how long the platform keeps them."
+---
+
+An artifact is a file the platform stores in one environment, together with its metadata. Runs record artifacts when a tool produces a file, such as a report or a screenshot. You create artifacts by uploading a file, for example an image to attach to a run. The platform keeps the bytes in encrypted object storage, and you move them in and out through short-lived signed URLs.
+
+## Where artifacts come from
+
+- **Run output.** When a tool in a run produces a file, the run records it as an artifact with the run's `runId`, `threadId`, and `agentDeploymentId`. Unless the artifact is `private`, the thread stream then carries an `artifact.available` event with the artifact's ID, name, type, media type, size, and visibility. See [Streaming](/docs/capabilities/streaming).
+- **Uploads.** You create an upload, send the bytes to a signed URL, and ask the platform to verify them. Uploaded artifacts can reference a run or a thread.
+
+Every artifact has a `name`, a `type` label such as `report` or `screenshot`, a `contentType`, a `byteSize`, an optional `fileName`, optional `metadata`, a `visibility`, a `status`, and a `version` that increments on every change.
+
+| Status      | Meaning                                                                |
+| ----------- | ---------------------------------------------------------------------- |
+| `pending`   | You created an upload and the platform has not verified the bytes yet. |
+| `available` | The bytes are stored and verified. You can create download URLs.       |
+
+Artifact responses can also report `failed`, or `deleted` for an artifact you just deleted. See [Delete a file](#delete-a-file).
+
+## Who can read an artifact
+
+| Visibility                   | Readable through the API by                                                                   |
+| ---------------------------- | --------------------------------------------------------------------------------------------- |
+| `organization`               | Any caller in the environment with the `artifacts:read` scope. Run artifacts default to this. |
+| `private`, uploaded          | Only the caller that created the upload, meaning the same user or the same service account.   |
+| `private`, recorded by a run | Nobody. The file stays inside the runtime for the agent's own use.                            |
+
+An upload's visibility is `private` by default. You can set it to `organization` instead. A Brain publication artifact follows the access rules of its Brain. See [Brains](/docs/capabilities/brains). For an artifact you cannot read, the API answers `404 not_found`.
+
+Reads (list, get, and download URLs) need `artifacts:read`. Uploads, completion, retention changes, and deletion need `artifacts:write`.
+
+## Upload a file
+
+An upload takes three requests.
+
+1. **Create the upload.** `POST /v1/artifacts` validates the fields below, stores a `pending` artifact, and returns it with an `upload` object that holds a `PUT` `url`, the `headers` to send, and `expiresAt`. The URL is valid for 15 minutes.
+2. **Send the bytes.** `PUT` the file to `upload.url` with every header in `upload.headers`. The headers fix the length, media type, SHA-256 checksum, and encryption, and they include `if-none-match: *`, so the URL can write the object only once.
+3. **Complete the upload.** `POST /v1/artifacts/{artifactId}/complete` checks the stored object's length, checksum, media type, encryption, and storage version against what you declared. The artifact becomes `available`. Completing an `available` artifact again returns it unchanged. For a `type: "input"` upload, completion also reads the file first. See [Input files](#input-files).
+
+`POST /v1/artifacts` takes no idempotency key, so every call creates a new artifact.
+
+| Field                | Rules                                                                                                       |
+| -------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `name`               | Required. At most 255 characters.                                                                           |
+| `type`               | Required. At most 100 characters. `input` marks a file to attach to a run. See [Input files](#input-files). |
+| `fileName`           | Required. At most 255 UTF-8 bytes. No `/`, no `\`, no control characters, and not `.` or `..`.              |
+| `contentType`        | Required. A valid media type of at most 255 characters, for example `application/pdf`.                      |
+| `byteSize`           | Required. From 1 to 104,857,600 bytes (100 MiB).                                                            |
+| `sha256`             | Required. The lowercase hexadecimal SHA-256 digest of the file.                                             |
+| `visibility`         | `private` (default) or `organization`.                                                                      |
+| `runId`, `threadId`  | Optional. With only `runId`, the artifact takes the run's thread. With both, the run must be in the thread. |
+| `retentionExpiresAt` | Optional. See [Retention](#retention).                                                                      |
+| `metadata`           | Optional JSON object of at most 128 KiB.                                                                    |
+
+| Error                               | Status | Cause                                                                               |
+| ----------------------------------- | ------ | ----------------------------------------------------------------------------------- |
+| `input_file_too_large`              | 413    | A `type: "input"` upload declares more than 10 MiB.                                 |
+| `invalid_artifact_visibility`       | 400    | The visibility is unknown, or a `type: "input"` upload is not `private`.            |
+| `artifact_upload_incomplete`        | 409    | You called complete before the bytes arrived.                                       |
+| `artifact_upload_mismatch`          | 409    | The stored bytes do not match the declared size, digest, media type, or encryption. |
+| `artifact_unavailable`              | 409    | The artifact is neither `pending` nor `available`.                                  |
+| `artifact_retention_expired`        | 409    | The artifact's retention passed before you completed it.                            |
+| `artifact_upload_unavailable`       | 503    | The platform has no artifact encryption key configured.                             |
+| `input_file_resolution_unavailable` | 503    | The platform could not read a `type: "input"` file yet. Complete the upload again.  |
+
+## Input files
+
+An upload with `type: "input"` is a file to attach to a run. It must be `private` and at most 10 MiB. When you complete it, the platform reads the file and the response carries `input`, which says how a run will use it:
+
+| `input.kind` | Meaning                                                                                                                                    |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `image`      | A JPEG, PNG, or WebP image, typed from the file's leading bytes. `mediaType` names the format.                                             |
+| `audio`      | A WAV or MP3 file, typed from its leading bytes.                                                                                           |
+| `document`   | PDF, Word (.docx), Excel (.xlsx), CSV, text, Markdown, JSON, HTML, or ZIP. The platform extracted its text. `summary` describes its shape. |
+| `unusable`   | The file can't be attached. `reason` names why and `message` says what to do.                                                              |
+
+| `reason`               | Cause                                                                                     |
+| ---------------------- | ----------------------------------------------------------------------------------------- |
+| `unsupported_type`     | The platform can't read this type, for example a PowerPoint deck or an executable.        |
+| `legacy_office_format` | A legacy Office file (.doc, .xls, .ppt). Save it as .docx or .xlsx.                       |
+| `unreadable`           | The file is damaged, or its contents don't match its type.                                |
+| `encrypted`            | The file is password-protected.                                                           |
+| `no_text`              | The file has no readable text, such as a scanned PDF when OCR is off or finds no text.    |
+| `limits_exceeded`      | Reading the file passed a limit on decompressed size, number of entries, time, or memory. |
+
+```json
+{
+  "artifactId": "01J9Z…",
+  "status": "available",
+  "type": "input",
+  "input": {
+    "kind": "document",
+    "mediaType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "summary": "Excel workbook, 2 sheets (Revenue 1,204 rows; Notes 12 rows), 1 hidden sheet omitted"
+  }
+}
+```
+
+An installation can turn on [OCR for scanned PDF pages](/docs/operate/features#ocr-for-scanned-pdf-pages). The platform then reads PDF pages that have no text layer with Amazon Textract, at most 12 per file, and the PDF's `summary` counts them, for example `PDF, 3 pages (2 read by OCR)`. Scanned pages past that limit count as pages without text, for example `PDF, 30 pages (12 read by OCR, 18 without text)`.
+
+A file's extension or declared `contentType` only chooses among text formats, such as CSV or Markdown. Images, audio, and binary formats are typed from their bytes. If reading the file fails for a reason that has nothing to do with the file, completion answers `503 input_file_resolution_unavailable` and the artifact stays `pending`, so you can complete it again. Extracted text is deleted with the file, when its retention ends or when the artifact is erased.
+
+## Download a file
+
+`POST /v1/artifacts/{artifactId}/access-urls` returns a signed `url` and its `expiresAt` for an `available` artifact. `expiresInSeconds` sets the lifetime, from 60 to 3,600 seconds, with a default of 900. If the artifact's retention ends sooner, the platform shortens the URL's lifetime to match. A signed URL works for anyone who holds it until it expires, so treat it as a secret.
+
+Storage answers the URL with the artifact's stored `contentType`. Set `disposition` to `attachment` and storage also sends `Content-Disposition: attachment` with the file name, so a browser that opens the URL saves the file instead of displaying it. Use `attachment` for any link a person opens, because a file such as HTML or SVG could otherwise run in the browser. `inline`, or no `disposition`, sends no such header.
+
+Each URL you create increments the artifact's `version`.
+
+## Retention
+
+`retentionExpiresAt` is the moment the artifact stops being available. It must be a future UTC timestamp in canonical form, such as `2026-12-31T00:00:00.000Z`.
+
+- At upload time, retention must leave room for the full 15-minute upload URL lifetime.
+- A `pending` upload without retention expires 24 hours after you create it.
+- An `available` artifact without retention does not expire.
+- After retention passes, get returns `404`, lists omit the artifact, and the platform deletes the stored bytes in the background.
+
+To change retention, send `PATCH /v1/artifacts/{artifactId}/retention` with the artifact's current `version` as `expectedVersion` and a new `retentionExpiresAt`, or `null` to clear it.
+
+| Error                         | Cause                                                                        |
+| ----------------------------- | ---------------------------------------------------------------------------- |
+| `artifact_version_conflict`   | `expectedVersion` does not match the artifact's `version`.                   |
+| `artifact_retention_too_soon` | The new retention ends before an outstanding download or upload URL expires. |
+| `artifact_retention_expired`  | Retention has already passed. You can no longer change it.                   |
+| `invalid_retention`           | The timestamp is not canonical or not in the future.                         |
+
+## Delete a file
+
+`DELETE /v1/artifacts/{artifactId}` deletes an artifact you can read and returns it with `status: "deleted"` and a `retentionExpiresAt` of now. From then on, get returns `404`, lists omit the artifact, and new download URLs are refused. The platform then erases the stored bytes and any text it extracted from them, the same way it does when retention passes. A download URL issued before the delete keeps working until it expires, at most one hour later. Deleting the same artifact again returns `404`.
+
+Deleting a `pending` upload keeps its upload expiry, so bytes that its upload URL still sends are erased with the rest.
+
+## List artifacts
+
+`GET /v1/artifacts` lists the artifacts you can read in the environment, newest first by creation time. These query parameters filter the list, and you can combine them:
+
+| Parameter       | Keeps artifacts                                                                            |
+| --------------- | ------------------------------------------------------------------------------------------ |
+| `runId`         | Recorded by or uploaded for this run.                                                      |
+| `threadId`      | In this thread, including those of its runs.                                               |
+| `type`          | With exactly this `type` label, such as `report` or `input`.                               |
+| `contentType`   | With this media type, compared without parameters, or in this family, such as `image/*`.   |
+| `createdAfter`  | Created at or after this canonical UTC timestamp, such as `2026-11-01T00:00:00.000Z`.      |
+| `createdBefore` | Created at or before this canonical UTC timestamp. It must not come before `createdAfter`. |
+
+`limit` takes 1 to 100, with a default of 100. A page can hold fewer than `limit` artifacts and still return `nextCursor`, so keep paging until `nextCursor` is absent. A cursor works only with the filters that produced it, and other filters answer `400 invalid_cursor`. See [Pagination](/docs/api/pagination).
+
+## Upload from a browser
+
+The artifact bucket accepts the upload `PUT` from any origin, so a browser page can send the bytes straight to `upload.url`. Send every header in `upload.headers` except `content-length`, which the browser sets itself. The console's upload dialog does this, and the API stays the only way to create the upload, so the browser never holds storage credentials.
+
+## Attach files to a run
+
+A run takes `type: "input"` uploads as input through `inputArtifacts`. The run submission checks these rules:
+
+- One to eight unique artifact IDs.
+- Each artifact is a `type: "input"` upload that is `private`, `available`, within retention, in the run's thread, and uploaded by the person or service account that submits the run.
+- Images and audio total at most 20 MiB. Documents don't count toward this limit, because the model receives their text, not their bytes.
+- An image needs a release whose model reads images. Documents and audio work on every model.
+
+Upload the file with the run's `threadId` first, and submit the run with that `threadId`. Only the person or service account that submitted a run with input files can retry or replay it. Anyone else gets `input_artifact_unavailable`.
+
+| Error                                                          | Status | Cause                                                                                                                                                                                  |
+| -------------------------------------------------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `input_artifact_unavailable`                                   | 404    | The artifact is missing, expired, not `private`, in another thread, uploaded by someone else, or has no `input` because its upload completed before the platform resolved input files. |
+| `invalid_input_artifacts`                                      | 400    | The list is malformed, an artifact was not uploaded with `type: "input"`, or images and audio exceed 20 MiB.                                                                           |
+| `input_file_<reason>`                                          | 422    | The file's `input.kind` is `unusable`. `<reason>` is one from [Input files](#input-files), and the message names the file.                                                             |
+| `model_image_input_unsupported` or `model_image_input_unknown` | 422    | The release's model cannot read images.                                                                                                                                                |
+
+For example, when OCR is off or finds no text, a scanned PDF fails with `input_file_no_text` and the message `Input file 01J9Z… (scan.pdf) can't be used: the file has no readable text. If it is a scan, OCR found no text or isn't turned on.`
+
+The model receives document text ahead of your message: at most 64 KiB across a turn's documents, and at most half of the context the rest of the request leaves. When a file's text is longer than its share, the model sees where the text stops and reads the rest with the `attachment.read` tool. On later turns in the same thread, the model sees a list of up to 12 earlier documents, with each file's name, summary, size, and artifact ID, and reads their text with the same tool. The platform adds that tool to a run that has a document on the current turn or in that list. It reads only documents that a message in the same thread attached, uploaded by the same person or service account and still within retention. [Threads and runs](/docs/capabilities/threads-and-runs) and [Context management](/docs/capabilities/context-management) explain how the model receives these files.
+
+## Use it
+
+1. Compute the file's size and SHA-256 digest.
+
+   ```bash
+   BYTE_SIZE=$(wc -c < report.pdf | tr -d ' ')
+   SHA256=$(shasum -a 256 report.pdf | cut -d ' ' -f 1)
+   ```
+
+2. Create the upload. The CLI hides the signed `url` unless you pass `--reveal`.
+
+   ```bash
+   deployments artifact upload --name "Quarterly report" --type report --file-name report.pdf --content-type application/pdf --byte-size $BYTE_SIZE --sha256 $SHA256 --reveal --json
+   ```
+
+3. Send the file with an HTTP `PUT` to `upload.url`, with every header from `upload.headers`. `deployments artifact upload` does not send the bytes for you. The SDK example below shows the request.
+
+4. Complete the upload, then create a download URL. `artifact download` returns a signed URL. It does not save the file.
+
+   ```bash
+   deployments artifact complete $ARTIFACT_ID
+   deployments artifact download $ARTIFACT_ID --expires-in-seconds 300 --reveal
+   ```
+
+5. Set a retention date, passing the artifact's current version.
+
+   ```bash
+   deployments artifact retention $ARTIFACT_ID --expected-version 2 --retention-expires-at '"2026-12-31T00:00:00.000Z"'
+   ```
+
+To attach files to a run from the CLI, pass `--file` to `deployments chat` instead. Repeat the flag for each file. The command uploads the files for you:
+
+- It checks every file before it sends anything. It accepts at most 8 files, each at most 10 MiB, and images and audio together at most 20 MiB. It refuses a legacy Office file (`.doc`, `.xls`, `.ppt`) or a `.pptx` file with the message from [Input files](#input-files).
+- It declares each file's content type from the file's extension. A file whose extension it doesn't know, such as `README` or `config.yaml`, goes up as `application/octet-stream`, and the platform types it from its bytes.
+- Without `--thread`, it creates the thread first.
+- It uploads each file to that thread with `type: "input"` and a 30-day retention.
+- If an upload completes with `input.kind` `unusable`, it stops with the platform's message and does not submit the run. For example: `scan.pdf can't be attached: the file has no readable text. If it is a scan, OCR found no text or isn't turned on.`
+- Otherwise, it submits the run with the file IDs in `inputArtifacts`.
+
+```bash
+deployments chat --agent $AGENT_DEPLOYMENT_ID --message "What was Q3 revenue in the North region?" --file ./q3.xlsx --file ./board-notes.pdf
+```
+
+The whole upload and download flow through the SDK:
+
+```ts
+import {
+  completeArtifactUpload,
+  createArtifactAccessUrl,
+  createArtifactUpload,
+  createClient,
+  createConfig,
+} from "@agentifiers/deployments-sdk";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const bytes = await readFile("report.pdf");
+const { data: created } = await createArtifactUpload({
+  client,
+  body: {
+    name: "Quarterly report",
+    type: "report",
+    fileName: "report.pdf",
+    contentType: "application/pdf",
+    byteSize: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  },
+});
+if (!created) throw new Error("Could not create the upload.");
+
+const put = await fetch(created.upload.url, {
+  method: "PUT",
+  headers: created.upload.headers,
+  body: bytes,
+});
+if (!put.ok) throw new Error(`Upload failed with status ${put.status}.`);
+
+const artifactId = created.artifact.artifactId;
+await completeArtifactUpload({ client, path: { artifactId } });
+
+const { data: access } = await createArtifactAccessUrl({
+  client,
+  path: { artifactId },
+  body: { expiresInSeconds: 300 },
+});
+```
+
+## Reference
+
+- API: [list artifacts](/docs/api/reference/artifacts/list-artifacts), [create upload](/docs/api/reference/artifacts/create-artifact-upload), [complete upload](/docs/api/reference/artifacts/complete-artifact-upload), [get artifact](/docs/api/reference/artifacts/get-artifact), [create access URL](/docs/api/reference/artifacts/create-artifact-access-url), [update retention](/docs/api/reference/artifacts/update-artifact-retention)
+- CLI: [`deployments artifact`](/docs/cli/reference/artifact)
+- SDK: [Artifacts functions](/docs/sdk/reference#artifacts)

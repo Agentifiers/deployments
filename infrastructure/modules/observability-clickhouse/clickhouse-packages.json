@@ -1,0 +1,8 @@
+{
+  "version": "25.8.3.66",
+  "arm64_sha256": {
+    "clickhouse-client": "529d575b28fecce572ffaead0e00ae1599406c5c8caf2cdddc4dd6e68f697904",
+    "clickhouse-common-static": "87e48a3bf14d197d23069b6545e219389907840da8cd77989fb38e8171e98807",
+    "clickhouse-server": "1b2ab94f97b9af5c323321dadcd9a3441fbe6033bd9390d1a8026f14122fa9ee"
+  }
+}

@@ -1,0 +1,229 @@
+---
+title: "Users and sign-in"
+description: "How people get accounts on a new installation: the first platform administrator, organizations and invitations, self-service registration and its risk, and federated sign-in."
+---
+
+A new installation has no accounts. The identity service stores every person as a human principal with a primary email address, and people join organizations through memberships. This page explains how the first administrator signs in, how everyone else gets an account, and which switch opens public registration. [Tenancy](/docs/capabilities/tenancy) covers organizations, roles, and invitations from a member's point of view.
+
+## How an account comes to exist
+
+The identity service creates a human principal in exactly three ways:
+
+| Path                                                          | Who triggers it                                                       | Available when                                                                             |
+| ------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `admin bootstrap` in the deploy tool                          | An operator with credentials for the AWS account                      | Always. The account it creates is a platform administrator.                                |
+| Self-service registration on the identity sign-in page        | Anyone who can reach the identity domain and read mail at the address | `platform_identity_registration_enabled` is `true`.                                        |
+| Federated sign-in through an organization's identity provider | A person the provider authenticates                                   | An organization has an active identity provider and a verified login domain for the email. |
+
+Registration is off by default. With it off, an invitation does not create an account. An invitee can accept only after they can sign in, so the invited address needs an account from one of the paths above.
+
+## Create the first administrator
+
+Run this once after the first deploy, with credentials for the installation's account:
+
+```bash
+bun run deploy -- admin bootstrap --target acme.target.json --email admin@example.com
+```
+
+The command reads the applied root's outputs, then writes to the `identity` table directly. It does not call the public API.
+
+- **No account has the address.** The command creates an active human principal with `platformRole` `administrator`, a verified email, and a random password that nobody knows. It logs `created platform administrator <email> (<principal ID>)` and the sign-in URL, `<issuer>/sign-in`. The administrator opens it, chooses **Forgot password?**, and sets a password from the reset email.
+- **An active account with a complete password login has the address.** The command promotes it to platform administrator and logs `promoted`. It logs `unchanged` when the account is already an administrator.
+- **The account is not an active human, or has not finished sign-up or a password reset.** The command fails and changes nothing. Finish sign-up or reset the password, then run it again.
+
+The reset email goes through Amazon SES, so the administrator receives it only when the address can receive mail from your sender. See [SES sandbox](/docs/operate/troubleshooting#sign-in-email-never-arrives).
+
+The command is also the only way to grant the platform administrator role. No API route grants or removes it. [System operator](/docs/operate/system-operator) describes what an administrator can do.
+
+## Create organizations
+
+A platform administrator is not a member of any organization. To run agents, someone creates an organization and becomes its first `owner`. Any signed-in person can create one, in the console with **Create organization** or with the CLI:
+
+```bash
+deployments auth login
+deployments org create --name "Acme"
+```
+
+Organization slugs are unique across the installation. `deployments system organizations` lists every organization for a platform administrator.
+
+Three checks fence organization creation for everyone except platform administrators. Each refusal is a `403` with its own code:
+
+| Code                          | When                                                                                                                                                                           |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `email_verification_required` | The person's access token does not say their email is verified. Applies when the API trusts platform identity, which signs `email_verified` into every access token it issues. |
+| `organization_creation_held`  | An organization the person owns or administers has a hold. See [Organization standing](/docs/operate/organization-standing).                                                   |
+| `organization_quota_reached`  | The person has created `organization_creation_quota_per_principal` organizations.                                                                                              |
+
+The hold check looks at the person's memberships when they create. An owner or admin who leaves a held organization, or is removed from it, can create again, because the organization no longer counts as theirs. Disable the person (see [Remove access](#remove-access)) when the hold should follow them.
+
+`organization_creation_quota_per_principal` is an optional variable of the `platform` module. It counts every organization a person has ever created, and erasing an organization does not give one back. Null, the default, allows any number. The count is kept in the same transaction as the new organization, so two concurrent creates for the last allowed organization admit exactly one.
+
+## Invite people
+
+Owners and admins invite people by email and role. Only an owner can invite another owner.
+
+```bash
+deployments invitation create --email teammate@example.com --role member
+```
+
+The response holds a one-time token, and the console shows the accept link once. When the installation runs the identity service, the platform also emails the link, `<console origin>/invitations/accept?invitation=<id>&token=<token>`, through the identity email worker. An invitation expires after 7 days unless you set `--expires-at`, at most 30 days ahead.
+
+The invitee signs in with the invited address and accepts. Acceptance fails when the signed-in account's primary email differs from the invited address. An owner or admin can also add a person who already has an account by principal ID with `deployments member add`.
+
+Because registration is off by default, decide how invitees get accounts before you send invitations:
+
+- Turn on registration, so invitees create their own accounts. Read [the risk](#turn-on-self-service-registration) first.
+- Connect the organization's identity provider, so its people sign in with single sign-on. See [Identity federation](/docs/operate/identity-federation).
+- Run `admin bootstrap` for the address. This makes the person a platform administrator, so use it only for operators.
+
+## Turn on self-service registration
+
+Set the variable in your var file and deploy:
+
+```json
+{
+  "platform_identity_registration_enabled": true
+}
+```
+
+OpenTofu passes it to the identity API function as `DEPLOYMENTS_AI_IDENTITY_REGISTRATION_ENABLED`. When it is `true`, the sign-in page shows **Create account**. A person enters an email address, receives a verification link, and chooses a display name and a password of at least 15 characters. Verifying the link creates the account. When it is `false`, `/sign-up` and `/verify` return `404`, and `POST /v1/auth/sign-up` and `POST /v1/auth/verify-email` return `403` with `Registration is not enabled.`
+
+<Callout type="warn" title="Registration is open to any address">
+  Registration has no domain allowlist and no approval step. Anyone who can reach the identity
+  domain and read mail at an address can create an account. Every account can create organizations,
+  and an organization's owners can create environments, API keys, and agents that call models billed
+  to your AWS account and provider keys. Keep registration off unless the identity domain is
+  reachable only by people you trust, and set [tenant limits](/docs/operate/tenant-limits) and
+  budgets before you open it.
+</Callout>
+
+The identity service rate-limits registration to 3 requests per email address and 10 per source network per hour. A sign-up for an address that already has an account sends nothing, and the response does not reveal whether the address exists.
+
+## Require a human verification check
+
+With registration open, you can require a challenge, such as a CAPTCHA, on sign-up and password recovery. The identity service works with any provider that implements the siteverify protocol, so you describe the provider by its URLs and names. There is no provider setting.
+
+1. Create a site at your provider for the identity domain. Note its site key and secret.
+2. Store the secret as an SSM `SecureString` encrypted with the AWS managed key `aws/ssm`:
+
+   ```bash
+   aws ssm put-parameter --name /identity/human-verification-secret --type SecureString --value '<secret>'
+   ```
+
+3. Set the variable in your var file and deploy. This example uses Cloudflare Turnstile:
+
+   ```json
+   {
+     "platform_identity_human_verification": {
+       "response_field": "cf-turnstile-response",
+       "script_url": "https://challenges.cloudflare.com/turnstile/v0/api.js",
+       "secret_parameter_name": "/identity/human-verification-secret",
+       "site_key": "<site key>",
+       "verify_url": "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+       "widget_class": "cf-turnstile"
+     }
+   }
+   ```
+
+| Field                   | Meaning                                                                                        | hCaptcha value                                       |
+| ----------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `script_url`            | The provider's widget script. Must be HTTPS.                                                   | `https://js.hcaptcha.com/1/api.js`                   |
+| `widget_class`          | The class of the element the script renders the widget into.                                   | `h-captcha`                                          |
+| `response_field`        | The form field the widget writes its token to.                                                 | `h-captcha-response`                                 |
+| `site_key`              | The public site key.                                                                           | your site key                                        |
+| `verify_url`            | The provider's siteverify endpoint. Must be HTTPS.                                             | `https://api.hcaptcha.com/siteverify`                |
+| `secret_parameter_name` | The name of the SSM parameter that holds the secret.                                           | your parameter name                                  |
+| `widget_origins`        | Optional. Extra origins the widget loads frames, styles, and API calls from. Defaults to none. | `["https://hcaptcha.com", "https://*.hcaptcha.com"]` |
+
+`tofu plan` refuses a value the identity API function could not load, so a typo fails the plan instead of stopping every identity route, sign-in included, when the function starts. The plan checks these rules:
+
+- `script_url` and `verify_url` use HTTPS and a lowercase DNS host name, with no user name or password and a port of at most 65535. A host label cannot start with `xn--`, and the last label cannot be a number.
+- `widget_class` and `response_field` start with a letter and have at most 64 letters, digits, hyphens, and underscores.
+- `site_key` has 1 to 256 letters, digits, periods, hyphens, and underscores.
+- `secret_parameter_name` is a parameter name such as `/identity/human-verification-secret`, not an ARN.
+- Each `widget_origins` entry is an HTTPS origin with a lowercase host, an optional leading `*.`, and no path.
+
+OpenTofu passes the fields to the identity API function as `DEPLOYMENTS_AI_IDENTITY_HUMAN_VERIFICATION`, with the parameter name turned into its ARN, and grants the function `ssm:GetParameter` on that one parameter. With the variable set:
+
+- The sign-in page loads `script_url` and places the widget in the **Create account** and **Reset password** forms. The page's content security policy adds the origin of `script_url` to `script-src` and `frame-src`, and adds each `widget_origins` entry to `script-src`, `style-src`, `connect-src`, and `frame-src`.
+- `POST /v1/auth/sign-up` and `POST /v1/auth/password/forgot` read the token from the `response_field` body field. The function posts the token, the secret, and the caller's IP address to `verify_url`, and queues the email only when the reply has `"success": true`.
+- A missing token, or a reply with `"success": false`, returns `400` with `human_verification_failed`.
+- An error status, a reply that is not JSON, no reply within 3 seconds, or a secret the function cannot read returns `503` with `temporarily_unavailable`, and the function logs `HumanVerificationUnavailable`. Sign-up and password recovery stop until the provider answers again.
+- Every response waits for the same minimum time as before, so response timing does not reveal whether an address has an account.
+- The function reads the secret on the first checked request and never logs it. A running instance keeps the value it read, and new instances read the current value.
+- A token works once. If a submission fails, the person reloads the page to get a new challenge.
+
+With the variable unset, the page loads no challenge script and both requests behave as described above.
+
+## Sign people in to your own services
+
+A service you run next to the installation can sign people in through the identity service, the way the console does. Declare it as a confidential OAuth client with the `platform_identity_additional_clients` input of `module "platform"`. The map key is the client ID:
+
+```hcl
+platform_identity_additional_clients = {
+  "support-tools" = {
+    name           = "Support tools"
+    redirect_uris  = ["https://support.acme.example/auth/callback"]
+    allowed_scopes = ["email", "openid", "profile"]
+  }
+}
+```
+
+The customer root in `infrastructure/environments/customer` does not expose this input. Pass it from an installation root you own.
+
+On every deploy, the client bootstrap registers each declared client for the authorization code flow with refresh tokens. The client must use PKCE with `S256`, authenticate with HTTP Basic (`client_secret_basic`), and request `openid`. The bootstrap writes the client secret to the SSM `SecureString` parameter `/identity/<client ID>-oauth-client` when the parameter is missing or does not match the client. It does not rotate a secret that matches. The `platform_identity_bootstrap` output lists each client under `additional_clients` with the parameter ARN as `secret_arn`. Grant your service `ssm:GetParameter` on that ARN.
+
+`tofu plan` refuses a client that breaks these rules:
+
+- The client ID is 2 to 64 lowercase letters, digits, or hyphens. It starts with a letter and ends with a letter or digit. It cannot start with `deployments-` or `apps-` or be `web` or `e2e`, because the built-in clients and their secret parameters use those names.
+- Every redirect URI uses HTTPS and has no user name, password, or fragment. The list is not empty.
+- `allowed_scopes` includes `openid`.
+
+The deploy fails before the bootstrap changes any client when `allowed_scopes` holds a scope the identity service does not support. The error names the scope.
+
+Your service can tell how the person signed in from the ID token. `auth_time` is when the person signed in, and `amr` lists the methods, with the values from RFC 8176:
+
+| Sign-in                                | `amr`                   |
+| -------------------------------------- | ----------------------- |
+| Password                               | `["pwd"]`               |
+| Password and an authenticator app code | `["mfa", "otp", "pwd"]` |
+| Password and a recovery code           | `["mfa", "pwd"]`        |
+| An organization's identity provider    | `["fed"]`               |
+
+An ID token from a refresh carries the `amr` and `auth_time` of the original sign-in. `fed` means the organization's identity provider authenticated the person. The identity service does not pass on how that provider did it, so `fed` makes no claim about a second factor.
+
+Removing a client from the map does not remove or turn off its registration. The client keeps working until you disable it in the `identity` table:
+
+```bash
+aws dynamodb update-item --table-name <identity table> \
+  --key '{"pk":{"S":"OAUTH-CLIENT#support-tools"},"sk":{"S":"OAUTH-CLIENT#support-tools"}}' \
+  --update-expression 'SET #data.#status = :disabled, #data.#version = #data.#version + :one' \
+  --expression-attribute-names '{"#data":"data","#status":"status","#version":"version"}' \
+  --expression-attribute-values '{":disabled":{"S":"disabled"},":one":{"N":"1"}}'
+```
+
+The `dynamodb_table_names` output names the table under `identity`. A disabled client cannot start a sign-in, exchange a code, or refresh a token. Declaring the client again turns it back on at the next deploy. It keeps its secret unless you deleted the `/identity/<client ID>-oauth-client` parameter, which you can do once nothing reads it.
+
+## Remove access
+
+To remove a person from an organization, an owner or admin removes the membership:
+
+```bash
+deployments member remove <member-id>
+```
+
+The API checks membership on every request, so removal takes effect on the person's next call. The account itself remains and can still sign in and create organizations of its own. An organization must always keep at least one active owner.
+
+To lock a person out of the whole installation, a platform administrator disables their principal:
+
+```bash
+deployments system set-principal-status <principal-id> --status disabled --reason "Fraudulent sign-ups"
+```
+
+This calls `PUT /v1/system/principals/{principalId}/status` with `{ "status": "disabled", "reason": "..." }`. The API never reads or writes sign-in state itself. It invokes platform identity's principal status function, which makes the change inside identity. Disabling advances the person's session epoch, so their browser sessions, refresh tokens, and device grants stop working, and their next API request returns `401`. The change and its reason are recorded as `identity.principal-disabled` in the person's security events. Setting `active` restores sign-in without reviving the ended sessions. Repeating a status that is already set returns `"changed": false` and writes nothing. An administrator cannot disable their own principal (`403 cannot_disable_self`). Only a platform administrator signed in through platform identity can call the route; machine services under `/v1/system/services` cannot. An installation without platform identity has no status function, and the route answers `409 principal_status_unmanaged`.
+
+To sign a person out everywhere without disabling them, end their sessions with `deployments system people revoke-sessions <principal-id> --reason "..."`. To find the principal ID by email, run `deployments system people find --email <email>`. [People](/docs/operate/system-operator#people) covers these routes and the console's **System > People** page.
+
+## Federated sign-in
+
+An organization can connect its own OpenID Connect identity provider, verify its email domains, and let its people sign in through the provider. Federated sign-in creates accounts for new people even when registration is off, and the provider's just-in-time membership setting can add them to the organization. Platform administrators never sign in through a provider. See [Identity federation](/docs/operate/identity-federation).

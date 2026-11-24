@@ -1,0 +1,43 @@
+{
+  "name": "@deployments-ai/docs",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "scripts": {
+    "build": "bun run check:samples && bun run build:site && bun run check:content && bun run check:site",
+    "build:site": "bun run generate && next build",
+    "check:content": "bun scripts/check-content.ts",
+    "check:samples": "bun scripts/check-samples.ts",
+    "check:site": "bun scripts/check-site.ts",
+    "dev": "bun run generate && next dev",
+    "generate": "bun scripts/generate-reference.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@agentifiers/deployments-cli": "workspace:*",
+    "@agentifiers/deployments-sdk": "workspace:*",
+    "@deployments-ai/api-contract": "workspace:*",
+    "citty": "0.2.2",
+    "fumadocs-core": "16.16.1",
+    "fumadocs-mdx": "15.4.6",
+    "fumadocs-openapi": "12.3.0",
+    "fumadocs-ui": "16.16.1",
+    "next": "16.4.6",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@mdx-js/mdx": "3.1.1",
+    "@tailwindcss/postcss": "4.3.2",
+    "@types/bun": "1.4.4",
+    "@types/mdast": "4.0.4",
+    "@types/mdx": "2.0.14",
+    "@types/node": "26.1.1",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "postcss": "8.5.28",
+    "tailwindcss": "4.3.2",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,177 @@
+---
+title: "Providers and connections"
+description: "Connect third-party providers through OAuth apps or static credentials, verify connections, and grant them to agents."
+---
+
+A provider is a third-party service the platform knows how to call, such as a messaging API or a vendor-hosted MCP server. A connection is one authorized account at a provider in one environment. A grant lets agent runs in a workspace use that connection. Agents reach provider tools, vendor MCP tools, MCP extension tools, and HTTP callback tools only through a grant.
+
+## The provider catalog
+
+The catalog is code-owned and the same in every environment. `GET /v1/providers` and `GET /v1/providers/:providerKey` need no authentication. Each provider reports:
+
+| Field                            | Meaning                                                                                             |
+| -------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `key`, `displayName`, `category` | Identity. `metadata.aliases` lists other keys that resolve to it.                                   |
+| `route`                          | How the platform reaches the provider (table below).                                                |
+| `status`                         | `planned`, `configured`, `verified`, or `unsupported`.                                              |
+| `authMethods`                    | The credential kind, such as `oauth`, `api_key`, `basic`, or `none`.                                |
+| `supportedScopes`                | Scopes a connection can hold.                                                                       |
+| `supportedTools`                 | Catalog tools that use this provider.                                                               |
+| `verification`                   | How the platform verifies a connection.                                                             |
+| `metadata.mcpServer`             | For vendor-hosted MCP servers, the pinned URL, authorization kind, and client registration methods. |
+
+| Route                                                          | Meaning                                                                    |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `platform_api_credential`                                      | The platform calls the provider's API with a static credential.            |
+| `platform_oauth`                                               | The platform calls the provider's API with an OAuth token.                 |
+| `vendor_mcp`                                                   | The vendor hosts an MCP server. See [MCP servers](/docs/capabilities/mcp). |
+| `platform_webhook`                                             | The provider calls the platform, or the platform calls your endpoint.      |
+| `mcp_gateway`, `sandbox_tool`, `manual_browser`, `unsupported` | Not connectable through this API.                                          |
+
+<Callout type="warn" title="Availability">
+  Only providers with status `configured` accept OAuth apps, credentials, connections, and extension
+  provider keys. Other statuses fail with `provider_unavailable`. Run `deployments provider list` to
+  see each provider's status.
+</Callout>
+
+## Resources
+
+| Resource     | Path                               | Purpose                                                                        |
+| ------------ | ---------------------------------- | ------------------------------------------------------------------------------ |
+| OAuth app    | `/v1/oauth-apps`                   | Your OAuth client registration for a provider.                                 |
+| Credential   | `/v1/credentials`                  | A connection backed by a static credential you supply.                         |
+| Connection   | `/v1/connections`                  | An authorized provider account, OAuth or static.                               |
+| Verification | `/v1/connections/:id/verify`       | A check that the connection's credential works.                                |
+| Capability   | `/v1/connections/:id/capabilities` | The scopes a successful verification recorded.                                 |
+| Grant        | `/v1/connection-grants`            | Permission for runs in one workspace, or every workspace, to use a connection. |
+
+Secrets you submit (client secrets, API keys, tokens) go to the [credential vault](/docs/capabilities/credential-vault). Responses report only `hasClientSecret` or `hasCredential`.
+
+## Connect with OAuth
+
+1. Register an OAuth app with your client ID, client secret, redirect URIs, and requested scopes. The requested scopes must be a subset of the provider's. Vendor MCP providers can also accept a `registration` of `{ "method": "pre_registered" }` with an optional `tokenEndpointAuthMethod` of `none`, `client_secret_basic`, or `client_secret_post`. Some vendor MCP providers register a client automatically, so you can skip this step for them.
+2. Start authorization with `POST /v1/connections`. The response has an `authorizationUrl` and an `expiresAt`. The attempt expires after 10 minutes.
+3. Open the URL in a browser and consent. The provider calls the platform's callback, which exchanges the code and creates the connection with its token credential.
+
+`returnTo` (CLI `--return-url`) is optional. It must be an absolute `https` URL whose origin is on the deployment's allowlist of return origins, without userinfo or a fragment, or the request fails with 422 `invalid_return_to`. The callback then answers 303 to that URL:
+
+| Outcome           | Query parameters added         |
+| ----------------- | ------------------------------ |
+| Connected         | `connection_id` and `provider` |
+| The user declined | `error=access_denied`          |
+| Any other failure | `error=authorization_failed`   |
+
+Without `returnTo`, the callback shows a static result page.
+
+When a deployment serves the management console, its origin is on the allowlist, so the console can start an authorization and receive the result.
+
+The platform refreshes OAuth tokens on demand. Before the API or the agent worker uses a connection whose access token expires within 120 seconds, it refreshes the token. When the provider refuses the refresh, the connection needs re-authorization.
+
+## Connect with a static credential
+
+`POST /v1/credentials` creates a connection for a provider that does not use OAuth. OAuth providers fail with `invalid_auth_method`. The credential fields must match the provider's declared fields, or the request fails with `invalid_secret`. Rotate a credential with `POST /v1/credentials/:id/rotate` and the current `expectedVersion`.
+
+A rotation replaces the stored credential as a whole, so send every field. It revokes every active grant of the connection, marks its capabilities `stale`, clears its external account and `lastVerifiedAt`, and sets its status to `reauthorization-required`. The old credential cannot be restored. Until you verify the connection, create new grants, and update each deployment's `toolAuthorizations` to the new grant IDs, the runtime denies the tools that used the revoked grants. The [management console](/docs/getting-started/console#restore-grants-after-a-credential-rotation) runs these steps after a rotation.
+
+If a rotation fails partway, retry it with the same idempotency key and the same body. Until it finishes, the API refuses a new rotation with `rotation_cleanup_pending` and a verification with `connection_not_verifiable`.
+
+Providers that need no credential and no verification, such as `extension_callback` for HTTP callback tools, connect without a credential and get an active capability right away.
+
+## Verify a connection
+
+`POST /v1/connections/:id/verify` answers 202. The platform runs the check during the request, so the returned verification is already `verified` or `failed`. Read it again with `GET /v1/connection-verifications/:id`. A successful verification records a capability with the verified scopes. Vendor MCP connections verify by opening an MCP session. Success records the scopes `tools:read` and `tools:write`.
+
+| Resource     | Statuses                                                      |
+| ------------ | ------------------------------------------------------------- |
+| Connection   | `active`, `reauthorization-required`, `error`, `disconnected` |
+| Verification | `pending`, `executing`, `verified`, `failed`, `revoked`       |
+| Capability   | `active`, `stale`, `revoked`                                  |
+
+## Grant a connection to agents
+
+A grant names a connection, a workspace, a purpose, granted scopes, and optional `externalResourceConstraints`. The runtime uses only active grants whose purpose is `agent-runtime`. `workspaceId` is a required key. Set it to a workspace ID, or to `null` for an [environment grant](#grant-every-workspace-in-an-environment).
+
+| Rule                                                                          | Error code                                             |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------ |
+| The connection is active.                                                     | `connection_inactive`                                  |
+| The connection has at least one active capability. Verify it first.           | `connection_not_verified`                              |
+| Granted scopes are verified capability scopes that the connection also holds. | `invalid_scope`                                        |
+| The workspace exists in the environment.                                      | `resource_not_found`                                   |
+| A `null` workspace names a connection that uses no credential.                | `environment_grant_requires_credentialless_connection` |
+
+The grant ID is the `authorizationId` in a deployment's `toolAuthorizations`. See [Tools and tool policies](/docs/capabilities/tools). Revoking a connection also revokes its active grants. See [Organizations, projects, and environments](/docs/capabilities/tenancy) for workspaces.
+
+### Grant every workspace in an environment
+
+A grant with `workspaceId: null` lets runs in every workspace of the environment use the connection, including workspaces created later. The API answers with `workspaceId: null` for these grants. A run that has no workspace still cannot use any grant.
+
+Only a connection whose provider needs no credential and no verification can get an environment grant. `extension_callback` is one. Every other connection, and every MCP extension connection, fails with 422 `environment_grant_requires_credentialless_connection`. A credential belongs to one external account. An environment grant on it would let every workspace act as that account, so a credentialed connection needs one grant per workspace. An `extension_callback` connection stores no secret. Each HTTP callback extension keeps its own callback secret, and the receiver gets the run's workspace in every request.
+
+```bash
+curl -X POST "$DEPLOYMENTS_API_URL/v1/connection-grants" \
+  -H "authorization: Bearer $DEPLOYMENTS_API_KEY" \
+  -H "x-deployments-environment: $ENVIRONMENT_ID" \
+  -H "idempotency-key: $(uuidgen)" \
+  -H "content-type: application/json" \
+  -d '{"connectionId":"'"$CONNECTION_ID"'","purpose":"agent-runtime","scopes":["callback:draft:propose"],"workspaceId":null}'
+```
+
+With the CLI, pass `--all-workspaces` instead of `--workspace`. `deployments grant create` needs exactly one of the two.
+
+```bash
+deployments grant create --connection $CONNECTION_ID --all-workspaces \
+  --purpose agent-runtime --scopes callback:draft:propose
+```
+
+The platform checks the provider again each time a run uses an environment grant. If a provider's definition later needs a credential, its existing environment grants stop authorizing runs. Workspace grants on the same connection keep working.
+
+## Permissions
+
+Provider catalog reads need no credential. Reading OAuth apps, credentials, connections, verifications, capabilities, and grants needs `providers:read`. Creating, rotating, verifying, syncing, and revoking them needs `providers:write`.
+
+## Use it
+
+1. Find the provider and its scopes.
+
+   ```bash
+   deployments provider list
+   deployments provider show $PROVIDER_KEY
+   ```
+
+2. Connect it. For OAuth, open the returned `authorizationUrl` in a browser.
+
+   ```bash
+   deployments connection authorize --provider $PROVIDER_KEY --return-url https://app.example.com/connected
+   ```
+
+   For a static credential, read the secret from an environment variable:
+
+   ```bash
+   deployments credential create --name "Messaging" --provider $PROVIDER_KEY --credential-env PROVIDER_API_KEY
+   ```
+
+3. Verify the connection and check its scopes.
+
+   ```bash
+   deployments connection verify $CONNECTION_ID
+   deployments capability list $CONNECTION_ID
+   ```
+
+4. Grant it to a workspace for agent runs.
+
+   ```bash
+   deployments grant create --connection $CONNECTION_ID --workspace $WORKSPACE_ID \
+     --purpose agent-runtime --scopes messages:send
+   ```
+
+5. Put the grant ID in the deployment's `toolAuthorizations` and deploy.
+
+## Use the management console
+
+The [management console](/docs/getting-started/console#manage-connections) covers the same steps. Open **Connections** under **Connect** and click **Add connection**. For an OAuth provider, **Authorize** opens the provider's consent page, and the platform returns you to the console with the new connection. Verify and grant the connection from its page. A grant needs a workspace, which you can create on the **Workspaces** screen under **Access**. The **OAuth apps** tab registers the OAuth apps that providers need and shows the redirect URI to give each provider. **Reauthorize** on an OAuth connection moves its grants and deployment pins to a new authorization.
+
+## Reference
+
+- API: [List providers](/docs/api/reference/providers/list-providers), [Register an OAuth app](/docs/api/reference/providers/create-provider-application), [Begin provider authorization](/docs/api/reference/providers/begin-provider-authorization), [Create a credential](/docs/api/reference/providers/create-provider-credential), [Request verification](/docs/api/reference/providers/request-connection-verification), [Create a grant](/docs/api/reference/providers/create-connection-grant)
+- CLI: [`deployments provider`](/docs/cli/reference/provider#provider-list), [`deployments oauth-app`](/docs/cli/reference/oauth-app#oauth-app-register), [`deployments connection`](/docs/cli/reference/connection#connection-authorize), [`deployments credential`](/docs/cli/reference/credential#credential-create), [`deployments grant`](/docs/cli/reference/grant#grant-create)
+- SDK: [Providers functions](/docs/sdk/reference#providers)

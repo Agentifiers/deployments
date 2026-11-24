@@ -1,0 +1,235 @@
+---
+title: "Extensions and hosted code"
+description: "Register your own tools as MCP, HTTP callback, client-executed, or hosted code extensions, and run your code in a platform sandbox."
+---
+
+Extension tools are tools you register in an environment so agents can call them alongside the platform catalog. Use an HTTP callback when the logic already runs behind your own endpoint, hosted code when you want the platform to run a small function for you, a client-executed tool when your app must do the work, and an MCP tool when the logic sits on an MCP server.
+
+## Execution types
+
+You choose the execution type when you create the extension. You cannot change it later (`extension_execution_type_immutable`).
+
+| `execution.type` | Where it runs                            | Policy binding | Notes                                                                                                                        |
+| ---------------- | ---------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `http_callback`  | Your public HTTPS endpoint               | `connection`   | Requires `providerKey` and `callbackSecret`.                                                                                 |
+| `hosted_code`    | A platform sandbox MicroVM, one per call | `catalog`      | JavaScript, TypeScript, or Python that you upload.                                                                           |
+| `client`         | Your caller (browser, app, device)       | `catalog`      | The run pauses until you submit the output. See [Approvals and client tools](/docs/capabilities/approvals-and-client-tools). |
+| `mcp`            | A custom MCP server you registered       | `connection`   | Read effect only. See [MCP servers](/docs/capabilities/mcp).                                                                 |
+| `vendor_mcp`     | A vendor-hosted MCP server               | `connection`   | Read-only in this API. Connection tool sync creates and updates them.                                                        |
+
+`connection` tools need a connection grant and `authorization: "workspace"` in the agent manifest. `catalog` tools are decided by the extension's own `defaultPolicyAction`, and environment tool policies do not apply to them. See [Tools and tool policies](/docs/capabilities/tools).
+
+## Common fields
+
+| Field                 | Rule                                                                                                                      |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `name`                | A tool name that no catalog tool uses (`tool_name_reserved`).                                                             |
+| `description`         | Required text the model sees.                                                                                             |
+| `effect`              | `read`, `write`, or `execute`. MCP extensions accept only `read`.                                                         |
+| `defaultPolicyAction` | `allow`, `require_approval`, or `deny`.                                                                                   |
+| `inputSchema`         | A JSON Schema with `type: "object"`. The `pattern` and `patternProperties` keywords are rejected (`unsafe_input_schema`). |
+| `requiredScopes`      | Scopes a grant must hold. With a `providerKey`, they must be scopes that provider supports.                               |
+| `outputSchema`        | Allowed only for client-executed and hosted code tools. Required for hosted code.                                         |
+
+Updates send the current `expectedVersion`. Archiving an extension disables the tool for every deployment that uses it.
+
+## HTTP callback tools
+
+The worker sends one `POST` to `endpointOrigin` plus `endpointPath` for each call, with `authorization: Bearer <callbackSecret>` and a JSON body. The platform stores the secret in the [credential vault](/docs/capabilities/credential-vault) and never returns it. HTTP callback extensions need a `providerKey`. The catalog provider `extension_callback` exists for this purpose and connects without a credential.
+
+The request body has `version: 1` and these fields:
+
+| Field                                                    | Meaning                                                                          |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `toolName`, `toolCallId`                                 | The tool and the call.                                                           |
+| `input`, `inputHash`                                     | The validated input and its hash.                                                |
+| `idempotencyKey`, `logicalIdempotencyKey`                | Use `idempotencyKey` to deduplicate side effects.                                |
+| `effect`, `policyAction`, `requiredScopes`, `approvalId` | How the call was authorized. `approvalId` is present when a person approved it.  |
+| `organizationId`, `runId`, `threadId`, `workspaceId`     | Where the call came from.                                                        |
+| `agentDeploymentId`                                      | Present for deployment runs.                                                     |
+| `executionBindingId`, `executionPurpose`                 | Present for preview and evaluation runs instead of `agentDeploymentId`.          |
+| `callbackEvidenceId`                                     | The platform's record of this dispatch.                                          |
+| `workspaceFiles`                                         | Present only when the extension declares workspace files.                        |
+| `origin`                                                 | Present only when the extension asks for it and channel ingress started the run. |
+
+These rules apply to every dispatch:
+
+| Rule          | Value                                                                                                                   |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Target        | Public HTTPS only. DNS is resolved and pinned for the connection, and redirects are not followed.                       |
+| Request size  | 256 KiB, including workspace files and `origin`                                                                         |
+| Response size | 1 MiB                                                                                                                   |
+| Timeout       | 30 seconds                                                                                                              |
+| Result        | The response body. The model sees the first 4,000 characters, and a private run artifact keeps up to 48,000 characters. |
+
+A response with status 408, 425, 429, or 5xx is retried for `read` tools. For `write` and `execute` tools the platform records the outcome as unknown and does not send the request again, so your endpoint never sees a duplicate mutation from a retry. Other non-2xx statuses fail the call. A response that contains the callback secret also fails the call.
+
+### Attach files from the thread sandbox
+
+An HTTP callback can send files the agent wrote in its thread sandbox, for example a site it built. Declare glob patterns relative to `/workspace` in `execution.workspaceFiles.include`:
+
+```json
+{
+  "type": "http_callback",
+  "endpointOrigin": "https://callbacks.example.com",
+  "endpointPath": "/v1/tools/publish",
+  "workspaceFiles": { "include": ["site/*.html", "site/*.css"] }
+}
+```
+
+You can list 1 to 16 patterns of up to 256 characters each. A pattern cannot be absolute, contain a `..` segment, or contain NUL (`invalid_workspace_files`). At dispatch time the call fails, without truncating anything, when:
+
+- the agent's sandbox mode is not `thread-persistent`,
+- more than 200 files match,
+- the text content of the matched files exceeds 196,608 bytes, or
+- the whole request exceeds 262,144 bytes.
+
+### Receive the chat origin of a run
+
+An HTTP callback can learn which channel binding and which chat sender started the run. Add `"origin"` to `execution.runContext`:
+
+```json
+{
+  "type": "http_callback",
+  "endpointOrigin": "https://callbacks.example.com",
+  "endpointPath": "/v1/tools/draft",
+  "runContext": ["origin"]
+}
+```
+
+`runContext` lists distinct values from `["origin"]` (`invalid_run_context`). Only HTTP callback extensions accept it (`run_context_unsupported`). An update that sends `execution` replaces the whole object, so include `runContext` to keep the opt-in.
+
+The request body then has an `origin` object when a channel binding's ingress started the run. A Slack thread message produces this one:
+
+```json
+"origin": {
+  "channelBindingId": "<channel-binding-id>",
+  "externalAccountId": "A07BOTAPP01",
+  "externalChannelId": "C07QK3MV9",
+  "externalMessageId": "slack:T024BE7LD:C07QK3MV9:1729700123.000200",
+  "externalThreadKey": "slack:T024BE7LD:thread:C07QK3MV9:1729700000.000100",
+  "externalWorkspaceId": "T024BE7LD",
+  "kind": "channel",
+  "provider": "slack_edge",
+  "sender": { "id": "U02ADA1OVE" }
+}
+```
+
+| Field                                      | Meaning                                                                                                                                                                           |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kind`                                     | `channel`. Treat an origin with a `kind` you don't know as absent.                                                                                                                |
+| `channelBindingId`                         | The channel binding whose ingress started the run.                                                                                                                                |
+| `provider`                                 | The channel provider, for example `slack_edge` or `teams_bot_framework`.                                                                                                          |
+| `externalAccountId`, `externalWorkspaceId` | The provider's app or bot account and its workspace or tenant. Each is present only when the provider reported it.                                                                |
+| `externalChannelId`, `externalThreadKey`   | The conversation and the thread in it.                                                                                                                                            |
+| `externalMessageId`                        | The message that started the run. Messages that one sender posts close together start a single run, and their combined ID starts with `burst:`.                                   |
+| `sender.id`, `sender.displayName`          | The person who wrote the message that started the run, as the provider identifies them. `displayName` is present only when the provider sent one. Slack message events send none. |
+
+The platform builds `origin` from its own records of the run and its prompt message. A caller of the public API cannot set it. These rules decide when it is present:
+
+- The extension lists `"origin"` in `runContext`.
+- A channel binding's ingress started the run, and the run's prompt message came from that same binding.
+- Every callback in that run carries the same `origin`, including a call that a person approved later.
+
+Runs started through the API have no `origin`, even when they continue a chat thread. Runs that an agent delegates have none either, even when the delegating run came from chat. Workflow steps have none. `version` stays `1`, and later releases can add fields to `origin` or new `kind` values. Ignore members you don't recognize.
+
+`origin.sender` is the person who sent the message that started the run. Ingress starts a new run when the sender changes, so that message has one sender. The model also sees earlier messages in the thread, and other people may have written them. Don't treat `origin.sender` as the author of everything the model read.
+
+Retrying a failed run (`POST /v1/runs/:id/retry`) keeps its `origin`, because the retry runs the same prompt message again. This holds even when an API caller asks for the retry.
+
+## Hosted code tools
+
+Hosted code runs a function you write in a fresh sandbox MicroVM for every call. The model supplies only the input. The code, entrypoint, limits, network mode, and secret names come from the agent release.
+
+The lifecycle has three steps:
+
+1. Upload the source as an immutable artifact (`POST /v1/hosted-code-artifacts`).
+2. Declare an extension with `execution.type: "hosted_code"` that names the artifact's `contentHash`.
+3. Publish an agent release whose manifest declares the tool. The release pins the tool.
+
+### Artifacts
+
+An artifact holds `javascript`, `typescript`, or `python` source of at most 1 MiB. The platform compiles TypeScript to JavaScript at upload time, so the runtime language is always `javascript` or `python`. A compile error fails the upload with `hosted_code_compile_failed`. The `contentHash` is `sha256:` plus the hex digest of the executable bytes. Uploading identical code again returns the existing artifact. The extension must reference an artifact in the same environment (`hosted_code_artifact_not_found`).
+
+### Execution settings
+
+| Field        | Default   | Limit                                                       |
+| ------------ | --------- | ----------------------------------------------------------- |
+| `entrypoint` | `handler` | Matches `[A-Za-z_][A-Za-z0-9_]{0,63}`                       |
+| `timeoutMs`  | 30000     | 100 to 50000                                                |
+| `memoryMiB`  | 256       | 128 to 2048                                                 |
+| `network`    | `none`    | `none` or `sandbox`                                         |
+| `secrets`    | none      | 1 to 16 entries. Values up to 4096 UTF-8 bytes without NUL. |
+
+Secret names match `^[A-Z][A-Z0-9_]{0,63}$`. The names `HOME`, `LANG`, `PATH`, `PWD`, `SHELL`, `TMPDIR`, `TZ`, and `USER` are reserved, as is any name that starts with `AWS_`, `DEPLOYMENTS_AI_`, `LD_`, `NODE_`, or `PYTHON`. The platform writes secret values to the credential vault and returns only `secretNames`.
+
+### Entrypoint contract
+
+The module exports (JavaScript) or defines (Python) the entrypoint. The worker validates the input against `inputSchema`, then calls the entrypoint with it. The function may be async and must return a JSON object of at most 64 KiB that matches `outputSchema`.
+
+```ts
+export async function handler(input: { lines: { amount: number }[] }) {
+  const total = input.lines.reduce((sum, line) => sum + line.amount, 0);
+  return { total };
+}
+```
+
+- Anything the code prints goes to stderr. Secret values of 4 or more characters are redacted from stdout and stderr.
+- A thrown error is a completed tool result that carries the error name and message and a non-zero exit code.
+- A timeout exits with code 124 and sets `timedOut: true`.
+- Input or output that fails its schema, or output over 64 KiB, fails the call.
+
+### Isolation and network
+
+Each call gets its own MicroVM, created for the call and destroyed after it. This holds even when the agent uses a `thread-persistent` sandbox, so the model's `code.execute` calls never share a machine with your code or its secrets. With `network: "none"` the code runs in a fresh network namespace with no network interfaces up. If the sandbox cannot enforce that, the call fails with "The sandbox could not isolate hosted code from the network, so the code did not run." With `network: "sandbox"` the code has the same network access as `code.execute`.
+
+### Release pinning
+
+Publishing a release snapshots every active hosted code tool the manifest declares, in the same transaction as the release. The snapshot records the artifact version, the content hash, the schemas, the limits, the network mode, and the secret names. A release can pin at most 32 hosted code tools. Later edits to the extension take effect only in a new release. Secret values are the exception. Each call reads the current values of the pinned secret names from the vault. Runs without a pin cannot use the tool.
+
+Publishing fails when the manifest declares a hosted code tool and:
+
+| Error code                                 | Cause                                                                          |
+| ------------------------------------------ | ------------------------------------------------------------------------------ |
+| `hosted_code_tool_without_sandbox`         | The sandbox mode is `none`. Hosted code needs an `aws_lambda_microvm` sandbox. |
+| `hosted_code_tool_workspace_authorization` | The tool's capability sets `authorization: "workspace"`.                       |
+| `too_many_hosted_code_tools`               | More than 32 hosted code tools.                                                |
+
+Promoting a release to another environment requires an active hosted code tool with the same name and content hash there (`hosted_code_tool_unavailable`, `hosted_code_tool_mismatch`). Preview runs created from an inline manifest pin hosted code tools the same way. See [Preview runs](/docs/capabilities/previews).
+
+## Use it
+
+1. Upload the code and create or update its extension in one command. `tool upload` infers the language from the file extension (`.js`, `.mjs`, `.cjs`, `.ts`, `.mts`, `.py`). On create it defaults to `--effect read`, `--default-action allow`, and no scopes.
+
+   ```bash
+   deployments tool upload ./invoice-total.ts --name invoice.total \
+     --description "Totals invoice lines." \
+     --input-schema ./input.json --output-schema ./output.json \
+     --timeout-ms 10000 --network none --secret BILLING_API_TOKEN
+   ```
+
+   A bare `--secret NAME` reads the environment variable `NAME`. Use `NAME=env:VAR` or `NAME=file:PATH` to read another source.
+
+2. Declare `invoice.total` in the agent manifest with an `aws_lambda_microvm` sandbox, then publish and deploy a release.
+
+3. Register an HTTP callback tool instead, if your logic runs on your own endpoint.
+
+   ```bash
+   deployments extension create --name orders.lookup --description "Look up an order." \
+     --effect read --default-action allow --provider extension_callback \
+     --scopes '["callback:context:read"]' \
+     --execution '{"type":"http_callback","endpointOrigin":"https://callbacks.example.com","endpointPath":"/orders/lookup"}' \
+     --input-schema '{"type":"object","properties":{"orderId":{"type":"string"}},"required":["orderId"]}' \
+     --callback-secret-env ORDERS_CALLBACK_SECRET
+   ```
+
+   Callback tools are connection tools, so create a connection and a grant for `extension_callback` too. See [Providers and connections](/docs/capabilities/providers-and-connections).
+
+The console's **Extensions** screen creates, edits, and archives extensions of every type, and uploads hosted code source for you. See [Manage extensions](/docs/getting-started/console#manage-extensions).
+
+## Reference
+
+- API: [Create an extension tool](/docs/api/reference/extensions/create-extension-tool), [Update an extension tool](/docs/api/reference/extensions/update-extension-tool), [Create a hosted code artifact](/docs/api/reference/extensions/create-hosted-code-artifact), [Get a hosted code artifact](/docs/api/reference/extensions/get-hosted-code-artifact)
+- CLI: [`deployments tool upload`](/docs/cli/reference/tool#tool-upload), [`deployments extension`](/docs/cli/reference/extension#extension-create), [`deployments hosted-code-artifact`](/docs/cli/reference/hosted-code-artifact#hosted-code-artifact-create)
+- SDK: [Extensions functions](/docs/sdk/reference#extensions)
+- Operators: [Sandbox runtime](/docs/operate/sandbox-runtime)

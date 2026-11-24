@@ -1,0 +1,59 @@
+{
+  "id": "gen-1791811527-EVqsgPmw44Y0C8VZUtHX",
+  "object": "chat.completion",
+  "created": 1791811527,
+  "model": "google/gemini-3.6-flash",
+  "provider": "Google",
+  "system_fingerprint": null,
+  "service_tier": "default",
+  "choices": [
+    {
+      "index": 0,
+      "logprobs": null,
+      "finish_reason": "tool_calls",
+      "native_finish_reason": "STOP",
+      "message": {
+        "role": "assistant",
+        "content": "The capitals of the given countries are:\n- **Germany**: Berlin (6 letters)\n- **Japan**: Tokyo (5 letters)\n- **Australia**: Canberra (8 letters)\n- **Canada**: Ottawa (6 letters)\n\nAmong these, **Canberra** has the most letters (8 letters). Now, getting the current weather for Canberra.",
+        "refusal": null,
+        "reasoning": null,
+        "tool_calls": [
+          {
+            "type": "function",
+            "index": 0,
+            "id": "call_276963",
+            "function": { "name": "get_weather", "arguments": "{\"city\":\"Canberra\"}" }
+          }
+        ],
+        "reasoning_details": [
+          {
+            "type": "reasoning.encrypted",
+            "data": "AY89a1+1CJ+d3yritt/B4W0mlXm7GoM+Aj95xvnMldUJekBHsL92pj4PdGYsvoh4C4b8NLOj6vIcPoaR8BN5TKclQOcDg7TsB5mExw2jiGizLrlIpce2U/usrNSBHFrtVX4utcHqPMineDZZ7zxYdUihqqFlZeasUPvm9veN429DjJvKyfL0odYeleJb+2L7iJ+hBfNqiuZQuCtjSeMkUfc66n49SWpOYKM/e/xJ3IblEeq9RX4RrsiIJJD0k5rYXIWJbxOFo/XLW0K5oANOPdzcxi0fRTitHJfttFACfujRMlfEmphYW3fsvshE7Z6OIqdgb3hqk4kNSSzC1rJUurF18/xgoN1fcsb+HplkJvku6dvkiWGxULsgc6dUpawmCAYDwAa8qMqJ/pkO4mdjSamu2JpuPqwyMHwx6ljKB9m6Mfdjyo8oAsL6nj3/JSYFp89WI+gdvzvr4RuZ89fNzto9Cx46g6s0Pb5nh8NUyS7RiQTuuuhRux/BGoXInQpfLkJxI73NrNpWR0q0k/zTT670Vau/WE3/nFhSL1duyYpMVVvsO3Z/Rjp37m+NijaOMXY7QuD1ScPURVkkm/213WjeFHx4zEja2uDv4igWjqO0Z9iVRgGNVWGHYaiv5ZBEYUNd77qKjlB5psuEimTnsAhppnaeUcF7aNuBcXvVLz6V3MEkaKxouk2DAT2f7cRznm6jARWL0vry/9K0fTFxa8dg+EO0TuGVtwzBQvdvVyeXMfPkbkXDWfMU9mZ7OvnD2VMhUbevTxhm42+YCYfX75JTygMjHIAp20wWL4VDILNO05hugIyBwWYjCe//3D4=",
+            "format": "google-gemini-v1",
+            "id": "call_276963",
+            "index": 0
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 97,
+    "completion_tokens": 248,
+    "total_tokens": 345,
+    "cost": 0.00100275,
+    "is_byok": false,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0,
+      "audio_tokens": 0,
+      "video_tokens": 0
+    },
+    "cost_details": {
+      "upstream_inference_cost": 0.00100275,
+      "upstream_inference_prompt_cost": 0.00007275,
+      "upstream_inference_completions_cost": 0.00093
+    },
+    "completion_tokens_details": { "reasoning_tokens": 158, "image_tokens": 0, "audio_tokens": 0 }
+  }
+}

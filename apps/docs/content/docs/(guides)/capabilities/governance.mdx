@@ -1,0 +1,238 @@
+---
+title: "Data governance"
+description: "Set retention, export or erase an organization's data, export a signed audit log, and read audit events."
+---
+
+Data governance controls how long an organization's data stays in the platform and gives you a copy or a guaranteed deletion of all of it. You set a retention policy per data class, request a full tenant export, request a tenant erasure, and export a tamper-evident audit log that you can verify without trusting the platform.
+
+Every governance operation acts on one organization. Exports and erasures are asynchronous jobs. You create one, receive `202` with an operation, and poll the operation until it finishes.
+
+## Access rules
+
+Each request names the organization twice, in the path and in the `x-deployments-organization` header. The two must match, or the request fails with `403 organization_scope_violation`.
+
+| Operation                                | Scope              | Organization role for people |
+| ---------------------------------------- | ------------------ | ---------------------------- |
+| Read the retention policy and operations | `governance:read`  | Any member                   |
+| Update the retention policy              | `governance:write` | `owner` or `admin`           |
+| Create a tenant export or audit export   | `governance:write` | `owner` or `admin`           |
+| Create a tenant erasure                  | `governance:write` | `owner`                      |
+| Read organization audit events           | `audit:read`       | Any member                   |
+
+Every change requires an idempotency key. A person without the required role receives `403 insufficient_role`. Platform administrators bypass the role check. API keys are governed by their scopes alone, with one exception: tenant erasure.
+
+## Retention
+
+A retention policy sets, in whole days, how long each class of data stays:
+
+| Class       | Default | Allowed range |
+| ----------- | ------- | ------------- |
+| `threads`   | 365     | 1 to 3,650    |
+| `messages`  | 365     | 1 to 3,650    |
+| `runs`      | 365     | 1 to 3,650    |
+| `artifacts` | 365     | 1 to 3,650    |
+| `events`    | 365     | 1 to 3,650    |
+| `audit`     | 2,555   | 365 to 3,650  |
+
+An organization without a saved policy uses the defaults. An update changes only the classes you send, and must send at least one. A scheduled job applies every organization's policy once a day. Retention never removes an active run or the records tied to it, such as its thread and messages, or an active workflow execution. An artifact with its own retention expiry is removed at that time instead of by the policy.
+
+Memory and Brain search telemetry (recall attempts, memory retrievals, Brain query attempts, and Brain retrievals) and every semantic event except a thread's carry their expiry from the moment they are written: the record's creation time plus the `runs` period for telemetry, or the `events` period for events, plus 48 hours. Telemetry written by a run or in a thread, and an attempt still running, stays with the daily sweep, which keeps it while its work is active. When you lengthen `runs` or `events`, the platform raises the expiry of records already written within minutes, soonest-expiring first, so none expires before its new deadline. Shortening either class removes older records at the next daily sweep. An expired record stays at most 48 hours past its deadline, no API or export returns it after its expiry, and the database removes it within a few days.
+
+## Tenant export
+
+A tenant export writes every record the organization owns into one newline-delimited JSON file, ordered deterministically. Objects that records reference, such as artifact files, are included as verified base64 bytes. Sandbox workspace archives are the exception: the workspace record is exported, but the archive bytes are not.
+
+One export holds at most 1,000,000 records, 10,000 referenced objects, and 2 GiB of referenced object bytes. A larger tenant fails with `tenant_export_too_large` or `tenant_export_too_many_blobs`. A completed export reports the file name, size, and SHA-256 digest, plus a short-lived download URL. Fetch the operation again for a fresh URL.
+
+## Tenant erasure
+
+Tenant erasure deletes the organization. It removes the organization's records and the object versions they reference, purges the organization from the memory and Brain search indexes, and purges its observability data when the installation runs observability. Automated snapshots of the memory search index keep copies of the purged memories for up to 14 days, and erasure finishes without waiting for them to expire. Erasure then keeps only a pseudonymized receipt: hashes of the organization and the requester, the audit chain root hash, the completion time, the number of records deleted, and the time the memory search backups expire, when the organization had a memory search index.
+
+<Callout type="error" title="Erasure is permanent">
+  Erasure cannot be undone. After it finishes, the organization's API keys stop working, and
+  governance requests and organization audit reads for the organization return `410
+  organization_erased`.
+</Callout>
+
+A request to erase must meet all of these conditions:
+
+- The caller signed in through platform identity. API keys receive `403 erasure_requires_signed_identity`, because erasure deletes them and they could not poll the result.
+- The caller holds the `owner` role, or is a platform administrator.
+- The body is exactly `{ "confirmation": "ERASE" }`.
+- No run in the organization is active. Otherwise the job fails with `tenant_has_active_runs`.
+- No `abuse` hold is on the organization, because it preserves evidence. A new request then fails with `403 organization_suspended`, and an erasure accepted before the hold stays `pending` until the hold is released.
+
+Erasure has no size limit. A large organization erases over several background runs of about ten minutes each, and between runs the operation reads `pending`. Each run resumes where the last one stopped, including after a crash. The receipt's record count and audit hash cover every run.
+
+An organization has one erasure. Repeating the request as the same person returns the same operation, and another person receives a conflict. After erasure finishes, the requester's signed-in session can still poll the operation and replay the request, and nothing else. When the organization had a memory search index, the completed operation reports when its backups expire. When the installation runs observability, the completed operation also reports how many observability rows were deleted and the times by which observability backups and superseded data files expire.
+
+Existing immutable audit exports are not deleted early. They stay locked until their own retention boundary.
+
+## Thread and end-user erasure
+
+To delete one conversation, or every conversation of one of your end users, without erasing the organization, use the runtime erasure routes described in [Threads and runs](/docs/capabilities/threads-and-runs#erase-a-thread-or-an-end-user). They act inside one environment, need the `runs:erase` or `end-users:erase` scope, and a person also needs the `owner` or `admin` role. Unlike tenant erasure, API keys can start them, because the keys survive. These erasures appear in the [operation history](#operation-history) as `thread-erasure` and `end-user-erasure`.
+
+An erasure runs in phases and reports the current one: `planning`, `mail`, `fencing`, `automations`, `memory`, `canonical`, `ingress`, `streams`, `objects`, `observability`, and `finalizing`. It deletes the agent email mail the conversation came from, cancels the timers of the thread's schedules and heartbeats, purges the thread's memories from memory search, deletes the thread's records and the objects that only they reference, deletes channel messages staged for the thread, deletes the thread's stream, and purges the thread's traces when the installation runs observability.
+
+Agent email mail is erased up to the moment you requested the erasure. A thread erasure deletes every message of the inbox threads that fed the conversation, received and sent, with its attachments, and the drafts that answer it. An end-user erasure for an email correspondent deletes every inbox thread that holds a message naming the address on From, To, Cc, Bcc, or Reply-To, and every draft addressed to it, including mail that never started a conversation. It also erases the conversations that mail fed. Mail that arrives later survives, and so does the inbox thread when it still holds later mail. When several agents answer the same inbox, the mail is stored once. Erasing one agent's conversation deletes the shared mail, and the other agents keep their own conversations. The erasure reports `emailMessagesErased` and `emailThreadsErased`.
+
+Some records survive by design:
+
+- Audit events, which name the thread and its runs by ID only.
+- Spend and meter records, which carry IDs and amounts.
+- A tombstone that stops anyone from writing to or recreating the thread.
+- The completed erasure, which holds counts and no end-user ID or pseudonym.
+- Agent email suppressions, recipient verifications, and inbox usage.
+- A record of each erased email message and inbox thread, holding IDs only, that refuses a late or repeated delivery of that mail.
+
+Some data is outside a thread's reach:
+
+- An email correspondent's mail that is still arriving while the erasure starts can be stored after it, when it is in an email thread the erasure did not reach.
+- Mail an agent sends from a conversation that did not start from email is reached by an end-user erasure of a recipient, not by erasing the thread.
+- Mail deleted earlier by retention can be stored again if the provider redelivers it.
+- Copies of agent email events already delivered to your EventBridge consumers are not recalled.
+- `runsCanceled`, `ingressRecordsDeleted`, and `objectsStaged` can undercount if a worker crashes during their phase.
+- A canceled run that was still executing keeps running until its worker notices. Nothing it writes afterward is stored.
+
+## Immutable audit export
+
+An audit export captures the organization's audit events into two files:
+
+- An archive in JSON Lines. Each line holds one audit event as `value`, plus `previousHash` and `entryHash`. The first `previousHash` is 64 zeros, and each `entryHash` is the SHA-256 of `previousHash`, a newline, and the canonical JSON of `value`.
+- A manifest with the record count, the chain `rootHash`, the archive's digest, size, and version, the retention boundary `retainedUntil`, the signing key ID, the public key, and an ECDSA P-256 signature over the rest of the manifest.
+
+Both files are encrypted and written with a compliance-mode object lock until `retainedUntil`, so nobody can change or delete them before then. The completed operation reports a short-lived download URL and a SHA-256 digest for each file.
+
+To verify an export, check each file's digest against the operation, walk the hash chain, compare the final hash with `rootHash`, and check the signature. Canonical JSON sorts object keys in code-unit order and omits undefined values:
+
+```ts
+import { createHash, createPublicKey, verify } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const entries = Object.entries(value)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`).join(",")}}`;
+}
+
+const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+
+let previousHash = "0".repeat(64);
+for (const line of readFileSync("audit-records.jsonl", "utf8").split("\n").filter(Boolean)) {
+  const entry = JSON.parse(line);
+  const entryHash = sha256(`${previousHash}\n${canonicalJson(entry.value)}`);
+  if (entry.previousHash !== previousHash || entry.entryHash !== entryHash) {
+    throw new Error("The hash chain is broken.");
+  }
+  previousHash = entryHash;
+}
+
+const { signature, ...unsigned } = JSON.parse(readFileSync("audit-manifest.json", "utf8"));
+if (unsigned.rootHash !== previousHash) throw new Error("The root hash does not match.");
+const publicKey = createPublicKey({
+  key: Buffer.from(unsigned.signaturePublicKey, "base64"),
+  format: "der",
+  type: "spki",
+});
+const signed = verify(
+  "sha256",
+  Buffer.from(canonicalJson(unsigned)),
+  publicKey,
+  Buffer.from(signature, "base64"),
+);
+console.log(signed ? "The audit export is authentic." : "The signature does not verify.");
+```
+
+## Operation history
+
+`listGovernanceOperations` lists the organization's tenant exports, tenant erasures, audit exports, thread erasures, and end-user erasures, newest first. Filter by `kind` (`audit-export`, `end-user-erasure`, `tenant-erasure`, `tenant-export`, or `thread-erasure`) and `status` (`pending`, `running`, `completed`, `failed`, or `canceled`). An export or tenant erasure item matches what the operation's own status route returns, including download URLs. A filtered page can hold fewer than `limit` items and still return a `nextCursor`.
+
+A thread or end-user erasure item has the same fields as the erasure that `getThreadErasure` or `getEndUserErasure` returns: `id`, `status`, `environmentId`, `threadId` for a thread erasure, `phase`, `counts`, `createdAt`, `updatedAt`, `completedAt` once it completes, and `error` only when it failed. Its `kind` is `thread-erasure` or `end-user-erasure` instead of `thread` or `end-user`. The item never names the end user.
+
+## Audit events
+
+The platform writes audit events in the same transaction as the change they record. Each event appears in exactly one of two lists:
+
+- `listAuditEvents` reads one environment. These events carry `projectId` and `environmentId`, and cover activity inside the environment.
+- `listOrganizationAuditEvents` reads organization administration. These events carry no environment. Project and environment lifecycle events name the project in `projectId` and the environment in `resourceId`.
+
+Both lists return newest first and accept `since`, `until`, `actor`, `resource`, and `event` filters. An event has an `action`, an `actor` whose `type` is `principal`, `service-account`, `agent`, `worker`, or `system`, the affected resource, optional `changes`, and hashes of the source IP address and user agent.
+
+Organization audit actions include `organization.created`, `organization-member.role-updated`, `project.archived`, `environment.archived`, `retention-policy.updated`, `tenant-export.requested`, `audit-export.requested`, and `tenant-erasure.requested`.
+
+A platform administrator who is not a member can read or change the organization's data only after opening [operator access](/docs/operate/system-operator#operator-access) to it. The log records `organization.operator-access-opened`, `organization.operator-access-renewed`, and `organization.operator-access-closed`, with the administrator as the actor and the reason, ticket, and expiry in `changes`. An event the administrator causes while access is open carries `actor.operatorAccessGrantId`, the `grantId` of that access. Organization audit events are tenant data. Audit exports and tenant exports include them, the `audit` retention class governs them, and erasure deletes them.
+
+## Use it
+
+In the [console](/docs/getting-started/console#govern-organization-data), **Data governance** and the two **Audit log** screens do the same without the CLI. These commands take the organization ID as an argument. It must match the organization in your CLI context. See [Configuration and context](/docs/cli/configuration).
+
+1. Show the retention policy, then keep messages and runs for 90 days:
+
+   ```sh
+   deployments governance retention-show "$ORGANIZATION_ID"
+   deployments governance retention-update "$ORGANIZATION_ID" --messages 90 --runs 90
+   ```
+
+2. Request an audit export and poll it until `status` is `completed`:
+
+   ```sh
+   deployments governance audit-export "$ORGANIZATION_ID"
+   deployments governance audit-export-status "$ORGANIZATION_ID" "$OPERATION_ID"
+   ```
+
+3. Request a tenant export and poll it the same way:
+
+   ```sh
+   deployments governance tenant-export "$ORGANIZATION_ID"
+   deployments governance tenant-export-status "$ORGANIZATION_ID" "$OPERATION_ID"
+   ```
+
+4. Read the organization audit log for the last week:
+
+   ```sh
+   deployments audit organization-list "$ORGANIZATION_ID" --since 2026-09-27T00:00:00.000Z
+   ```
+
+5. Erase the organization. First sign in as an owner with `deployments auth login`, because an API key cannot start an erasure. In a terminal the command asks you to confirm. In scripts or with `--json`, pass `--yes`:
+
+   ```sh
+   deployments governance erase "$ORGANIZATION_ID"
+   deployments governance erasure-status "$ORGANIZATION_ID" "$OPERATION_ID"
+   ```
+
+The audit export request with the SDK:
+
+```ts
+import {
+  createClient,
+  createConfig,
+  createImmutableAuditExport,
+} from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data, error } = await createImmutableAuditExport({
+  client,
+  path: { id: "org_123" },
+  headers: {
+    "x-deployments-organization": "org_123",
+    "idempotency-key": crypto.randomUUID(),
+  },
+});
+console.log(data?.id, data?.status);
+```
+
+## Reference
+
+- API: [updateOrganizationRetentionPolicy](/docs/api/reference/governance/update-organization-retention-policy), [createTenantDataExport](/docs/api/reference/governance/create-tenant-data-export), [createTenantErasure](/docs/api/reference/governance/create-tenant-erasure), [getTenantErasure](/docs/api/reference/governance/get-tenant-erasure), [createImmutableAuditExport](/docs/api/reference/governance/create-immutable-audit-export), [getImmutableAuditExport](/docs/api/reference/governance/get-immutable-audit-export), [listGovernanceOperations](/docs/api/reference/governance/list-governance-operations), [listAuditEvents](/docs/api/reference/operations/list-audit-events), and [listOrganizationAuditEvents](/docs/api/reference/operations/list-organization-audit-events).
+- CLI: [`deployments governance`](/docs/cli/reference/governance) and [`deployments audit`](/docs/cli/reference/audit).
+- SDK: [Governance functions](/docs/sdk/reference#governance) and [Operations functions](/docs/sdk/reference#operations).
+- Related: [Organizations, projects, and environments](/docs/capabilities/tenancy) and [Authentication](/docs/getting-started/authentication).

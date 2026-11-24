@@ -1,0 +1,268 @@
+---
+title: "Release registry"
+description: "Keep built release bundles in your own S3 registry with signed records, retain the ones you deploy, and fetch, verify, and roll back to them with the deploy tool."
+---
+
+The release registry is an S3 bucket in an AWS account you own that keeps every release bundle you publish, so you can redeploy, repair, or roll back an installation long after the machine or CI run that built the bundle is gone. A release is keyed by its digest, the SHA-256 of its `release.json`. The same digest is the `releaseManifestSha256` in the [installation record](/docs/operate/deployment#the-installation-record).
+
+The `infrastructure/modules/release-registry` OpenTofu module creates the registry. The deploy tool's `release` commands publish to it, fetch from it, retain releases, verify them, and check rollbacks. Run them from the repository root as `bun run deploy -- release <command>`. Every command that reads or writes the bucket takes the registry's region from `AWS_REGION`, then `AWS_DEFAULT_REGION`, then the `region` of the AWS profile that `AWS_PROFILE` selects, or of the `default` profile. When none of these sets a region, the command fails with an error that names them.
+
+## What the registry holds
+
+Every object of a release lives under `releases/<digest>/` in the bucket:
+
+- Every bundle file at its bundle path: `release.json`, `build-info.json`, the Lambda archives, the console assets archive, and the image archives under `images/`.
+- `release-record.json`, written after every bundle file. A release exists only once its record exists.
+- `release-record.sig.json`, written after the record when signing is configured. It holds an ECDSA P-256 signature over the raw record bytes.
+
+`release build` writes `build-info.json` beside `release.json` with the build time. The record copies that `builtAt`, and the registry orders releases by it.
+
+The record also holds the source commit, a label of the form `YYYY.MM.DD-<first 7 hex characters of the commit>`, the publish time, the CI run ID when you pass one, the SHA-256 and size of every file, the [compatibility](#rollback-barriers) with the previous release, and the deployer image when you pass one.
+
+### Write rules and retention
+
+Every write is create-only, with `If-None-Match: *` and a SHA-256 checksum. The bucket policy:
+
+- Denies object deletion to every principal. Only the lifecycle removes objects.
+- Denies object writes without `If-None-Match`, so no one can overwrite an object.
+- Denies every object write by a principal other than the publisher role.
+- Denies retagging an object tagged `retention=customer`.
+- Lets principals other than the publisher set only `retention=customer`.
+- Denies an `object` tag on a record or a signature.
+- Denies requests that do not use TLS.
+
+Publish tags every object `retention=dev`, and every bundle file also `object=payload`. The lifecycle expires objects that carry both tags `dev_retention_days` after publish, 180 by default. It never expires a record or a signature, and it never expires a `retention=customer` object. An unretained release therefore loses its bundle files after the retention period and keeps its record and signature forever. Nobody can make a retained release expire.
+
+A release whose record remains but whose files are gone has expired. `release fetch`, `release verify`, `release retain`, and `release rollback-check` report a missing file as an expired release.
+
+## Set up the registry
+
+You can run one registry per environment. For example, a registry in the dev account receives every release that passes a dev deploy, and a registry in the production account receives only the releases you promote. Each registry has its own bucket, signing key, and publisher role. Installations fetch from one registry and trust only that registry's signing key.
+
+The module keeps key and bucket policy administration with the account, so any identity there whose IAM policy allows `kms:PutKeyPolicy` or `s3:PutBucketPolicy` could grant itself signing or lift the write restrictions. When installations trust a registry's signing key, put that registry in an account where no CI or operator identity can change the key policy or the bucket policy. For example, give deploy roles a permissions boundary with explicit denies on those actions, and require the same boundary on every role they create. A registry whose key no installation trusts, such as a dev registry, can share an account with workloads.
+
+1. Call the module from an OpenTofu root of your own. It requires OpenTofu 1.13 or later and the `hashicorp/aws` provider from 6.55.0 up to, but not including, 7.0.
+
+   ```hcl
+   module "release_registry" {
+     source = "../../deployments/infrastructure/modules/release-registry"
+
+     bucket_name       = "example-platform-releases"
+     github_subject    = "<GitHub OIDC subject prefix>:environment:production"
+     reader_role_names = ["release-reader"]
+   }
+   ```
+
+2. Apply the root with administrator credentials for the registry account. If the account already has the GitHub Actions OIDC provider, pass it as `github_oidc_provider_arn` so the module does not create a second one.
+
+3. Export the signing public key for everyone who verifies releases. `RELEASE_SIGNING_PUBLIC_KEY` takes the path of a PEM file:
+
+   ```bash
+   aws kms get-public-key --key-id alias/platform-release-signing --query PublicKey --output text | base64 --decode | openssl pkey -pubin -inform DER -out release-signing.pem
+   ```
+
+4. Give the reader policy to each role or user in the registry account that fetches, verifies, retains, or rollback-checks releases. The module attaches it to every role in `reader_role_names`. Attach `reader_policy_arn` yourself to any other identity.
+
+### Inputs
+
+| Variable                   | Default                           | Purpose                                                                                                                                                           |
+| -------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bucket_name`              | none                              | The globally unique bucket that stores releases.                                                                                                                  |
+| `github_subject`           | none                              | The full GitHub OIDC subject the publisher role trusts. It must start with `repo:` and name an environment or a ref. See [Publish a release](#publish-a-release). |
+| `reader_role_names`        | `[]`                              | Roles in the registry account that get the reader policy.                                                                                                         |
+| `github_oidc_provider_arn` | `null`                            | An existing `token.actions.githubusercontent.com` OIDC provider in the account. `null` creates one.                                                               |
+| `dev_retention_days`       | `180`                             | Days after publish when bundle files tagged `retention=dev` expire. A positive whole number.                                                                      |
+| `publisher_role_name`      | `platform-release-publisher`      | The IAM role GitHub Actions assumes to publish.                                                                                                                   |
+| `reader_policy_name`       | `platform-release-reader`         | The managed policy for readers.                                                                                                                                   |
+| `signing_key_alias`        | `alias/platform-release-signing`  | The alias of the signing key. It must start with `alias/` and must not start with `alias/aws/`.                                                                   |
+| `deployer_repository_name` | `deployer` under the image prefix | The ECR repository for the [deployer image](#run-the-deployer-image), under the same prefix as the default platform image repositories.                           |
+| `tags`                     | `{}`                              | Additional resource tags.                                                                                                                                         |
+
+### Outputs
+
+| Output                     | Value                                                    |
+| -------------------------- | -------------------------------------------------------- |
+| `bucket_name`              | The release bucket. Pass it as `--bucket`.               |
+| `bucket_arn`               | The bucket's ARN.                                        |
+| `signing_key_arn`          | The signing key. Set it as `RELEASE_SIGNING_KMS_KEY_ID`. |
+| `signing_key_alias`        | The signing key's alias.                                 |
+| `publisher_role_arn`       | The role your publish job assumes.                       |
+| `reader_policy_arn`        | The managed policy for readers.                          |
+| `deployer_repository_url`  | The ECR repository URL of the deployer image.            |
+| `github_oidc_provider_arn` | The GitHub Actions OIDC provider the publisher trusts.   |
+
+### What the module creates
+
+| Resource            | Configuration                                                                                                                                                                                                                                                                          |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Release bucket      | Versioned, AES-256 encrypted, all public access blocked, bucket-owner-enforced ownership, and never force-destroyed. Lifecycle rules expire `dev` payloads, remove their noncurrent versions after one day, clean up expired delete markers, and abort multipart uploads after 7 days. |
+| Signing key         | An asymmetric `ECC_NIST_P256` KMS key for signing and verification, with a 30-day deletion window. Only the publisher role may call `kms:Sign`. The account administers the key without signing, and IAM policies in the account may grant `kms:GetPublicKey`.                         |
+| Deployer repository | An ECR repository with immutable tags, scan on push, and AES-256 encryption.                                                                                                                                                                                                           |
+| Publisher role      | Trusts GitHub Actions OIDC tokens whose audience is `sts.amazonaws.com` and whose subject is `github_subject`. Sessions last at most one hour. It may list the bucket, read, write, and tag release objects, sign with the key, read its public key, and push the deployer image.      |
+| Reader policy       | May list the bucket, read release objects and their tags, tag release objects, read the signing public key, and pull the deployer image. The module attaches it to each role in `reader_role_names`.                                                                                   |
+
+The bucket policy has no statement that admits other accounts, so readers belong to the registry account.
+
+## Publish a release
+
+The bucket policy lets only the publisher role write, and the role trusts only GitHub Actions jobs whose OIDC subject is `github_subject`. GitHub gives a job that names an environment the subject `<prefix>:environment:<name>`. A push or dispatch job without an environment gets `<prefix>:ref:<ref>`, such as `<prefix>:ref:refs/heads/main`. `<prefix>` is `repo:<owner>/<repository>` by default. A repository that customizes its OIDC subject must keep the `repo:` prefix, because the module rejects a `github_subject` that does not start with `repo:`.
+
+When you run one registry per environment, give each publisher role the environment form for its own environment. Two publisher roles that trust the same ref subject both accept every job on that ref.
+
+Publish from a job with that subject. It needs permission to request an OIDC token, and it assumes `publisher_role_arn` before it publishes.
+
+1. Check out with full history. Publish compares the release with the previous one by running `git diff` between their commits, so both must be in the checkout.
+2. Build the bundle. See [Build a release bundle](/docs/operate/deployment#build-a-release-bundle).
+
+   ```bash
+   bun run deploy -- release build
+   ```
+
+3. Optionally build the [deployer image](#run-the-deployer-image), push it to `deployer_repository_url`, and note its digest.
+4. Publish, with `RELEASE_SIGNING_KMS_KEY_ID` set to `signing_key_arn`:
+
+   ```bash
+   bun run deploy -- release publish --bundle .artifacts/deployment --bucket example-platform-releases --ci-run-id "$GITHUB_RUN_ID" --deployer-image "<repository>@sha256:<digest>"
+   ```
+
+| Flag               | Rules                                                                                               |
+| ------------------ | --------------------------------------------------------------------------------------------------- |
+| `--bundle`         | Required. The bundle directory.                                                                     |
+| `--bucket`         | Required. The registry bucket.                                                                      |
+| `--ci-run-id`      | Optional. A positive integer recorded as `ciRunId`.                                                 |
+| `--deployer-image` | Optional. Must be pinned by digest as `<repository>@sha256:<64 hex>`. Recorded as `deployer.image`. |
+
+`release publish` verifies the bundle first. It refuses a bundle that fails verification, lacks `build-info.json`, lacks any image archive that `release.json` lists, or contains a file outside the bundle layout. It signs the record when `RELEASE_SIGNING_KMS_KEY_ID` is set. KMS signs the record's SHA-256 digest with `ECDSA_SHA_256`, and publish checks the signature against the key's public key before it writes the record. The command prints the release digest on stdout.
+
+### Install-supplied console builds
+
+A registry holds only releases that ship the platform console, because installations deploy what they fetch from it. `release publish` refuses a bundle whose `release.json` names an [install-supplied console build](/docs/operate/deployment#ship-your-own-console-build) before it reads or writes the registry:
+
+```text
+Refusing to publish <digest>: its console is an install-supplied build, and customers install releases from the registry. Publish the platform build of <source commit> instead, built by release build without DEPLOYMENTS_AI_CONSOLE_OUTPUT_DIR.
+```
+
+No flag overrides the refusal. Build the same commit again without `DEPLOYMENTS_AI_CONSOLE_OUTPUT_DIR` and publish that bundle. Deploy your own console build from its local bundle.
+
+### Reruns
+
+A rerun after a failure converges:
+
+- When the release has no record yet, publish uploads every file again. An object that already exists counts as uploaded only when its stored SHA-256 equals the local file. Otherwise publish fails.
+- Publish signs a new record before it writes it, so a signing failure leaves no record.
+- When the record already exists, publish uploads nothing and never rewrites the record. It keeps the stored `compatibility`, `publishedAt`, and `ciRunId`, and it keeps the stored `deployer` when you pass no `--deployer-image`. Any other field that differs from what this run would write fails the publish, and the error names the differing fields. A `--deployer-image` that differs from the stored `deployer` also fails it. A rerun therefore converges after the bucket gained other releases, and a later job can publish the same release again without the deployer image.
+- When signing is configured and the record has no signature, publish adds one. A stored signature that does not verify with the key fails the publish.
+- When two publishes write the same object at once, one fails with `Another publish is writing <key>; rerun the publish.`
+
+## Fetch a release and deploy it
+
+Download a release for one root profile into an empty directory:
+
+```bash
+RELEASE_SIGNING_PUBLIC_KEY=release-signing.pem bun run deploy -- release fetch --bucket example-platform-releases --release <digest> --bundle .artifacts/release --profile platform-customer
+```
+
+`--release` must be the 64-hex digest. `--profile` leaves out the image archives that the profile does not deploy. Without `--profile`, every image is fetched. The command refuses a directory that already holds a different release. The deploy tool reads `release.json` versions 3 and 4, and it reads a version 3 release as one that ships the platform console. To fetch and verify a release with an older `release.json`, run the deploy tool from a checkout of that release's source commit or from its deployer image.
+
+When `RELEASE_SIGNING_PUBLIC_KEY` is set, the command verifies the record's signature before it downloads anything and refuses an unsigned release. It refuses an expired release before it writes anything, with `Release <label> (<digest>) has expired: the lifecycle removed <n> of its <total> files.` It checks every downloaded file against the record, writes `release-record.json` and `release-record.sig.json` into the bundle, verifies the bundle the way `deploy` does, and prints the bundle directory.
+
+To deploy the fetched bundle, run the deploy tool from a clean checkout of the release's source commit, which the record and `release.json` name as `sourceCommit`, or from the deployer image built at that commit:
+
+```bash
+RELEASE_SIGNING_PUBLIC_KEY=release-signing.pem bun run deploy -- deploy --target production.json --bundle .artifacts/release
+```
+
+With `RELEASE_SIGNING_PUBLIC_KEY` set, `deploy` and `lambdas deploy` require the bundle's `release-record.json`, a signature that verifies with the key, and a record that names the bundle's `release.json`, before any side effect. A bundle you built locally has no record, so leave the variable unset for it. Both commands verify only the image archives of the target's profile. See [Deploying the platform](/docs/operate/deployment) for the pipeline.
+
+## Retain a release
+
+Retain every release you deploy, so the lifecycle never expires it:
+
+```bash
+bun run deploy -- release retain --bucket example-platform-releases --release <digest>
+```
+
+The command retags every bundle file and the signature `retention=customer`, and bundle files keep their `object=payload` tag. It retags the record last, so a record tagged `retention=customer` means every file is retained. It prints `retained <digest>: retagged <n> of <total> objects`. A rerun retags nothing. The command refuses an unpublished release and an expired one, and an expired release's record stays `retention=dev`. Retention is permanent: the bucket policy denies retagging a retained object.
+
+## Verify a release
+
+Verify a local bundle:
+
+```bash
+bun run deploy -- release verify --bundle .artifacts/release
+```
+
+The bundle form verifies `release.json` and every file the bundle holds against it, checks the record's signature when `RELEASE_SIGNING_PUBLIC_KEY` is set, and prints the digest, the source commit, and the images the bundle lacks. For a bundle with an install-supplied console build, the line ends with `; console: install-supplied build`.
+
+Verify a release in the registry without downloading its payloads:
+
+```bash
+bun run deploy -- release verify --bucket example-platform-releases --release <digest>
+```
+
+The registry form checks the record, the signature when `RELEASE_SIGNING_PUBLIC_KEY` is set, the digest of `release.json`, and the size and checksum S3 stored for every file in the record. When the lifecycle has removed any file, the command reports that the release has expired. Pass `--bundle` or `--bucket` with `--release`, not both.
+
+## Check a rollback
+
+Before an installation goes back from the running release to an older one, run:
+
+```bash
+RELEASE_SIGNING_PUBLIC_KEY=release-signing.pem bun run deploy -- release rollback-check --bucket example-platform-releases --from <running digest> --to <target digest>
+```
+
+The command exits non-zero with `Rollback refused.` and every reason when:
+
+- The target is not published, or any of its files has expired.
+- With `RELEASE_SIGNING_PUBLIC_KEY` set, the target or the running release is unsigned or its signature does not match.
+- The running release is not published, so its barriers are unknown.
+- The target was built after the running release.
+- A release the rollback crosses is a [rollback barrier](#rollback-barriers).
+- The chain from the running release to the target has a gap.
+
+The command follows each record's `compatibility.comparedWith` from the running release back to the target. The rollback crosses every release on that chain except the target. Each one's barrier covers the changes since the release it was compared with, and a record that is not on the chain adds no barrier.
+
+The chain has a gap when a release on it was compared with no earlier release, names a release with no record in the bucket, or names a release built outside the span between the target and itself. With `RELEASE_SIGNING_PUBLIC_KEY` set, a named release that is unsigned or whose signature does not match is also a gap. Barriers behind a gap are unknown, so the rollback is refused.
+
+The command walks the chain using only records and signatures, which never expire, so an expired release on the chain still contributes its barrier. The target itself must still have every file.
+
+When the rollback is allowed, the command prints `rollback allowed <digest>` and, when the target names one, `deployer <image>`. Then [fetch and deploy](#fetch-a-release-and-deploy-it) the target from its own source commit.
+
+## Rollback barriers
+
+When publish writes a record, it compares the release with the newest published release that was built earlier. When a signing key or `RELEASE_SIGNING_PUBLIC_KEY` is available, only releases whose signature verifies count. The record stores that release as `compatibility.comparedWith`, the reasons below as `compatibility.reasons`, and `compatibility.rollbackBarrier`, which is `true` exactly when there is a reason.
+
+| Reason             | Cause                                                                          | Why it blocks a rollback                                 |
+| ------------------ | ------------------------------------------------------------------------------ | -------------------------------------------------------- |
+| `terraform-moved`  | A `*.tf` file gained a `moved` block.                                          | An older root would plan destroys at the new addresses.  |
+| `record-schema`    | A file under `packages/db/src/records/` changed.                               | Older code rejects records with fields it does not know. |
+| `deploy-migration` | A file matching `scripts/platform-deploy/*-migration.ts` was added or changed. | The deploy migrated stored data forward.                 |
+
+`release compat` prints the reasons between two commits as JSON with `rollbackBarrier` and `reasons`:
+
+```bash
+bun run deploy -- release compat --from <older commit> --to <newer commit>
+```
+
+If you change the deploy tool to migrate stored data, put that step in a file named `scripts/platform-deploy/<name>-migration.ts` so the check sees it.
+
+## Run the deployer image
+
+`--deployer-image` records an image that holds the deploy tool at the release's commit. `infrastructure/deployer/Dockerfile` builds it with Bun, Node, OpenTofu 1.13.2, the AWS CLI, `crane`, the repository's dependencies, and a provider mirror for every OpenTofu root in the repository. The image has no `.git`, so the build argument `PLATFORM_SOURCE_COMMIT` names the commit, and the deploy tool's source check reads it instead.
+
+```bash
+docker build -f infrastructure/deployer/Dockerfile --build-arg PLATFORM_SOURCE_COMMIT="$(git rev-parse HEAD)" -t platform-deployer:local .
+```
+
+The entrypoint is the deploy tool, and the working directory is `/work`. The deployer repository is a private ECR repository in the registry's account, so log Docker in to it before the run. Use the same registry-account credentials with the reader policy that `release retain`, `release rollback-check`, and `release fetch` need:
+
+```bash
+aws ecr get-login-password --region <registry region> | docker login --username AWS --password-stdin <registry account>.dkr.ecr.<registry region>.amazonaws.com
+```
+
+Then switch to the deploy role's credentials for the target account. Mount your target, var files, bundle, and signing public key in `/work`, and pass those credentials:
+
+```bash
+docker run --rm -v "$PWD:/work" -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -e AWS_REGION -e RELEASE_SIGNING_PUBLIC_KEY=/work/release-signing.pem <image> deploy --target target.json --bundle bundle --result result.json
+```
+
+`deploy` copies image archives into the target account's ECR with `crane`, so the container needs no Docker socket. OpenTofu in the image installs providers only from its built-in mirror, so a root you keep outside the repository must use providers that mirror holds.

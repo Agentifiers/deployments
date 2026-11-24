@@ -1,0 +1,141 @@
+---
+title: "Tear down an installation"
+description: "Remove an installation from your AWS account: what deletion protection retains, the order to destroy the installation root and the account bootstrap, and what stays behind afterwards."
+---
+
+Tearing down an installation removes the installation root with `tofu destroy`, then the account bootstrap. The deploy tool has no destroy command, so you run OpenTofu yourself. Several stores outlive the destroy on purpose: deletion protection retains the platform's data, KMS keys and secrets wait out a deletion window, and immutable audit exports stay locked until their retention ends. Read this page before you start, because some of what it removes cannot be recovered.
+
+## Before you start
+
+- **Export what you need.** Destroying the root deletes the DynamoDB tables, search domains, and, without deletion protection, the artifact bucket and its objects. Organizations can request tenant data exports first; see [Governance](/docs/capabilities/governance).
+- **Use the deploy role.** Run the root's destroy as the bootstrap's deploy role, the same identity that deploys. Destroy the bootstrap last, with an administrator session, because the bootstrap owns the deploy role and the state bucket.
+- **Keep a copy of the state.** The state bucket is versioned, so earlier state versions stay until you empty the bucket.
+
+## What deletion protection does
+
+`operations.deletion_protection` chooses between two variants of each stateful resource. With it `true`, OpenTofu refuses to destroy these resources, because each carries `prevent_destroy`:
+
+| Resource                                               | Address suffix in state                            |
+| ------------------------------------------------------ | -------------------------------------------------- |
+| Platform data KMS key                                  | `aws_kms_key.data_protected`                       |
+| Artifact bucket, `artifacts-<account id>`              | `aws_s3_bucket.artifacts_protected`                |
+| Governance bucket, `governance-<account id>`           | `aws_s3_bucket.governance_protected`               |
+| Governance export signing key                          | `aws_kms_key.governance_signing_protected`         |
+| Semantic events table in S3 Tables                     | `aws_s3tables_table.semantic_events_protected`     |
+| Observability history table in S3 Tables, when enabled | `aws_s3tables_table.agent_observability_protected` |
+| Glue catalog that mounts the S3 table buckets          | `aws_glue_catalog.s3tables_protected`              |
+| Identity token signing key                             | `aws_kms_key.signing_protected`                    |
+| Identity federation key                                | `aws_kms_key.federation_protected`                 |
+| Identity web OAuth client secret                       | `aws_secretsmanager_secret.web_client_protected`   |
+| End-user subject key of the agent runtime              | `random_password.end_user_subject_protected`       |
+| Durable Streams file system                            | `aws_efs_file_system.data_protected`               |
+| Observability hot plane data volume, when enabled      | `aws_ebs_volume.data_protected`                    |
+
+Deletion protection also sets AWS-side protection that `tofu destroy` cannot bypass: DynamoDB deletion protection on the platform tables, deletion protection on the model runtime's load balancer, and deletion protection with a final snapshot on the agent-built apps database. It also leaves `force_destroy` off on the platform's S3 buckets and S3 table buckets, so OpenTofu cannot delete one that holds objects. Without deletion protection, every one of them except the governance bucket is created with `force_destroy`, so a destroy deletes its contents.
+
+Two load balancers have their own switch, each `true` by default whatever `operations.deletion_protection` says: `durable_streams_deletion_protection_enabled` and `stream_gateway_deletion_protection_enabled`. Set them to `false` and deploy once before you destroy.
+
+Turning `deletion_protection` off on an existing installation does not remove the protection. OpenTofu would have to destroy each protected variant to create the unprotected one, and `prevent_destroy` stops that plan.
+
+## What stays after a destroy
+
+| What                                     | Why it stays                                                                                                                                                                                                                                                                                                                                 |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Immutable audit exports                  | The governance bucket has S3 Object Lock, and the platform writes audit exports in `COMPLIANCE` mode. No one, including the account root user, can delete a locked object version before its retention date. OpenTofu never sets `force_destroy` on this bucket, so the bucket stays until it is empty.                                      |
+| KMS keys                                 | AWS schedules a destroyed key for deletion after its window: `operations.kms_deletion_window_days`, from 7 through 30. The protected identity signing and federation keys use 30 days. Data encrypted under a key cannot be read after it is deleted.                                                                                        |
+| Secrets Manager secrets                  | A destroyed secret waits out `operations.secret_recovery_window_days` before it is deleted. Its name stays taken until then, so a new installation in the same account and region fails to create a secret with the same name. Restore it, or delete it immediately with `aws secretsmanager delete-secret --force-delete-without-recovery`. |
+| ECR repositories                         | The deploy tool creates the image repositories with the AWS CLI, outside OpenTofu. They are the defaults in [Write a deployment target](/docs/operate/deployment#write-a-deployment-target), or the names in your target's `ecrRepositories`.                                                                                                |
+| `/identity/oauth-clients-bootstrapped`   | The deploy tool writes this SSM parameter after the identity client bootstrap. OpenTofu does not manage it.                                                                                                                                                                                                                                  |
+| `/identity/*-oauth-client`               | The identity client bootstrap writes these SecureString parameters. OpenTofu names them but does not manage them.                                                                                                                                                                                                                            |
+| The state bucket and the bootstrap roles | The account bootstrap owns them. See [Destroy the account bootstrap](#destroy-the-account-bootstrap).                                                                                                                                                                                                                                        |
+| Your DNS zone and API certificate        | You created them before the install. OpenTofu removes only the records and certificates it created.                                                                                                                                                                                                                                          |
+| CloudFront default connection group      | With agent-built apps on, OpenTofu creates a multi-tenant CloudFront distribution for app domains. If the account has none yet, CloudFront then creates a default connection group for the account. The CloudFront API cannot disable or delete it.                                                                                          |
+
+The root also manages resources that apply to the whole account and region: the OpenSearch service-linked role, the active SES receipt rule set, the SES account suppression settings, and the cost anomaly monitor. The destroy deletes them with everything else, which affects anything else in the account that relied on them. This is one reason the [install guide](/docs/operate/install) asks for a dedicated account.
+
+## Destroy the installation root
+
+### Initialize the root
+
+Use the backend settings the deploy tool uses, with your target's state bucket, state key, and region:
+
+```bash
+tofu -chdir=infrastructure/environments/customer init \
+  -backend-config=bucket=<state bucket> \
+  -backend-config=key=platform/<name>/terraform.tfstate \
+  -backend-config=region=<region> \
+  -backend-config=encrypt=true \
+  -backend-config=use_lockfile=true
+```
+
+Run from a checkout of the commit the installation runs, its `sourceCommit` in `deployments system installation`. An older or newer configuration can plan changes the state does not expect.
+
+### Recreate the generated variables
+
+OpenTofu checks variable validation on destroy too, so it needs the variables the deploy tool generated on the last deploy, in addition to your var files. The tool does not keep its generated file, so write one, such as `generated.tfvars.json`:
+
+| Variable                                                         | Value                                                                                                                                                                                                                     |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `aws_account_id`, `aws_region`                                   | From the target.                                                                                                                                                                                                          |
+| `platform_identity_enabled`                                      | `true`. The deploy tool always sets it.                                                                                                                                                                                   |
+| `platform_identity_publish_domain`                               | `true` once the identity domain was published.                                                                                                                                                                            |
+| Each `*_image`                                                   | The digest-pinned URIs in the `images` of `deployments system installation`, or in the `--result` file of the last deploy.                                                                                                |
+| Each `*_artifact_bucket`, `*_artifact_key`, `*_artifact_version` | The bucket is `artifacts-<account id>`. The key is `releases/sha256/<archive SHA-256>/<archive name>.zip`, with the SHA-256 from the installation record's `lambdaArtifacts`. The version is that object's S3 version ID. |
+
+### Release or keep the protected resources
+
+Whatever the posture, first set the two load balancer switches above to `false` and run a normal deploy, so the destroy can remove those load balancers. With `operations.deletion_protection` set to `false`, that is all this step needs.
+
+With it `true`, `tofu destroy` fails at plan time on the first `prevent_destroy` resource and changes nothing. List the protected resources and remove each one from state. OpenTofu then forgets them, and they stay in your account:
+
+```bash
+tofu -chdir=infrastructure/environments/customer state list | grep '_protected'
+tofu -chdir=infrastructure/environments/customer state rm '<address>'
+```
+
+Then decide, for each AWS-protected resource, whether to keep or delete it:
+
+- To delete a DynamoDB table, turn off its deletion protection first, for example with `aws dynamodb update-table --table-name <table> --no-deletion-protection-enabled`. To keep it, remove it from state.
+- To delete the model runtime's load balancer, set its `deletion_protection.enabled` attribute to `false` with `aws elbv2 modify-load-balancer-attributes`.
+- With deletion protection, no platform bucket or table bucket has `force_destroy`. Empty each one you want deleted, including every object version, or remove it from state to keep it.
+
+### Drain app domain tenants
+
+With agent-built apps on, every verified or active app domain is a CloudFront distribution tenant of the multi-tenant distribution. CloudFront refuses to disable or delete that distribution while any tenant remains, so a destroy, or any change that replaces the distribution, fails until the tenants are gone. The `apps-domains` reconciler is the only writer of these tenants and their certificates, so drain them through it:
+
+1. Detach every app domain with `deployments app-domain detach`, or erase the apps that hold them. A detach queues the reconciler, which disables the tenant within seconds.
+2. Wait for the next runs of the `apps-domains` schedule, every 5 minutes. A run deletes each disabled tenant once CloudFront finishes deploying it, about 3 minutes after the disable, and a later run deletes its CloudFront-managed certificate once nothing uses it. To run one now, invoke the function with `{"kind":"sweep"}`.
+3. Check that the distribution has no tenants left: `aws cloudfront list-distribution-tenants --association-filter DistributionId=<distribution id>`. The `DomainTenants` metric in the `DeploymentsAI/Apps` namespace also reaches 0.
+
+The reconciler changes and deletes only tenants and certificates tagged `deployments:managed-by=apps`, and it tags only certificates that CloudFront requested for its own creates. Delete any other tenant on the distribution yourself: disable it, wait until its status is `Deployed`, then delete it.
+
+### Run the destroy
+
+```bash
+tofu -chdir=infrastructure/environments/customer destroy \
+  -var-file=<your var file> \
+  -var-file=generated.tfvars.json
+```
+
+Pass your var files first and the generated file last, as the deploy tool does. Read the plan before you confirm it. When a resource fails, fix the cause and run the destroy again; OpenTofu continues from the current state.
+
+### Clean up what remains
+
+Delete what you do not want to keep: the resources you removed from state, the ECR repositories, the `/identity/oauth-clients-bootstrapped` parameter, and the `/identity/*-oauth-client` parameters. Empty a versioned bucket by deleting every object version and delete marker before you delete the bucket. Schedule a retained KMS key for deletion only after you no longer need any data it encrypts.
+
+## Destroy the account bootstrap
+
+The bootstrap keeps local state, the `terraform.tfstate` you stored when you applied it. Its state bucket has no `force_destroy` and is versioned, so OpenTofu cannot delete it while it holds any object version. Empty it first, including every noncurrent version and delete marker.
+
+Then destroy the bootstrap with an administrator session in the account, from the directory that holds its state and with the variables you applied it with:
+
+```bash
+cd infrastructure/bootstrap/customer
+tofu destroy \
+  -var aws_account_id=<account-id> \
+  -var aws_region=<region> \
+  -var environment_name=<name> \
+  -var deploy_principal_arn=<deploying principal ARN>
+```
+
+Pass `observer_principal_arn` and `external_id` too if you set them. The destroy removes the deploy role, the observer role, the permissions boundary, and the state bucket.

@@ -1,0 +1,261 @@
+---
+title: "Observability hot plane"
+description: "Operate the ClickHouse node and the hot-plane service behind the observability API: choose its image, seed and rebuild the data, back it up, watch its alarms, size it, recover it, and upgrade it."
+---
+
+The observability hot plane answers the observability API's trace, span, metric, and export queries. It is one ClickHouse server on an EC2 instance and one ECS service, `apps/observability-hot-plane`, that writes execution facts from the observability Kinesis stream into ClickHouse and serves queries over a private API. The module is `infrastructure/modules/observability-clickhouse`. This page is for operators who run an installation. [Observability](/docs/capabilities/observability) describes the API that tenants call.
+
+<Callout type="info" title="Availability">
+  The customer root turns the hot plane on by default, with observability history. A new
+  installation seeds itself; queries return `503 observability_initializing` only until the writer
+  catches up. Turning it on in an installation whose observability stream is a day old or older
+  needs one run of the [rebuild script](#seed-and-rebuild). With the hot plane off, every
+  observability operation returns `503 observability_unavailable`.
+</Callout>
+
+## Components
+
+| Component         | What it is                                                                                                                                                                           |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| ClickHouse node   | An ARM64 EC2 instance named `agent-observability-hot` in the first private subnet. It has no public IP, requires IMDSv2, and runs ClickHouse under `systemd`.                        |
+| Data volume       | A separate encrypted gp3 EBS volume, `agent-observability-hot-data`, mounted at `/var/lib/clickhouse`. It outlives the instance.                                                     |
+| Hot-plane service | The ECS Fargate service `agent-observability-hot` in its own cluster, one ARM64 task. It writes facts and serves the internal API at `http://hot-plane.observability.internal:3000`. |
+| Checkpoint table  | The DynamoDB table `agent-observability-hot-checkpoints`, which records how far the writer has read each Kinesis shard. It has point-in-time recovery.                               |
+| Backup bucket     | The versioned S3 bucket `agent-observability-clickhouse-backups-<account ID>` for native ClickHouse backups and rebuild exports.                                                     |
+| Private DNS       | The Cloud Map namespace `observability.internal`. `clickhouse.observability.internal` resolves to the node and `hot-plane.observability.internal` to the task.                       |
+| Credentials       | SSM SecureString parameters under `/agent-observability-hot/<environment>/`: the ClickHouse user passwords, the TLS CA and server certificate, and the service token.                |
+| Alarms            | Six CloudWatch alarms, seven on a `t4g` node, and the dashboard `agent-observability-hot`. See [Alarms](#alarms).                                                                    |
+
+The platform API's observability function calls the hot-plane API with the service token. The hot-plane task reaches ClickHouse over HTTPS on port 8443, verifying the server certificate against the private CA. The node's security group admits port 8443 only from the hot-plane task, and the ClickHouse users the task connects as accept connections only from `network_cidr_block`. The task's security group admits port 3000 from the VPC CIDR.
+
+ClickHouse keeps spans for 30 days, and traces, run spans, and deletion records for 90 days. A table TTL deletes older rows.
+
+## Turn the hot plane on or off
+
+These variables of `infrastructure/environments/customer` control it:
+
+| Variable                                               | Default                       | Notes                                                                                                                                                                             |
+| ------------------------------------------------------ | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent_observability_history_enabled`                  | `true`                        | Required by the hot plane. It in turn requires `agent_runtime_enabled`.                                                                                                           |
+| `agent_observability_hot_enabled`                      | `true`                        | Creates the hot plane. Set `false` to run without it.                                                                                                                             |
+| `agent_observability_clickhouse_ami_id`                | `""`                          | Optional. An AMI for the node instead of the pinned Ubuntu image. See [Node image](#node-image).                                                                                  |
+| `agent_observability_clickhouse_instance_type`         | `t4g.medium`                  | A `t4g` size from `t4g.small` to `t4g.2xlarge`, or any `r7g` size. ClickHouse's memory cap follows it. See [Sizing](#sizing).                                                     |
+| `agent_observability_clickhouse_data_volume_size_gib`  | `20`                          | The data volume's size. Raise it to grow the volume online. A smaller value than the volume's current size keeps the current size.                                                |
+| `agent_observability_clickhouse_backup_retention_days` | `null`                        | Days native backups and data-volume snapshots are kept. `null` keeps the lesser of `operations.backup_retention_days` and 7. See [Backups and snapshots](#backups-and-snapshots). |
+| `agent_observability_hot_task_size`                    | `{ cpu = 256, memory = 512 }` | Fargate CPU units and MiB of the hot-plane task, any Fargate pair from 256/512 through 1024/8192.                                                                                 |
+
+You do not set `agent_observability_hot_image`. The deploy tool builds the `observability-hot-plane` image into the release bundle, publishes it, and passes its digest-pinned URI.
+
+These `operations` fields also shape the hot plane:
+
+| Field                   | Effect on the hot plane                                                                                                                                                                                    |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deletion_protection`   | Protects the data volume with `prevent_destroy` and a final snapshot, turns on EC2 termination protection and checkpoint-table deletion protection, and keeps the backup bucket from being force-destroyed |
+| `backup_retention_days` | Caps native backup and data-volume snapshot retention while `agent_observability_clickhouse_backup_retention_days` is `null`                                                                               |
+| `enhanced_monitoring`   | One-minute EC2 monitoring on the node and Container Insights on the cluster                                                                                                                                |
+| `fargate_spot`          | Fargate Spot capacity for the task                                                                                                                                                                         |
+| `operator_shell_access` | ECS Exec into the task                                                                                                                                                                                     |
+| `log_retention_days`    | Retention of the task's log group, `/ecs/agent-observability-hot`                                                                                                                                          |
+
+The customer root does not expose the remaining sizing inputs, so they keep their defaults: a 20 GiB root volume, a ClickHouse memory cap of 70 percent of the instance's RAM, and 72 hours of retention on the observability fact stream. To change one, pass `agent_observability_clickhouse_root_volume_size_gib`, `agent_observability_clickhouse_server_memory_bytes`, or `agent_observability_fact_stream_retention_hours` to `module "platform"` in your root. The data volume's 3,000 IOPS and 125 MiB/s throughput, the gp3 baseline, are fixed in the module.
+
+A deploy with `bun run deploy -- deploy --target acme.json` creates the hot plane. On a new installation the writer seeds it, as [How the writer works](#how-the-writer-works) describes, and nothing else is needed. When you turn it on in an installation whose observability stream is a day old or older, run the rebuild once after the deploy, as [Seed and rebuild](#seed-and-rebuild) describes. Until then, queries return `503 observability_initializing`.
+
+`deployments system components` reports the service as `observability-hot-plane`. See [System operator](/docs/operate/system-operator#component-health).
+
+## Node image
+
+With `agent_observability_clickhouse_ami_id` empty, the module looks up Canonical's newest Ubuntu 24.04 ARM64 image in the region at the first apply and keeps it, so a new Ubuntu release never replaces the node on a routine deploy. The node then installs ClickHouse at its first boot: it downloads the `clickhouse-common-static`, `clickhouse-server`, and `clickhouse-client` packages of the pinned release from `packages.clickhouse.com` and refuses any whose SHA-256 differs from the one recorded in `infrastructure/modules/observability-clickhouse/clickhouse-packages.json`. Nothing has to be built before a deploy.
+
+To run the node on another image, set `agent_observability_clickhouse_ami_id`. Setting it to a newer Ubuntu 24.04 ARM64 image moves the node to that image. You can also bake an image with ClickHouse already installed, which spares the node the ClickHouse download when it starts. The bake script builds it with Packer from `infrastructure/images/clickhouse/clickhouse.pkr.hcl`. Run it from a git checkout of the repository with AWS credentials for the account that will own the image. It needs Packer 1.11.0 or later, `jq`, and the AWS CLI. `AWS_REGION` selects the region and defaults to `us-east-2`.
+
+```bash
+AWS_REGION=us-east-2 bun run observability:clickhouse:ami:bake
+```
+
+The build starts a `t4g.small` from the latest Ubuntu 24.04 ARM64 image, installs the AWS CLI and the same checksum-pinned ClickHouse packages, leaves the ClickHouse service disabled, and removes any data the package created. It encrypts the image with the customer managed KMS key that `CLICKHOUSE_AMI_KMS_KEY_ID` names. Without that variable, it uses the key behind `alias/deployments-ai-ami`, and creates that key, with rotation on, the first time. The AMI is named `deployments-ai-clickhouse-<ClickHouse version>-<commit>`. The script waits until the AMI is available and prints its ID. Set that ID as `agent_observability_clickhouse_ami_id`.
+
+To bake in one account and deploy into another, share the AMI from the account that owns it:
+
+```bash
+bun run deploy -- release share-ami --ami <AMI ID> --account <installation account ID> --region us-east-2
+```
+
+The command grants the other account use of each customer managed KMS key that encrypts the AMI's snapshots, shares the snapshots, and then grants launch permission. It refuses an AMI whose snapshots use an AWS managed key, which the bake script never produces.
+
+## How the node starts
+
+A new instance runs a bootstrap script from its user data. The script fails closed:
+
+1. It installs helper packages with `apt-get` and the AWS CLI, so the node needs the private subnets' NAT egress. When the image does not already have ClickHouse, it downloads the pinned packages, checks each one's SHA-256, and installs them.
+2. It waits up to 4 minutes for the data volume to appear, matching the volume by its serial number.
+3. It refuses a volume whose filesystem is not XFS. It formats a volume only when the volume has no filesystem signatures and carries the tag `FilesystemState=uninitialized`, which OpenTofu sets on a new volume. It then tags the volume `initialized`.
+4. It mounts the volume by UUID at `/var/lib/clickhouse` with `noatime`. The `clickhouse-server` unit declares `RequiresMountsFor=/var/lib/clickhouse`, so ClickHouse never starts on an empty mount point, and raises the open file limit to 262,144.
+5. It writes the TLS material and user passwords from SSM, configures ClickHouse with HTTPS on port 8443, no plaintext HTTP port, and the ingest and query users limited to `network_cidr_block`, starts it, and creates the `observability` database.
+6. It starts the `agent-observability-health` timer, which every 5 minutes publishes `DataVolumeUsedPercent` and `BackupAgeHours` for the [alarms](#alarms).
+7. It publishes `BootstrapReady`. Every node metric goes to the CloudWatch namespace `DeploymentsAI/Observability` with an `Environment` dimension.
+
+The script runs only on an instance's first boot. A stop and start keeps the mount and the enabled service.
+
+## Access the node
+
+The node has no SSH listener. Its instance profile allows Systems Manager, so open a session with the `instance_id` from the root's `agent_observability_hot` output:
+
+```bash
+aws ssm start-session --target <instance_id>
+```
+
+On the node, the admin client configuration is in `/root/.clickhouse-client/config.xml`:
+
+```bash
+sudo clickhouse-client --config-file /root/.clickhouse-client/config.xml
+```
+
+| ClickHouse user        | Connects from | Can do                                                                                                                                     |
+| ---------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `default`              | The node only | Administration, backups, and rebuild imports                                                                                               |
+| `observability_ingest` | The VPC       | Create tables and views, insert, select, and delete in `observability`. Each query is limited to one thread and 512 MiB.                   |
+| `observability_query`  | The VPC       | Read-only `SELECT` on `observability`, with one thread, 20 seconds, 10,000 result rows, 10 MiB of results, and 256 MiB of memory per query |
+
+The hot-plane API runs at most two queries at once per organization and four in total per task. Requests over those limits fail with `429`.
+
+## How the writer works
+
+The hot-plane task creates the schema in ClickHouse, then reads every shard of the observability fact stream. It reads each shard at most once every 2 seconds, so it and the observability history projector stay inside the shard's read quota. For each batch, it drops facts for organizations that no longer exist, inserts the rest, and then records the last sequence number in the checkpoint table. It writes records it cannot decode to the observability quarantine bucket under `hot-writer/<shard>/<sequence>.json`.
+
+A failed insert stops the writer before it records the checkpoint, and the task exits so ECS starts a new one. The new task resumes from the checkpoint. Facts wait in Kinesis while ClickHouse is down, for up to the stream's retention.
+
+The query API reports ready only when the writer has caught up on every shard and ClickHouse's data generation matches the canonical seed recorded in the checkpoint table. Until then, queries return `503 observability_initializing`. If the generation in ClickHouse differs from the recorded seed, the writer refuses to consume facts and logs `ClickHouse generation does not match the durable canonical seed; run a full rebuild before consuming more facts.`
+
+The writer records the first seed itself when the stream still holds every fact it has carried, because then replaying the stream gives ClickHouse exactly what a rebuild would load. It does so only when no seed is recorded yet, the stream was created less than 24 hours ago, which is the shortest retention Kinesis offers, no shard has a writer checkpoint, and ClickHouse holds no other generation. That is the case on a new installation, where the stream and the hot plane come up in the same deploy. In every other case, the rebuild records the seed.
+
+A deploy stops the running task before it starts the new one, because the service allows at most one task. Queries fail for the length of the rollout.
+
+## Seed and rebuild
+
+`scripts/observability-clickhouse-rebuild.ts` rebuilds ClickHouse from observability history in Iceberg and replays the facts Kinesis still holds. Run it once after you turn the hot plane on in an installation whose observability stream is a day old or older, and again whenever the hot data is lost, out of date, or inconsistent. A new installation does not need it.
+
+The script reads the `agent_observability` and `agent_observability_hot` outputs with `tofu output`. The deploy tool initializes OpenTofu in a temporary directory, so initialize the root yourself first, with the same backend settings as your deployment target. The state key defaults to `platform/<target name>/terraform.tfstate`.
+
+```bash
+tofu -chdir=infrastructure/environments/customer init \
+  -backend-config=bucket=<state bucket> \
+  -backend-config=key=platform/acme/terraform.tfstate \
+  -backend-config=region=us-east-2 \
+  -backend-config=encrypt=true \
+  -backend-config=use_lockfile=true
+```
+
+Run it without `--execute` first. That prints the bucket, instance ID, and export prefix it would use, and changes nothing. Then run it with `--execute`:
+
+```bash
+bun run observability:clickhouse:rebuild -- --root infrastructure/environments/customer
+bun run observability:clickhouse:rebuild -- --root infrastructure/environments/customer --execute
+```
+
+| Flag                       | Meaning                                                                          |
+| -------------------------- | -------------------------------------------------------------------------------- |
+| `--root <dir>`             | Required. The initialized OpenTofu root of the installation.                     |
+| `--execute`                | Run the rebuild. Without it, the script prints its plan and exits.               |
+| `--recovery-timeout-hours` | The deadline for the whole rebuild, a positive number of hours. Defaults to `2`. |
+
+The script calls the AWS CLI, so it needs credentials that can use Athena, S3, Kinesis, DynamoDB, SQS, Lambda, ECS, and Systems Manager in the installation's account. With `--execute` it:
+
+1. Takes a rebuild lease in the checkpoint table, so only one rebuild runs per installation.
+2. Requires the observability history projector's Kinesis event source mapping to be enabled, disables it, and waits 8 minutes for in-flight deliveries to finish.
+3. Requires the observability Firehose failed-delivery bucket and every observability failure queue to be empty.
+4. Checks that observability history overlaps every fact family and shard still retained in Kinesis, so nothing falls in a gap.
+5. Exports the retained hot window from Iceberg with Athena `UNLOAD`, as Snappy Parquet, to `rebuild/<rebuild ID>/` in the backup bucket.
+6. Stops the hot-plane service by setting its desired count to 0.
+7. Through Systems Manager, loads the export into a new table on the node, swaps it with the `facts` table, and records a new data generation.
+8. Clears the writer checkpoints and starts the service, which replays every retained Kinesis record.
+9. Compares ClickHouse with the export: fact counts, missing facts, payload differences, trace tokens, trace cost, and the newest normalization time. It then runs the trace and usage reconciliation query in Athena.
+10. Records the new generation as the canonical seed and waits until the hot plane reports ready.
+
+Whatever happens, the script re-enables the projector and releases the lease. If it fails after it stopped the service, it leaves the desired count at 0 so the writer cannot skip facts with stale checkpoints. Fix the cause and run the rebuild again. A deploy also sets the desired count back to 1. The writer then resumes when the data is consistent and refuses to consume facts when the generation no longer matches the seed.
+
+## Backups and snapshots
+
+A Systems Manager association, `agent-observability-hot-native-backup`, runs on the node every day at 03:15 UTC. It:
+
+1. Runs `BACKUP DATABASE observability` to `native/hot-<UTC timestamp>` in the backup bucket.
+2. Creates an EBS snapshot of the data volume, tagged with `ManagedBy=ssm-backup` and the volume ID, and waits until it completes.
+3. Deletes this volume's backup snapshots that are older than the backup retention.
+
+The backup retention is `agent_observability_clickhouse_backup_retention_days`, or, while that is `null`, the lesser of `operations.backup_retention_days` and 7 days. Seven days is the default because these copies are not the recovery path: the full rebuild from observability history is, as the end of this section explains, and every full daily copy kept costs storage. [Costs](/docs/operate/costs#observability-hot-plane) has the arithmetic.
+
+The backup bucket blocks public access, uses S3-managed encryption, and is versioned. Its lifecycle rule expires every object the backup retention minus one days after it is written, and removes noncurrent versions a day later. The rule covers rebuild exports too. Tenant erasure reports that native backups are gone within the backup retention and snapshots within the backup retention plus one day.
+
+After every step succeeds, the association records when the run started on the node. The `agent-observability-hot-backup` alarm fires when that start is more than 26 hours old, so a failed or skipped run alarms within about 3 hours of 03:15 UTC. A new node counts from its first boot. The association's execution history in Systems Manager shows why a run failed.
+
+To take a backup before risky work, run the association once:
+
+```bash
+aws ssm start-associations-once --association-ids <association ID>
+```
+
+The repository ships no restore tool. The full rebuild is the supported way to recover hot data, because the writer checkpoints are ahead of any older copy of the data. A restored backup or snapshot lacks the facts written since it was taken, the writer would not replay them, and it would bring back data erased after it was taken.
+
+## Alarms
+
+Every alarm notifies the `ops-alerts` topic on `ALARM` and `OK`. See [Ops alerts](/docs/operate/ops-alerts).
+
+| Alarm                                         | Fires when                                                                                                 |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `agent-observability-hot-instance-status`     | The node fails an EC2 instance or system status check for 2 minutes. Missing data counts as failing.       |
+| `agent-observability-hot-cpu`                 | The node's CPU averages above 90 percent for 15 minutes                                                    |
+| `agent-observability-hot-service-cpu`         | The task's CPU averages above 90 percent for 15 minutes. Missing data counts as failing.                   |
+| `agent-observability-hot-service-memory`      | The task's memory averages above 90 percent for 15 minutes. Missing data counts as failing.                |
+| `agent-observability-hot-data-volume-usage`   | The data volume stays more than 80 percent full for 15 minutes                                             |
+| `agent-observability-hot-backup`              | The last successful backup started more than 26 hours ago, for 30 minutes. Missing data counts as failing. |
+| `agent-observability-hot-cpu-surplus-credits` | Only on a `t4g` node. The node was charged for surplus CPU credits in the last hour.                       |
+
+The observability history module adds alarms named `agent-observability-*` for its Lambda errors, iterator age, failure queues, Kinesis throttling, and Firehose delivery. Messages in those failure queues, or objects in the Firehose failed-delivery bucket, also block a rebuild.
+
+## Sizing
+
+The defaults are the smallest configuration proven to run the hot plane:
+
+| Part              | Default                                                | Why                                                                                                                                                                                                                                                      |
+| ----------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Node              | `t4g.medium`, 2 vCPUs and 4 GiB, unlimited CPU credits | It runs the hot plane in practice. A `t4g.small`'s 2 GiB leaves ClickHouse about 1.3 GB, less than the 512 MiB insert plus four 256 MiB queries the users may run at once, so it is not the default.                                                     |
+| ClickHouse memory | 70 percent of the instance's RAM, about 2.8 GB         | ClickHouse reads the RAM at start, so the cap follows the instance type. The rest is for the OS, the Systems Manager agent, the AWS CLI during backups, and allocator memory ClickHouse does not track. Caches are held to a tenth of RAM each.          |
+| Data volume       | 20 GiB gp3                                             | Holds 30 days of spans and 90 days of traces, the system log tables, which keep 7 days, and free space for merges, which rewrite parts into new ones before deleting the old.                                                                            |
+| Root volume       | 20 GiB gp3                                             | The baked image's snapshot is 20 GiB, the floor for that image. Ubuntu, the AWS CLI, and the ClickHouse binary (about 615 MiB installed) use well under half. The server log rotates at 100 MiB with 3 old files, and journald keeps at most 10 percent. |
+| Hot-plane task    | 0.25 vCPU and 512 MiB                                  | One task holds a Kinesis batch of at most 10 MiB and a ClickHouse result of at most 10 MiB. It reads the single fact-stream shard once every 2 seconds.                                                                                                  |
+
+To pin the memory cap instead, pass `agent_observability_clickhouse_server_memory_bytes` to `module "platform"`. ClickHouse never goes above 90 percent of RAM, whatever you set.
+
+- **Instance type.** Changing `agent_observability_clickhouse_instance_type` stops the instance, changes its type, and starts it again. The data volume stays attached, and the memory cap follows the new size. Move to a larger `t4g` size, or to an `r7g` size for more memory per vCPU, when queries fail for memory or the surplus-credit alarm fires.
+- **Burst credits.** A `t4g.medium` earns enough CPU credits to run both vCPUs at 20 percent around the clock and banks up to a day of them. In unlimited mode it keeps full speed when the bank is empty and borrows surplus credits, which AWS bills when the node cannot pay them back from what it earns within 24 hours. The `agent-observability-hot-cpu-surplus-credits` alarm fires on the first charged hour. At AWS's Linux surplus rate of $0.04 per vCPU-hour, both vCPUs at 50 percent all month add 2 × (0.5 − 0.2) × $0.04 × 730 = $17.52, and both at 100 percent add 2 × 0.8 × $0.04 × 730 = $46.72. Move to a larger size when the alarm keeps firing.
+- **Disk.** The `agent-observability-hot-data-volume-usage` alarm fires above 80 percent. Check free space on the node with `df -h /var/lib/clickhouse`, and the largest tables with `SELECT database, table, formatReadableSize(sum(bytes_on_disk)) FROM system.parts WHERE active GROUP BY database, table ORDER BY sum(bytes_on_disk) DESC`. To grow the volume, raise `agent_observability_clickhouse_data_volume_size_gib` and deploy. EBS resizes a gp3 volume online, with ClickHouse running, and the node's health timer grows the XFS filesystem within 5 minutes of the resize. You can also grow the volume in the EC2 console; a later deploy keeps the larger size. A volume never shrinks.
+- **Task.** The service runs one task at most. The service CPU and memory alarms show when it is constrained. Set `agent_observability_hot_task_size`, for example `{ cpu = 512, memory = 1024 }`, for a larger task.
+
+## Failure recovery
+
+| Situation                                             | What to do                                                                                                                                                                                                                                                                                              |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The node fails status checks                          | Stop and start the instance from EC2 to move it to new hardware. The bootstrap does not run again, and the mount and service come back from the instance's own configuration.                                                                                                                           |
+| ClickHouse is down for less than the stream retention | Repair or restart ClickHouse. The writer resumes from its checkpoints, and the query API reports ready once it catches up.                                                                                                                                                                              |
+| The outage outlasts the 72-hour stream retention      | Run the rebuild.                                                                                                                                                                                                                                                                                        |
+| The writer logs the generation mismatch               | Run the rebuild.                                                                                                                                                                                                                                                                                        |
+| The data volume is lost or replaced                   | A new volume starts empty. Run the rebuild.                                                                                                                                                                                                                                                             |
+| A new instance fails to bootstrap                     | Read the cloud-init output on the node through Systems Manager. The bootstrap stops when a ClickHouse package fails to download or its SHA-256 differs from the pin, or when the volume does not attach within 4 minutes, has a filesystem other than XFS, or is blank without the `uninitialized` tag. |
+
+Changing `operations.deletion_protection` moves the data volume between two resource addresses. Turning it on replaces the volume with a new, empty one, which then needs a rebuild. Turning it off fails the plan, because the protected volume has `prevent_destroy`.
+
+## Upgrades and replacement
+
+The instance is replaced, not changed in place, when its AMI or any input of its bootstrap changes: the ClickHouse release, an explicit memory cap, `network_cidr_block`, the data volume ID, the bootstrap script itself, or a new version of any credential parameter. OpenTofu stops the old instance before it detaches the data volume, and the new instance mounts the existing filesystem without formatting it.
+
+A node created before the system log tables had a 7-day TTL keeps their older rows in tables named like `system.query_log_0`. Drop them with `DROP TABLE` to free the space.
+
+- **ClickHouse version.** `infrastructure/modules/observability-clickhouse/clickhouse-packages.json` pins the release, `25.8.3.66` today, and the SHA-256 of its three arm64 packages; the module and the bake both read it. To upgrade, set the new version and copy each package's `SHA256` from `https://packages.clickhouse.com/deb/dists/stable/main/binary-arm64/Packages`, then deploy. If you run a baked AMI, bake a new one and set its ID too. Take a backup first, and test the new version against a copy of your data.
+- **Operating system updates.** The node keeps the Ubuntu image pinned at the first apply. Set `agent_observability_clickhouse_ami_id` to a newer Ubuntu 24.04 ARM64 image, or to a new bake, to move to it.
+- **Certificate renewal.** The private CA is valid for 5 years and the server certificate for 1 year. OpenTofu issues a new server certificate on the first deploy within 30 days of its expiry. The new certificate replaces the node and restarts the hot-plane task, so deploy at least once in that window.
+- **Hot-plane service.** Every deploy rolls the service to the image in the release bundle. The deployment circuit breaker rolls back a task that does not become healthy.
+
+## Reference
+
+- Source: `infrastructure/modules/observability-clickhouse`, `infrastructure/modules/observability-clickhouse/clickhouse-packages.json`, `infrastructure/images/clickhouse`, `apps/observability-hot-plane`, `scripts/bake-observability-clickhouse-ami.sh`, `scripts/observability-clickhouse-rebuild.ts`
+- Related: [Observability](/docs/capabilities/observability), [Architecture](/docs/operate), [Deploying the platform](/docs/operate/deployment), [Install in your AWS account](/docs/operate/install), [System operator](/docs/operate/system-operator), [Ops alerts](/docs/operate/ops-alerts)

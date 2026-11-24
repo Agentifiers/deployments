@@ -1,0 +1,114 @@
+---
+title: "SDK overview"
+description: "Install the TypeScript SDK, create a client, and make your first call."
+---
+
+`@agentifiers/deployments-sdk` is a TypeScript client for the public API. It is generated from the platform's OpenAPI document and exports one async function per API operation, named after the operation ID, such as `listAgentDefinitions` or `submitAgentRun`. Each function has typed path parameters, query parameters, headers, request body, and response. Use the SDK in Node.js services, scripts, and tools. For terminal work, use the [CLI](/docs/cli).
+
+<Callout type="warn" title="Availability">
+  The SDK is published to the public npm registry as `@agentifiers/deployments-sdk`. The current
+  release is a prerelease on the `next` dist-tag.
+</Callout>
+
+## Requirements
+
+- Node.js 26 or later. The package declares `"node": ">=26"` in `engines`.
+- ES modules. The package is ESM only, so load it with `import`, not `require`.
+- TypeScript is optional. The package ships its own type declarations.
+
+## Install the SDK
+
+Install from the `next` dist-tag:
+
+```bash
+npm install @agentifiers/deployments-sdk@next
+```
+
+## Create a client and make a call
+
+Create one client with the API origin and a credential, then pass it to every call:
+
+```ts
+import {
+  createClient,
+  createConfig,
+  getHealth,
+  listAgentDefinitions,
+} from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const health = await getHealth({ client });
+console.log(health.data?.status); // "ok"
+
+const { data, error, response } = await listAgentDefinitions({
+  client,
+  headers: { "x-deployments-environment": "<environment-id>" },
+  query: { limit: 20 },
+});
+
+if (error) {
+  console.error(response?.status, error);
+} else {
+  for (const definition of data.items) console.log(definition.id, definition.name);
+}
+```
+
+Every function returns an object with `data` on success or `error` on failure, plus the `request` and `response`. It does not throw on HTTP errors unless you ask it to. [Making requests](/docs/sdk/making-requests) covers the options, and [Error handling](/docs/sdk/errors) covers failures.
+
+The [function reference](/docs/sdk/reference) lists every function with its endpoint and CLI command. Each function links to an API reference page with the request and response schemas and a complete example.
+
+## The client protects your credential
+
+The client refuses requests that could send your bearer token somewhere you did not intend:
+
+- `baseUrl` must be an origin, such as `https://api.example.com`, with no path, query, or fragment.
+- The origin must use HTTPS. Plain HTTP works only for loopback hosts such as `localhost` and `127.0.0.1`.
+- The URL must not contain a user name or password.
+- Every request must go to the client's configured origin. A request that carries an `authorization`, `cookie`, or `proxy-authorization` header fails if the client has no configured origin.
+- The client does not follow redirects. A redirect response fails the request.
+
+`createClient` checks `baseUrl` when you create the client and throws a `TypeError` if it breaks a rule. To check a configured URL earlier, for example when your service starts, call `validatePlatformBaseUrl(url)`. It returns the parsed `URL` or throws the same `TypeError`.
+
+Because a client is tied to one origin and one credential, create one client per credential and origin. The package also exports a default `client`, which has no base URL. Pass your own client in the `client` option instead of changing the shared default.
+
+The stream gateway that serves live run output has its own origin. Reading it needs a second client or a plain `fetch`, as [Streaming run output](/docs/sdk/streaming) shows.
+
+## What the package exports
+
+| Export                    | What it is                                                                                                   |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Operation functions       | One function per public API operation. See the [function reference](/docs/sdk/reference).                    |
+| `createClient`            | Creates a client and checks its base URL.                                                                    |
+| `createConfig`            | Builds a client configuration, such as `baseUrl`, `headers`, `auth`, and `fetch`.                            |
+| `client`                  | The shared default client. It has no base URL.                                                               |
+| `validatePlatformBaseUrl` | Checks that a URL is a valid API origin.                                                                     |
+| `Client`                  | The TypeScript type of a client.                                                                             |
+| `contractMetadata`        | The API version, operation count, and SHA-256 hashes of the OpenAPI document the package was generated from. |
+
+The same contract metadata is available as JSON at `@agentifiers/deployments-sdk/contract`. Use it to confirm which API contract a build was generated from.
+
+## Next steps
+
+<Cards>
+  <Card title="Authentication" href="/docs/sdk/authentication">
+    Pass API keys and JWTs, refresh tokens, and send tenant headers.
+  </Card>
+  <Card title="Making requests" href="/docs/sdk/making-requests">
+    Path, query, header, and body options, idempotency keys, and pagination.
+  </Card>
+  <Card title="Error handling" href="/docs/sdk/errors">
+    Read problem details and decide when to retry.
+  </Card>
+  <Card title="Streaming run output" href="/docs/sdk/streaming">
+    Read a run's events from the stream gateway.
+  </Card>
+  <Card title="Verifying webhooks" href="/docs/sdk/webhook-verification">
+    Check webhook signatures before you trust a delivery.
+  </Card>
+</Cards>

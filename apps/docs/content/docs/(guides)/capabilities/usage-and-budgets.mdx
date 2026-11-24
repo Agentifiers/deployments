@@ -1,0 +1,208 @@
+---
+title: "Usage and budgets"
+description: "Read metered usage, costs, and spend, and cap spend with budgets that refuse new runs."
+---
+
+Every installation meters its own usage. Each billable action writes a meter event to the platform's usage ledger, and the platform folds those events into hourly counters and per-period spend. You read usage and cost per environment or per workspace, read a workspace's monthly spend, and cap spend with budgets on an organization, a project, an environment, or a workspace. When a budget is spent, the platform refuses new runs in its scope until the period ends or you change the budget.
+
+## What the platform meters
+
+| Source                                        | Metrics                                                  | Priced                                                                  |
+| --------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Model calls by agent runs, memory, and Brains | `model_tokens`                                           | Yes. The cost the model gateway reports, or a cost from catalog prices. |
+| Sandboxes                                     | `sandbox_ms`, `sandbox_vcpu_ms`, `sandbox_memory_mib_ms` | When the installation configures sandbox cost rates.                    |
+| Agent worker time                             | `worker_ms`                                              | No                                                                      |
+| Brain retrievals                              | `brain.retrieval`                                        | No                                                                      |
+| Agent email                                   | `agent_email.*`                                          | No                                                                      |
+
+Model token events also record the input, output, cached, and cache-write token splits. Costs are in USD micros (one dollar is 1,000,000 micros). Catalog-priced model calls also keep an exact cost in nanodollars.
+
+A meter event names a workspace when the run, sandbox, or memory or Brain operation that produced it belongs to one. Usage without a workspace, such as inbox traffic and Brain API queries, counts toward the environment, project, and organization only.
+
+## How the ledger works
+
+The ledger is append-only. A usage materializer reads each new meter event once and, in one transaction, adds it to:
+
+- Hourly counters for the event's environment.
+- Hourly counters for the agent definition whose run produced the event. Usage outside runs, such as inbox traffic and Brain operations, belongs to no agent.
+- Hourly counters for the workspace the event names, with the same token splits.
+- Spend counters for the event's workspace when it names one, and for its environment, project, and organization, for each UTC day, month, quarter, and year that contains the event.
+
+Because all of them come from the same transaction, they never disagree and a redelivered event never counts twice. Spend lags the ledger by the materializer's processing delay.
+
+## Reading usage and cost
+
+| Operation                | Scope           | Returns                                                  |
+| ------------------------ | --------------- | -------------------------------------------------------- |
+| `listUsageRecords`       | `usage:read`    | Usage records for a window, optionally for one `metric`. |
+| `getUsageSummary`        | `usage:read`    | One zero-filled series per metric over a window.         |
+| `listCostRecords`        | `spend:read`    | Cost records for a window.                               |
+| `getCostSummary`         | `spend:read`    | One zero-filled cost series per metric over a window.    |
+| `listSpendRecords`       | `spend:read`    | Spend records for a window.                              |
+| `listApiCredentialUsage` | `api-keys:read` | API key activity, optionally for one `apiCredentialId`.  |
+| `getWorkspaceSpend`      | `spend:read`    | One workspace's spend for a UTC month, split by funding. |
+
+All seven read one environment, named by the `x-deployments-environment` header. `since` is inclusive and `until` is exclusive. The record lists return up to 1,000 records per page and can return a short page with a `nextCursor`.
+
+The summaries are the efficient way to chart a period. `since` and `until` are required and must fall on interval boundaries. `interval` is `hour` (the default) or `day`, and one summary holds at most 744 hourly or 366 daily buckets. Each series has a `kind` of `quantity` or `cost`, a `unit`, a `total`, and one value per bucket. Cost series are in `usd_nanodollars`. Token metrics also return one series per `part`: `input`, `output`, `cached`, and `cache-write`. Pass `agentDefinitionId` to summarize only the runs of one agent, or `workspaceId` to summarize only the usage that names one workspace. Both read the attribution's own hourly counters, token splits included. A summary takes at most one of the two; passing both returns `400 invalid_query`. An ID with no usage in the environment returns no series.
+
+### Workspace spend
+
+`getWorkspaceSpend` (`GET /v1/workspaces/{id}/spend?month=YYYY-MM`) returns `totalUsdMicros`, `operatorFundedUsdMicros`, and `organizationFundedUsdMicros` for one workspace and UTC month, with `workspaceId`, `environmentId`, `month`, `periodStart`, and `asOf`. Operator-funded spend is what the installation paid for. Organization-funded spend is model calls on the organization's own provider keys. `month` defaults to the current UTC month. A malformed or future month returns `400 invalid_month`. The workspace must belong to the header's environment, or the request returns `404 not_found`. Archived workspaces stay readable, so their last months can still be billed. The read is strongly consistent with the spend counters, which lag the ledger by the materializer's processing delay.
+
+## Budgets
+
+A budget limits USD spend for exactly one scope.
+
+| Field             | Rules                                                                                                                                                                                           |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scope`           | `organization`, `project`, `environment`, or `workspace`. Project budgets name `projectId`. Environment budgets name `environmentId`. Workspace budgets name `environmentId` and `workspaceId`. |
+| `period`          | `daily`, `monthly`, `quarterly`, or `yearly`, on UTC calendar boundaries.                                                                                                                       |
+| `amountUsdMicros` | A positive integer.                                                                                                                                                                             |
+| `thresholds`      | 1 to 10 whole percentages from 1 to 100, strictly ascending. Defaults to `[50, 80, 100]`.                                                                                                       |
+| `status`          | `active`, `paused`, or `archived`. Archiving is permanent.                                                                                                                                      |
+
+A workspace budget needs an active workspace in that environment; an archived one returns `409 workspace_not_active`. One scope holds at most 25 budgets that are active or paused. Creating one more returns `409 budget_limit_exceeded`. Spend counts from the start of each period, so a budget created mid-month already reflects the month's spend. `listBudgetPeriods` returns period history with spend, newest first, up to 24 periods per page.
+
+## Enforcement
+
+Before the platform writes a new run, it checks every active budget that governs the run's workspace, environment, project, and organization. A follow-up turn on a thread that belongs to a workspace counts as a run in that workspace even when the request omits `workspaceId`. If any of them has spend greater than or equal to its amount for the current period, the run is refused with the problem code `budget_exhausted`. The `detail` names the budget, its scope, its period, and the period start. Every path that creates runs shares this check, and each one handles the refusal as final:
+
+| Path                                  | When a budget refuses the run                                                                              |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| API run submission, retry, and replay | HTTP `429` with code `budget_exhausted`.                                                                   |
+| Schedules                             | The fire is recorded as `failed`, and its `schedule.skipped` event carries `skipReason: budget-exhausted`. |
+| Heartbeats                            | The heartbeat run is recorded as `skipped` with the same reason.                                           |
+| Channels                              | The inbound messages are settled without a run and not redelivered.                                        |
+| Agent email                           | That binding is skipped. Other bindings on the message still run.                                          |
+
+Runs that were already admitted keep running. The platform does not stop a run mid-way, so spend can end a period above 100 percent. An idempotent resubmission of a run that was already admitted still succeeds. Raising the amount, pausing the budget, archiving it, or the start of a new period lifts the refusal for new runs. Budget lookups read an eventually consistent index, so a newly created or archived budget can take a moment to apply.
+
+<Callout type="info" title="Budgets count priced usage only">
+  Spend is the sum of meter-event costs. Metrics without a price, such as `worker_ms`, never count
+  toward a budget. Sandbox time counts only when the installation configures sandbox cost rates.
+</Callout>
+
+## Alerts
+
+Each time a budget's spend reaches one of its thresholds in a period, the platform emits exactly one `budget.threshold-crossed` semantic event for that budget, period, and threshold. One large cost that jumps several thresholds emits one event per threshold. Changing the thresholds or amount mid-period does not resend thresholds already reached in that period. Paused and archived budgets do not alert.
+
+The event payload has `budgetId`, `budgetName`, `scope`, `projectId`, `environmentId`, and `workspaceId` when the budget has them, `period`, `periodStart`, `periodEnd`, `threshold`, `amountUsdMicros`, `spendUsdMicros`, and `percentUsed`. Budget changes also emit `budget.created`, `budget.updated`, and `budget.archived`.
+
+Environment and workspace budget events reach the webhook subscriptions of that environment. Organization and project budget events reach every subscription in the organization, or in the project, that lists `budget.threshold-crossed` by name. See [Webhooks](/docs/capabilities/webhooks#organization-and-project-billing-alerts).
+
+Threshold crossings also email the organization's owners, admins, and billing members through the default **Budget alerts** monitor, and each one is recorded in the alert history. Change who hears about them, or watch a single budget, with a `budget-threshold` monitor. See [Alerts](/docs/capabilities/alerts#budget-alerts).
+
+## Who can manage budgets
+
+Reads need `budgets:read` and changes need `budgets:write`. A person also needs the `owner`, `admin`, or `billing` organization role to create, change, or archive a budget. Members and viewers can read. API keys are governed by their scopes alone.
+
+A credential limited to particular projects or environments sees and manages only budgets on the scopes it holds, and never sees organization budgets. API keys belong to one environment, so an API key works only with that environment's budgets and its workspaces' budgets. Use a signed-in person's credential for organization and project budgets.
+
+## Use it
+
+In the management console, **Budgets** under **Usage** lists, creates, changes, pauses, resumes, and archives budgets, and the environment overview names a budget that refuses new runs. See [Management console](/docs/getting-started/console#manage-budgets).
+
+These steps use the CLI and assume your CLI context names the organization and environment. See [Configuration and context](/docs/cli/configuration).
+
+1. Create a monthly organization budget of 500 USD with alerts at 50, 80, and 100 percent:
+
+   ```sh
+   deployments budget create --name org-monthly --scope organization \
+     --period monthly --amount-usd-micros 500000000 --thresholds '[50,80,100]'
+   ```
+
+2. Check spend for the current and earlier periods:
+
+   ```sh
+   deployments budget periods "$BUDGET_ID"
+   ```
+
+3. Pause the budget to lift a refusal without deleting it:
+
+   ```sh
+   deployments budget update "$BUDGET_ID" --status paused
+   ```
+
+4. Summarize one environment's usage and cost by day:
+
+   ```sh
+   deployments usage summary --since 2026-09-01T00:00:00.000Z --until 2026-10-01T00:00:00.000Z --interval day
+   deployments cost summary --since 2026-09-01T00:00:00.000Z --until 2026-10-01T00:00:00.000Z --interval day
+   ```
+
+5. Summarize one workspace's usage, or read its month's spend:
+
+   ```sh
+   deployments usage summary --since 2026-09-01T00:00:00.000Z --until 2026-10-01T00:00:00.000Z --interval day --workspace-id "$WORKSPACE_ID"
+   deployments workspace spend "$WORKSPACE_ID" --month 2026-09
+   ```
+
+The same cost summary with the SDK:
+
+```ts
+import { createClient, createConfig, getCostSummary } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data, error } = await getCostSummary({
+  client,
+  headers: { "x-deployments-environment": "env_123" },
+  query: {
+    since: "2026-09-01T00:00:00.000Z",
+    until: "2026-10-01T00:00:00.000Z",
+    interval: "day",
+  },
+});
+for (const series of data?.series ?? []) {
+  console.log(series.metric, series.unit, series.total);
+}
+```
+
+## Bill each workspace
+
+When each of your customers runs in its own workspace, bill them from the workspace's monthly spend. Use one service account in the environment with an API key that holds `spend:read` and `usage:read`. The key reads every workspace in its environment and nothing outside it.
+
+1. Create the service account and its key once:
+
+   ```sh
+   deployments service-account create --name billing-reader --scopes spend:read,usage:read
+   deployments api-key create --name billing-reader --service-account "$SERVICE_ACCOUNT_ID"
+   ```
+
+2. After a month closes, list the environment's workspaces, archived ones included, and read each one's spend for that month. Bill `totalUsdMicros`, or only `operatorFundedUsdMicros` if customers pay their own model providers:
+
+   ```ts
+   import { createClient, createConfig, getWorkspaceSpend } from "@agentifiers/deployments-sdk";
+
+   const client = createClient(
+     createConfig({
+       baseUrl: "https://api.example.com",
+       headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+     }),
+   );
+
+   const { data, error } = await getWorkspaceSpend({
+     client,
+     headers: { "x-deployments-environment": "env_123" },
+     path: { id: "workspace_123" },
+     query: { month: "2026-09" },
+   });
+   if (data) console.log(data.workspaceId, data.totalUsdMicros, data.operatorFundedUsdMicros);
+   ```
+
+3. To show a customer what they used, call `getUsageSummary` or `getCostSummary` with their `workspaceId`.
+
+The spend counters lag the ledger by the materializer's processing delay, so read a closed month a little after it ends.
+
+## Reference
+
+- API: [getWorkspaceSpend](/docs/api/reference/tenancy/get-workspace-spend), [createBudget](/docs/api/reference/budgets/create-budget), [updateBudget](/docs/api/reference/budgets/update-budget), [archiveBudget](/docs/api/reference/budgets/archive-budget), [listBudgetPeriods](/docs/api/reference/budgets/list-budget-periods), [getUsageSummary](/docs/api/reference/operations/get-usage-summary), [getCostSummary](/docs/api/reference/operations/get-cost-summary), [listUsageRecords](/docs/api/reference/operations/list-usage-records), [listSpendRecords](/docs/api/reference/operations/list-spend-records), and [listApiCredentialUsage](/docs/api/reference/operations/list-api-credential-usage).
+- CLI: [`deployments workspace spend`](/docs/cli/reference/workspace#workspace-spend), [`deployments budget`](/docs/cli/reference/budget), [`deployments usage`](/docs/cli/reference/usage), [`deployments cost`](/docs/cli/reference/cost), [`deployments spend`](/docs/cli/reference/spend), and [`deployments api-key usage`](/docs/cli/reference/api-key#api-key-usage).
+- SDK: [Budgets functions](/docs/sdk/reference#budgets) and [Operations functions](/docs/sdk/reference#operations).
+- Related: [Observability](/docs/capabilities/observability) for cost and token breakdowns by model, provider, and agent.

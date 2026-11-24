@@ -1,0 +1,72 @@
+{
+  "id": "gen-1791811529-McGqG7EKkUAaxVUixyUP",
+  "object": "chat.completion",
+  "created": 1791811529,
+  "model": "openai/gpt-5-nano",
+  "provider": "OpenAI",
+  "system_fingerprint": null,
+  "service_tier": "default",
+  "choices": [
+    {
+      "index": 0,
+      "logprobs": null,
+      "finish_reason": "tool_calls",
+      "native_finish_reason": "completed",
+      "message": {
+        "role": "assistant",
+        "content": "Reasoning:\n- List the capitals: Germany -> Berlin (6 letters), Japan -> Tokyo (5 letters), Australia -> Canberra (9 letters), Canada -> Ottawa (6 letters).\n- The capital with the most letters is Canberra (9). No tie to resolve.\n- Therefore, I will fetch the current weather for Canberra.",
+        "refusal": null,
+        "reasoning": "**Determining capital weather**\n\nI need to pick a capital from Germany, Japan, Australia, and Canada. The capitals are Berlin, Tokyo, Canberra, and Ottawa. Their letter counts are Berlin (6), Tokyo (5), Canberra (9), and Ottawa (6). It seems Canberra has the most letters at 9, and there's no tie to break alphabetically. Next, I'll fetch the current weather in Canberra using the get_weather tool. I just need to ensure I reason this out before calling the tool. Let’s go ahead!",
+        "tool_calls": [
+          {
+            "type": "function",
+            "index": 0,
+            "id": "call_W58Az8c60RRsXax96bYXqT69",
+            "function": { "name": "get_weather", "arguments": "{\"city\":\"Canberra\"}" }
+          }
+        ],
+        "reasoning_details": [
+          {
+            "type": "reasoning.summary",
+            "summary": "**Determining capital weather**\n\nI need to pick a capital from Germany, Japan, Australia, and Canada. The capitals are Berlin, Tokyo, Canberra, and Ottawa. Their letter counts are Berlin (6), Tokyo (5), Canberra (9), and Ottawa (6). It seems Canberra has the most letters at 9, and there's no tie to break alphabetically. Next, I'll fetch the current weather in Canberra using the get_weather tool. I just need to ensure I reason this out before calling the tool. Let’s go ahead!",
+            "format": "openai-responses-v1",
+            "index": 0
+          },
+          {
+            "type": "reasoning.encrypted",
+            "data": "gAAAAABqzN_Ln_AJeDDGzxuLHPUdy3fUD8ku0Q5fLvFYJYYEk7kcPk5_ogu40NRmypRkmjgLmZUsH95gtfZUxDa6THUGtQKlPsgcDp-yUufmmXc-0HCW5Wdxf3w5u1nnIR7LdZvO3a0kStenFX74wx-r3zLy2FviTmwgoq-PIkEEZaICV-9juLw53XtNvf8hpsQcC1XL7FRrJ7KPJ7RmOBIvDZ2_7O2LcpfhethRvEr1auUlY4Nt4LUYyQGNPtfw7T9r7KHcyIYUgvxw9zOE7spxhcS0X-w_JhIjyVD_i_SDS8zV51of2ujgH6G3wncaaXHUpD6U-BMcakc4o_6MmbM1LhjqD6McIUDBWq949vAFpn6KIHgy_wm1F_KbAibROXKEDFAPsHzMoelY8wkCSeA3Np8qtBvao_jzjQ3-FW3gce30ZAnBOWxym2FWJdmamRlXh6adjC8jau0hJeZaRWUc1ZMGL-jGU8ocBF0HSC98L2z3b6HCBo_ZdGCEPCcEY_TzNiemRCmfp2D_3H_FEr9JuWWKeDsRULQXh9FEEj_kENQTD3IfCpFhQbtu8nxYia-De3BVBOLih7PTIVGWwK6O1sJV1EygVEqddc4H4dkXbj2c5OSV7EKAaklPWqDwjxHyynGbMxjCV4YCRKjrm9TsbXT0dG-N3ncxFefZxJ9rn1gusQcOlFbROTguj-pgei28hJ5huTYVuzTYxQdKRXGznh7Ei_ytXMVKUtdPmeq2DZGSOhOswi8fEPBGQUSSnKMbuQXFG4dh1zenR598L7ji-zwvpmDIglYH1aS1layDM2XTdOFOlCPp2NznIdT0Q854EoXvtpcdaybUOIctRMPyARqZ8ShPQbM4mchPQsWaZ2PSkRzhNHMulW0amZyvuAYNwCB07ikWPmef9ErJHoRZNUpGqpOOT8usakfoXX4GbtMaxht4UsKBJKGKNFquX3VQlHTF8NA-7Tuat07uAZMACowrNG9Woq-i6W-U0d9FuD7hWwW8sKB_QyZMip8H8YXXVdvQ4bR8Q1Bl0atc_rgklgyDOycEe3Zp_SFE_j8lg1lyXb1GcxVRwWaoQ47i8n-ElPaIUOxQTBGsGPPP2im3QDn4vpUThOdHkN8XwSaK3wYuRwIRkJqsP1WQBVx0UTH5DmYD_pMruycqxBapqDFaQd6XeGZUH5p3H49rIonII8bQNEvZWAnHuSEcw5Xj9Z0oz-oD2LChjceTCqxZYET67IitOx5OHSc84fg8vvDJwHdkHG8157M_6ZCZki0sXZwYZ01dhQbrs95TZ8gZ8WifaOKdhDaysRBwUlgIJjVaskjjgs7hj39wW9Wnx_PqnVZ2H2j_eMnyb1pf3ouJfKz8xKha6oCBBiCaBaHLeqIT_RrbD0Q8W1GDOTSs6E-lVpTal_lnXN0RY0Qs1fRr2u4z7EqAN7IfoGT5WUzTZK91z87DAg-x5JljWSaS3Gm3aEiSII9HN76yJ9UNqWe-UK3L11YMOXaMW1HGMeTHmUl2krHtpQz2sYyym02y4UYgLdjMoLqObeZtk1f8WxHuMQmxXHDUBACmv_FthRoOaQfc_TaqS3sys7AMX4p35pp14YAdXtbkeMSqdxq4rlS7Ms6uI46P_OKrXCYlnE6KTiCooDeRwNct0lcHcrYNvAxZFKi7oMFktMbn65WXMJukGmK-3LGoqAPvgi30e7N5W-IuFZkluGwoM1HREEf_7LkB1lQFtEJHeWyI75wS0wUE9MU8VhJ9xAmQx4nfAdlfQLIg7m85XAnsv07GTLyd6A3hJp3qVJ88GDQtFybVsRrjOB9ip11Q7zUmkP2NIT_noF_OHJiYOhauKx41AWDCCpZD2j79F8eOTA6Jno-GuDhXJpftG3vSioUiCmVYE0P112-brq4XFwT8Eg7J2mVrcuLwxJgM8j7njYKRZL03dTAUVA5TrxwpK70wz0GiIVVunj5BkMBBOIwDaewsIHCF2TTU6ENI3RE4lHC5_hRzJO0SU65sH6GiihPYn3luIw0MMqllEiy66OMFVig5xMeeYwNOLXDZamZ5yjtkj-nYf_ICftj8kk7an8UUngf_1t1uMXML23E9k3emXiQLQM14x9-Y0M_X7cZaUhuhFt6nlLqadumzvBEDQXa8vloCiUZ3vxLLLJ_F-vNdTld0wktpuJ3iJbMmMC4rWmvAPxNlm46QH_1serkj6Fl-zjpiURUrofiUPscVaTDUCK0y2gGXiwx7T2_gR6bnMSf_X8HCu_sWDl9kE8dPngHCgr0hDIGT6lhvcOBHWjfT-4_jda3zcU_uYAS2EiEr_ghj6fa8M0qXPpkDcuLP2LzhWgMfSeSc8JbA6NzW3jGjEXjjtMf3RHUdCzMrfv-gMPYWxqz207DTmsD5cyGbkUOns8_QiXnJjzEDHJoaP-rbCm5Np2XwfGk3XNGZVETA83bd1hQrgM0iPPHE2TuGP9Can6OAH8t4Xyk9SEM3rcnerKeOud6fBXv_IwNcznuRMFBG0ateCLIX3odCV3hhCm_2T30hraO3mQltBUVy4v6a5cmJZnf-e_2TNfaWEzHlxwqWf2CikYtfwLDS6QFVGhCw9ZGWyPJpKMe5LtTT4089dLLNOG5ZsY-sdETi9ROS2GS5xAsNvLrkrNJ7Oy4pDObmqwMVZQLGcOS3PY2f-yKyZv1v93F3XgzLE7UO_n9JpnoXeBu4z9ZMHPaaKeaoBd6LgN3hH-ij3qpc2FNe7vYJ568hk357VejogXK81DpH095QBTj7iNsOFy6YeAmcUbgRKLbhOrb00_ypQs4HhKlWCw5xtp9RNoWTTUwnn9gESAHhS2pqZYhfOSswLqUgH0hq6RkCtfCLiyeMozwnQ7FvzBXdiB43uxh6i_l41rFf6r39Ju9HM7NRqJIBQTktSlYHOLiyflQYek4iwQE6OEqGsLXZUV5ML9uazUG8HEpVC7-RL7gvnfnrIIeRDG6q2OZV9WYAHNz8QBXjwqmfsu0oZ59mQql6sdThDyj0anZBwo05TNNUz2TghC-4RwrVMyZKcv9aOqgpwLZNqHnwe2pKjCnQjcAq8ARV-uwVFYiHKG8-uAJC48tMV15BDt1FCus07_IOuLz6XjlXCSkgYyJt6N-09f3-T7Cd1jh3XgddEa3i95MzATInXmnf4oWUEgoAuD9w_V2mYQBmu3O-yrDXHUC0C2gVBBzsxs7F55xQGsRxCwmQJr11TnLYCLdvECsENKCPSUnfAeCWW3QkF5041GhDLiNMI_wGgQF8u8LeQyJebiTtG7oDn-SYTKEsnSod8DJuAsKtiyM9oF1q34blIakcmyJyTaYe08O5KLLhwOPODkev8ldxh2-bWA0NRWQsFA==.eyJlbmRwb2ludF9zbHVnIjoib3BlbmFpL2dwdC01LW5hbm8tMjAyNS0wOC0wN3xvcGVuYWkifQ",
+            "format": "openai-responses-v1",
+            "id": "rs_07596fc576bf0213016accdfc9e93087d1a773359daa4d4944",
+            "index": 1
+          },
+          {
+            "type": "reasoning.encrypted",
+            "data": "gAAAAABqzN_LG7KpSZA-hBcHW2YY6YWZDgud0rd8UPGHIYfUUgYzeKc6JgVRlneTpydWDdbKvzPAEIasd4tiWFTnyVGc0pQap24BpLYh9FYDM0hZvSwOEFkxELDpsKrG7VX2vegWp6VU2Cz0HroZRgG3rGcAR-_qCCgV7QmhjXp1Evya_lspNDHmAk1PoPef5gqDO39_HdEc7-dOxQ4aUONPpuLjrlP84yN6dA2cGE-bEQ3QyfBc5yu3kcupTlpZJ6_rIsMgAbVobaICpEGUb1DLQ5wLKaANhWPIXr6h25kSJ-jbOPhMtXeFNwxnifbYVkBjAlxPdBrCCXvUxTWtYfMWSmWJXpu97NsT3uQkYEYJ9YNKkJfDCCVNH3MoB0DButYWuIkdMJMhCT6yn9uC4Kfire3aLXPYWU5WgThmV8e-BtIpvUbs6VSWbjZcd3kpFy00GMzA0cww6Feg7ouRanXfl0fUtGGV-feepFDya3GAegTCkgIa6VUHHJh6MxNvqfj_cen7kohL5LZjOxGQLtbQGe_8Kl1SY3eMdim37qzMjWsvi0BU31cCmL08NmJetNKLnCvB4zNxpZX5mTPFOnFVMW3CCzE_OKGYvhQ9rahskkSzvityvnrCOPL4YzZ5L7jiOf3Ke5oTJoqyWYi16UU0k0Bl76IAng7dRAJWDGO-Mxyw8O4Kq4XuMt8x0Y5cQa4dObRty-tfnTQR_UZi0tUufaLBnH8K6r_nucjTFhu3FhzVuZZ-847ZbxTDXZnaJsJhu-bApgSzR1sElyG9Rq15Er0B3wOpO5lsAsYtU_08GoCZoIDBo8G4sbhtYNlVisocC8JPEQl_eafjZ6bYlFopl4vWosz87w4X0p_qiYFzygxxPzbgjueXuObBtbLohOmPXSP7MV-uoQkRJ1HzuoO2_aEYZQ4MoX3GtmHVX75dxXhyW6HQVvKjGL7GAeKwgzw50TGopHKIoa4i5vzZxoMhP7YVnAGN03rzNucslfWw-5T3wYOBl01H-dkl_zgUHrHmSVMZoG0WlaJDt-GbhYT2c53kwfpIoF9CSoWuwCyFOmTW1QUnWs-CzekO-ULq_o4cUKdW4j3ih25Z-ymIKS87y6lfbv_tDToh86PIkEbS5v8_bVQNeB5ChLBUXVkQI3xWoc_1SjkWvNpwRMdSUgoO7wJdtoHOH6aM1AUU4E-NScrg6NE4nUasKF9vODVCH0e7NeaJobdSBlECwEE6Zj-RgaS1GrgS9jKYpFnTRN5C7a7g3qkluCtHcONeTqAEus5fg_TJ6B8G2b-1xQoCUGSdOwqhd92i2756m5fimBo6zVaz4bl2IKTfuYYFgStFt6Y7bZaMtHX7bjqa67VA-sE6Ti406WOjVv07pkTYmyOStm-YAt6lm9olMXHQM1W4ZRBDFc3CYBCYsDhtbRfKRusdDn4GqqC8_ZMCRJAVhRaZZINPXV4Rz91N_S-62nX47tpqxSVgA5S9LbiP9eK1WBhwNbyfG73a65MUXZvy5Fwy32zVaGgxGr0RM8-gwvTNLPjESNzed8A7hNlRZQ0YY2PwTMm8_-E0V_ZH26ZZKJ2pAimkO2DkrxIFJjXkigV7uRldS1KoWsoesjcWWg5GNcAvYeA1YWYeYfta23G2qw1IEHvERz46lILR1uLA0sKnAKi7gxyQN958CSYEnhgrN6gytLM0_RCgWierKkPO96SPdQcOhcK-nWL3mGn8aOY6CWU1X-4GYVNf.eyJlbmRwb2ludF9zbHVnIjoib3BlbmFpL2dwdC01LW5hbm8tMjAyNS0wOC0wN3xvcGVuYWkifQ",
+            "format": "openai-responses-v1",
+            "id": "rs_07596fc576bf0213016accdfcb70e087d197abeac2c53cee56",
+            "index": 2
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 121,
+    "completion_tokens": 237,
+    "total_tokens": 358,
+    "cost": 0.00010085,
+    "is_byok": false,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0,
+      "audio_tokens": 0,
+      "video_tokens": 0
+    },
+    "cost_details": {
+      "upstream_inference_cost": 0.00010085,
+      "upstream_inference_prompt_cost": 0.00000605,
+      "upstream_inference_completions_cost": 0.0000948
+    },
+    "completion_tokens_details": { "reasoning_tokens": 128, "image_tokens": 0, "audio_tokens": 0 }
+  }
+}

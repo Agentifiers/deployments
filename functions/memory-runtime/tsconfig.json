@@ -1,0 +1,21 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/functions/memory-runtime",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/functions/memory-runtime.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/api-contract" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/memory" },
+    { "path": "../../packages/model-gateway" },
+    { "path": "../../packages/model-usage" },
+    { "path": "../../packages/organization-admission" },
+    { "path": "../../packages/secret-store" },
+    { "path": "../../packages/tenant-limits" }
+  ]
+}

@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+# Runtime credentials are loaded from SSM Parameter Store.
+# Runtime parameter versions: ${runtime_parameter_versions}
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y ca-certificates curl jq nvme-cli unzip xfsprogs
+
+# Ubuntu 24.04 no longer packages the AWS CLI, so install the official v2 bundle.
+if ! command -v aws >/dev/null 2>&1; then
+  awscli_directory="$(mktemp -d)"
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "$${awscli_directory}/awscliv2.zip"
+  unzip -q "$${awscli_directory}/awscliv2.zip" -d "$${awscli_directory}"
+  "$${awscli_directory}/aws/install"
+  rm -rf "$${awscli_directory}"
+fi
+
+# Install the pinned release from the packages' published SHA-256, so neither a moved repository
+# tag nor a substituted download can change what runs. A baked AMI already has it.
+if ! command -v clickhouse-server >/dev/null 2>&1; then
+  if [[ "$(dpkg --print-architecture)" != "arm64" ]]; then
+    echo "The pinned ClickHouse packages are arm64; this AMI is $(dpkg --print-architecture)." >&2
+    exit 1
+  fi
+  package_directory="$(mktemp -d)"
+%{ for package, sha256 in clickhouse_package_sha256 ~}
+  curl -fsSL "https://packages.clickhouse.com/deb/pool/main/c/clickhouse/${package}_${clickhouse_version}_arm64.deb" \
+    -o "$${package_directory}/${package}.deb"
+  echo "${sha256}  $${package_directory}/${package}.deb" | sha256sum --check --strict
+%{ endfor ~}
+  apt-get install -y "$${package_directory}"/*.deb
+  rm -rf "$${package_directory}"
+fi
+
+expected_serial="$(printf '%s' '${data_volume_id}' | tr -d '-')"
+device=""
+for _attempt in $(seq 1 120); do
+  device_name="$(lsblk -ndo NAME,SERIAL | awk -v serial="$${expected_serial}" '$2 == serial { print $1; exit }')"
+  if [[ -n "$${device_name}" ]]; then
+    device="/dev/$${device_name}"
+    break
+  fi
+  sleep 2
+done
+if [[ -z "$${device}" ]]; then
+  echo "Unable to locate attached ClickHouse data volume ${data_volume_id}." >&2
+  exit 1
+fi
+
+filesystem_type=""
+if filesystem_type="$(blkid -s TYPE -o value "$${device}" 2>/dev/null)"; then
+  if [[ "$${filesystem_type}" != "xfs" ]]; then
+    echo "Refusing to use ClickHouse data volume with filesystem type $${filesystem_type}." >&2
+    exit 1
+  fi
+  aws ec2 create-tags \
+    --region '${aws_region}' \
+    --resources '${data_volume_id}' \
+    --tags Key=FilesystemState,Value=initialized
+else
+  blkid_status=$?
+  if [[ $${blkid_status} -ne 2 ]]; then
+    echo "Unable to inspect the ClickHouse data volume filesystem safely." >&2
+    exit 1
+  fi
+  filesystem_state="$(aws ec2 describe-volumes \
+    --region '${aws_region}' \
+    --volume-ids '${data_volume_id}' \
+    --query 'Volumes[0].Tags[?Key==`FilesystemState`].Value | [0]' \
+    --output text)"
+  signatures="$(wipefs --noheadings --output TYPE "$${device}" | xargs)"
+  if [[ "$${filesystem_state}" != "uninitialized" || -n "$${signatures}" ]]; then
+    echo "Refusing to format a data volume that is not positively identified as new and empty." >&2
+    exit 1
+  fi
+  aws ec2 create-tags \
+    --region '${aws_region}' \
+    --resources '${data_volume_id}' \
+    --tags Key=FilesystemState,Value=formatting
+  mkfs.xfs "$${device}"
+  aws ec2 create-tags \
+    --region '${aws_region}' \
+    --resources '${data_volume_id}' \
+    --tags Key=FilesystemState,Value=initialized
+fi
+data_uuid="$(blkid -s UUID -o value "$${device}")"
+install -d -m 0750 -o clickhouse -g clickhouse /var/lib/clickhouse
+if ! grep -Fq "UUID=$${data_uuid} /var/lib/clickhouse" /etc/fstab; then
+  echo "UUID=$${data_uuid} /var/lib/clickhouse xfs defaults,noatime,nofail 0 2" >> /etc/fstab
+fi
+mount /var/lib/clickhouse
+chown clickhouse:clickhouse /var/lib/clickhouse
+
+ssm_value() {
+  aws ssm get-parameter \
+    --region '${aws_region}' \
+    --name "$1" \
+    --with-decryption \
+    --query Parameter.Value \
+    --output text
+}
+
+install -d -m 0750 -o clickhouse -g clickhouse /etc/clickhouse-server/certs /etc/clickhouse-server/config.d /etc/clickhouse-server/users.d
+ssm_value '${ca_certificate_parameter_arn}' > /etc/clickhouse-server/certs/ca.pem
+ssm_value '${server_certificate_parameter_arn}' > /etc/clickhouse-server/certs/server.pem
+ssm_value '${server_private_key_parameter_arn}' > /etc/clickhouse-server/certs/server-key.pem
+chown -R clickhouse:clickhouse /etc/clickhouse-server/certs
+chmod 0644 /etc/clickhouse-server/certs/ca.pem /etc/clickhouse-server/certs/server.pem
+chmod 0600 /etc/clickhouse-server/certs/server-key.pem
+
+cat > /etc/clickhouse-server/config.d/observability.xml <<'XML'
+<clickhouse>
+  <listen_host>0.0.0.0</listen_host>
+  <http_port remove="remove"/>
+  <https_port>8443</https_port>
+  <tcp_port>9000</tcp_port>
+  <tcp_port_secure>9440</tcp_port_secure>
+  <timezone>UTC</timezone>
+  <!-- A zero cap defers to the RAM ratio, so the cap follows the instance type. -->
+  <max_server_memory_usage>${server_memory_bytes}</max_server_memory_usage>
+  <max_server_memory_usage_to_ram_ratio>${server_memory_to_ram_ratio}</max_server_memory_usage_to_ram_ratio>
+  <!-- Each cache defaults to up to half of RAM; a tenth keeps them inside the cap on a 4 GiB node. -->
+  <cache_size_to_ram_max_ratio>0.1</cache_size_to_ram_max_ratio>
+  <max_thread_pool_size>256</max_thread_pool_size>
+  <background_pool_size>2</background_pool_size>
+  <background_schedule_pool_size>2</background_schedule_pool_size>
+  <merge_tree>
+    <number_of_free_entries_in_pool_to_lower_max_size_of_merge>2</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
+    <number_of_free_entries_in_pool_to_execute_mutation>2</number_of_free_entries_in_pool_to_execute_mutation>
+    <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>2</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
+  </merge_tree>
+  <!-- Nothing reads the system log tables, and their inserts and background merges cost more memory
+       and disk than the hot plane's own data: metric_log parts alone have over a thousand columns,
+       each needing a merge buffer, and the profiler's trace_log grew 1.5 GiB a day. query_log and
+       part_log stay, with a 7-day TTL, to diagnose slow queries and merges. -->
+  <metric_log remove="1"/>
+  <query_metric_log remove="1"/>
+  <trace_log remove="1"/>
+  <text_log remove="1"/>
+  <asynchronous_metric_log remove="1"/>
+  <query_thread_log remove="1"/>
+  <query_views_log remove="1"/>
+  <processors_profile_log remove="1"/>
+  <!-- The root volume holds the server log; the data volume holds the system log tables. -->
+  <logger>
+    <level>information</level>
+    <size>100M</size>
+    <count>3</count>
+  </logger>
+  <query_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></query_log>
+  <part_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></part_log>
+  <error_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></error_log>
+  <backup_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></backup_log>
+  <openSSL>
+    <server>
+      <certificateFile>/etc/clickhouse-server/certs/server.pem</certificateFile>
+      <privateKeyFile>/etc/clickhouse-server/certs/server-key.pem</privateKeyFile>
+      <caConfig>/etc/clickhouse-server/certs/ca.pem</caConfig>
+      <verificationMode>none</verificationMode>
+      <loadDefaultCAFile>false</loadDefaultCAFile>
+      <cacheSessions>true</cacheSessions>
+      <disableProtocols>sslv2,sslv3,tlsv1,tlsv1_1</disableProtocols>
+      <preferServerCiphers>true</preferServerCiphers>
+    </server>
+  </openSSL>
+  <named_collections>
+    <observability_rebuild>
+      <url>https://${backup_bucket}.s3.${aws_region}.amazonaws.com/rebuild/</url>
+      <format>Parquet</format>
+      <use_environment_credentials>1</use_environment_credentials>
+    </observability_rebuild>
+  </named_collections>
+</clickhouse>
+XML
+
+admin_password="$(ssm_value '${admin_password_parameter_arn}')"
+ingest_password="$(ssm_value '${ingest_password_parameter_arn}')"
+query_password="$(ssm_value '${query_password_parameter_arn}')"
+
+cat > /etc/clickhouse-server/users.d/observability.xml <<XML
+<clickhouse>
+  <profiles>
+    <observability_ingest><max_threads>1</max_threads><max_memory_usage>536870912</max_memory_usage></observability_ingest>
+    <!-- The hot-plane task runs at most four queries at once. ClickHouse keeps running a stopped
+         task's queries for up to max_execution_time, so eight leaves room for them, and
+         8 x 256 MiB stays inside the server cap. Processor profiles are off because each
+         dashboard query would add about 60 rows to the largest system log. -->
+    <observability_query><readonly>1</readonly><max_threads>1</max_threads><max_execution_time>20</max_execution_time><max_result_rows>10000</max_result_rows><max_result_bytes>10485760</max_result_bytes><max_memory_usage>268435456</max_memory_usage><max_concurrent_queries_for_user>8</max_concurrent_queries_for_user><log_processors_profiles>0</log_processors_profiles></observability_query>
+  </profiles>
+  <users>
+    <default><password>$${admin_password}</password><networks><ip>127.0.0.1</ip><ip>::1</ip></networks></default>
+    <observability_ingest>
+      <password>$${ingest_password}</password>
+      <profile>observability_ingest</profile>
+      <networks><ip>${client_cidr}</ip></networks>
+      <grants>
+        <query>GRANT CREATE TABLE, CREATE VIEW, INSERT, SELECT, ALTER DELETE ON observability.*</query>
+        <query>GRANT SELECT ON system.mutations</query>
+      </grants>
+    </observability_ingest>
+    <observability_query>
+      <password>$${query_password}</password>
+      <profile>observability_query</profile>
+      <networks><ip>${client_cidr}</ip></networks>
+      <grants>
+        <query>GRANT SELECT ON observability.*</query>
+      </grants>
+    </observability_query>
+  </users>
+</clickhouse>
+XML
+chown clickhouse:clickhouse /etc/clickhouse-server/config.d/observability.xml /etc/clickhouse-server/users.d/observability.xml
+chmod 0600 /etc/clickhouse-server/users.d/observability.xml
+
+install -d -m 0700 /root/.clickhouse-client
+cat > /root/.clickhouse-client/config.xml <<XML
+<config><host>127.0.0.1</host><port>9000</port><user>default</user><password>$${admin_password}</password></config>
+XML
+chmod 0600 /root/.clickhouse-client/config.xml
+
+install -d /etc/systemd/system/clickhouse-server.service.d
+cat > /etc/systemd/system/clickhouse-server.service.d/volume.conf <<'UNIT'
+[Unit]
+RequiresMountsFor=/var/lib/clickhouse
+
+[Service]
+LimitNOFILE=262144
+UNIT
+
+systemctl daemon-reload
+systemctl enable clickhouse-server
+systemctl restart clickhouse-server
+for _attempt in $(seq 1 60); do
+  if clickhouse-client --password "$${admin_password}" --query "SELECT 1" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+clickhouse-client --password "$${admin_password}" --query \
+  "CREATE DATABASE IF NOT EXISTS observability"
+
+# The health timer publishes the data volume's used space and the hours since the last successful
+# backup started; the backup association rewrites the marker after each success. A new node
+# starts the clock at its first boot, so its first backup is due within a day.
+install -d -m 0755 /var/lib/agent-observability
+if [[ ! -s /var/lib/agent-observability/backup-started-at ]]; then
+  date -u +%s > /var/lib/agent-observability/backup-started-at
+fi
+cat > /usr/local/sbin/agent-observability-health <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+mountpoint -q /var/lib/clickhouse
+# Picks up a data volume grown in EBS; a no-op otherwise.
+xfs_growfs /var/lib/clickhouse >/dev/null || logger -t agent-observability-health "xfs_growfs /var/lib/clickhouse failed"
+used_percent="$(df --output=pcent /var/lib/clickhouse | tail -n 1 | tr -dc '0-9')"
+backup_started_at="$(cat /var/lib/agent-observability/backup-started-at)"
+backup_age_hours="$(awk -v now="$(date -u +%s)" -v started="$${backup_started_at}" 'BEGIN { printf "%.2f", (now - started) / 3600 }')"
+aws cloudwatch put-metric-data \
+  --region '${aws_region}' \
+  --namespace DeploymentsAI/Observability \
+  --metric-data \
+  "MetricName=DataVolumeUsedPercent,Dimensions=[{Name=Environment,Value=${environment}}],Value=$${used_percent},Unit=Percent" \
+  "MetricName=BackupAgeHours,Dimensions=[{Name=Environment,Value=${environment}}],Value=$${backup_age_hours},Unit=None"
+SCRIPT
+chmod 0755 /usr/local/sbin/agent-observability-health
+cat > /etc/systemd/system/agent-observability-health.service <<'UNIT'
+[Unit]
+Description=Publish ClickHouse node health metrics to CloudWatch
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/agent-observability-health
+UNIT
+cat > /etc/systemd/system/agent-observability-health.timer <<'UNIT'
+[Unit]
+Description=Publish ClickHouse node health metrics every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now agent-observability-health.timer
+
+aws cloudwatch put-metric-data \
+  --region '${aws_region}' \
+  --namespace DeploymentsAI/Observability \
+  --metric-data "MetricName=BootstrapReady,Dimensions=[{Name=Environment,Value=${environment}}],Value=1,Unit=Count"

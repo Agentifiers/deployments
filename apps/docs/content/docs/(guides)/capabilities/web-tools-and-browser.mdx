@@ -1,0 +1,136 @@
+---
+title: "Web and browser tools"
+description: "Search, scrape, crawl, and capture the public web from an agent with the built-in web and browser tools."
+---
+
+The `web.*` tools let an agent search, scrape, crawl, and parse public web content. The `browser.*` tools run headless Chromium inside the agent's sandbox to capture screenshots and drive short, approved browser sessions. These are tools an agent calls during a run, not REST endpoints. Declare them in the agent manifest like any other catalog tool. See [Tools and tool policies](/docs/capabilities/tools).
+
+<Callout type="warn" title="Availability">
+  An installation from the customer root runs `web.*` tools by default against its own private
+  Firecrawl. `browser.*` tools also need the Lambda MicroVM sandbox provider, which is on by
+  default, and a list of origins agents may open, `agent_runtime_browser_allowed_origins`, which is
+  empty by default, so browser tools fail until the operator sets it or sets
+  `agent_runtime_browser_any_public_origin` to `true`. When a family is off, the catalog still lists
+  its tools but runs cannot use them, and `POST /v1/tool-policies/evaluate` does not reflect it.
+</Callout>
+
+## Web tools
+
+The web tools call a private, self-hosted Firecrawl service. All of them are platform `catalog` tools, so their default action decides each call.
+
+| Tool                                                 | Effect        | Default action   | What it does                                                             |
+| ---------------------------------------------------- | ------------- | ---------------- | ------------------------------------------------------------------------ |
+| `web.scrape`                                         | read          | allow            | Scrape one page into Markdown, HTML, links, images, JSON, or metadata.   |
+| `web.search`                                         | read          | allow            | Search the web, news, or image indexes and optionally scrape results.    |
+| `web.map`                                            | read          | allow            | Discover and rank a site's URLs without scraping each page.              |
+| `web.crawl`                                          | execute       | allow            | Start a bounded crawl job.                                               |
+| `web.crawl_params_preview`                           | read          | allow            | Turn a natural-language objective into crawl parameters.                 |
+| `web.crawl_status`, `web.crawl_errors`               | read          | allow            | Read crawl progress, results, and errors.                                |
+| `web.crawl_cancel`                                   | execute       | require_approval | Cancel a crawl.                                                          |
+| `web.batch_scrape`                                   | execute       | allow            | Start a scrape of many URLs.                                             |
+| `web.batch_scrape_status`, `web.batch_scrape_errors` | read          | allow            | Read batch results and errors.                                           |
+| `web.batch_scrape_cancel`                            | execute       | require_approval | Cancel a batch scrape.                                                   |
+| `web.parse`                                          | read          | allow            | Parse a document stored as an organization artifact.                     |
+| `web.extract`, `web.extract_status`                  | execute, read | allow            | Legacy schema-guided extraction. Prefer `web.scrape` with a JSON format. |
+| `web.deep_research`, `web.deep_research_status`      | execute, read | allow            | Deprecated research job.                                                 |
+| `web.generate_llms_txt`, `web.llms_txt_status`       | execute, read | allow            | Deprecated llms.txt generation job.                                      |
+
+### Rules for web tool input
+
+| Rule                 | Limit                                                                                                |
+| -------------------- | ---------------------------------------------------------------------------------------------------- |
+| URL scheme and port  | `http` or `https` on port 80 or 443, without credentials in the URL                                  |
+| URL targets          | Must resolve to public addresses only. Private, loopback, and other reserved addresses are rejected. |
+| URL length           | 4,096 characters                                                                                     |
+| URLs per call        | 100 (10 for `web.extract`)                                                                           |
+| `web.crawl` `limit`  | 1 to 100 pages                                                                                       |
+| `web.search` `limit` | 1 to 100 results                                                                                     |
+| Tool input size      | 256 KiB                                                                                              |
+| Response size        | 25 MiB                                                                                               |
+| `web.parse` file     | Up to 50 MiB, read from an artifact in the caller's organization                                     |
+
+Inputs are checked against a per-tool allowlist of fields. The tools reject Firecrawl `actions` and webhook callbacks.
+
+Start tools such as `web.crawl` and `web.batch_scrape` return an encrypted job ticket instead of the upstream job ID. The ticket is bound to your organization and the job type. The status, errors, and cancel tools accept only that ticket. Crawl and batch status return a `nextCursor` for the next page of results.
+
+## Browser tools
+
+`browser.capture_screenshot`, `browser.screenshot.capture`, and `browser.session.execute` run in the agent's sandbox MicroVM, the same boundary `code.execute` uses.
+
+| Tool                           | Effect | Default action   | Needs                                                         |
+| ------------------------------ | ------ | ---------------- | ------------------------------------------------------------- |
+| `browser.capture_screenshot`   | read   | allow            | A target URL                                                  |
+| `browser.session.plan`         | write  | require_approval | A target URL. Produces the plan a person approves.            |
+| `browser.screenshot.capture`   | read   | allow            | An approved plan (`sessionPlanId`) and its URL                |
+| `browser.session.execute`      | write  | require_approval | An approved plan and 1 to 16 actions                          |
+| `browser.dom_snapshot.capture` | read   | allow            | An approved plan and its URL. Fetches HTML without a browser. |
+| `browser.session.audit_report` | write  | require_approval | An approved plan. Records actions and evidence.               |
+
+Releases that declare `browser.capture_screenshot`, `browser.screenshot.capture`, or `browser.session.execute` need a `run-ephemeral` or `thread-persistent` sandbox on the `aws_lambda_microvm` provider. Otherwise publishing fails with `browser_tool_without_sandbox`. See [Code sandbox](/docs/capabilities/sandbox).
+
+### Targets
+
+A target must use `http` or `https`, carry no credentials, and name a public host. Operators either restrict targets to an allowlist of origins, and a target outside it fails with `Target origin <origin> is not allowed`, or set `agent_runtime_browser_any_public_origin` so agents can open any public site.
+
+With any public origin allowed, Chromium in the sandbox sends every request through a proxy in the sandbox. The proxy resolves each host and connects only when every address it resolves to is public. A page, redirect, frame, image, fetch, or WebSocket aimed at a private, loopback, link-local, or metadata address is refused, including a public name that resolves to one. A main-frame navigation that lands on a refused host fails with `origin_not_allowed`.
+
+`browser.capture_screenshot` also accepts `http://127.0.0.1:<port>/` when the agent's sandbox mode is `thread-persistent`. That lets an agent screenshot a dev server it started earlier in the same thread. The URL must use plain `http`, the literal host `127.0.0.1`, and an explicit port other than the sandbox control port. `localhost` and other loopback or private addresses are rejected.
+
+### Screenshot options
+
+| Option                                    | Values                                                                            |
+| ----------------------------------------- | --------------------------------------------------------------------------------- |
+| `viewport`                                | `mobile` (390×844), `tablet` (820×1180), `desktop` (1280×900), `wide` (1440×1000) |
+| `viewportSize`                            | `width` and `height`, each clamped to 100 to 4,000 px                             |
+| `format`                                  | `png`, `jpeg`, or `webp`                                                          |
+| `fullPage`, `selector`, `waitForSelector` | Capture the full page or one element. Selectors are at most 2,000 characters.     |
+| `timeoutMs`                               | Default 45,000. Maximum 60,000.                                                   |
+| `url`                                     | At most 8,192 bytes after normalization                                           |
+
+Images are limited to 25 MiB. Screenshots are saved as private run artifacts. See [Artifacts](/docs/capabilities/artifacts).
+
+### Browser sessions
+
+A browser session is an approval-gated sequence of actions on one target.
+
+1. The agent calls `browser.session.plan` for a target. The default policy pauses the run for approval. See [Approvals and client tools](/docs/capabilities/approvals-and-client-tools).
+2. After approval, the agent calls `browser.session.execute` with the plan's ID, the same URL, and 1 to 16 actions: `navigate`, `click`, `type`, `select`, `press`, `wait`, or `scroll`. There is no action that runs arbitrary JavaScript. `timeoutMs` takes 1,000 to 60,000.
+3. The session returns a rendered DOM snapshot of at most 2 MiB and a viewport PNG as private artifacts.
+
+`browser.dom_snapshot.capture` does not start a browser. It fetches the approved target over HTTPS, follows redirects only within the approved origin, accepts only HTML, and fails when the page is larger than 2 MiB.
+
+### When the browser fails
+
+When a screenshot or session fails in the browser, the tool call still completes. Its result carries `error` with a `code` and a `message`, and the run continues so the agent can retry or move on. A target the tools refuse before the browser starts fails the same way: a non-public host, an origin outside the allowlist, or a host that resolves to a non-public address returns `origin_not_allowed`, and a host whose DNS lookup fails returns `navigation_failed`. Malformed input, such as a missing URL, still fails the run. Codes include `selector_not_found`, `navigation_failed`, `origin_not_allowed`, `popup_not_allowed`, `dimensions_exceeded`, `timeout`, and `internal`. A failed `browser.session.execute` is not run again when the run resumes. It returns the same error.
+
+## Use it
+
+Declare the tools in the agent manifest and give the agent a MicroVM sandbox:
+
+```json
+{
+  "spec": {
+    "capabilities": {
+      "tools": [
+        { "name": "web.search", "required": false, "requiredScopes": [] },
+        { "name": "web.scrape", "required": false, "requiredScopes": [] },
+        { "name": "browser.capture_screenshot", "required": false, "requiredScopes": [] }
+      ]
+    },
+    "sandbox": { "mode": "run-ephemeral", "provider": "aws_lambda_microvm" }
+  }
+}
+```
+
+Check a tool's input schema before you write instructions that use it:
+
+```bash
+deployments tool get --name browser.capture_screenshot
+deployments tool list --prefix web.
+```
+
+## Reference
+
+- API: [List tools](/docs/api/reference/tools/list-tools), [Get a tool](/docs/api/reference/tools/get-tool)
+- CLI: [`deployments tool`](/docs/cli/reference/tool#tool-list)
+- Related: [Agent manifests](/docs/capabilities/agent-manifests), [Code sandbox](/docs/capabilities/sandbox)

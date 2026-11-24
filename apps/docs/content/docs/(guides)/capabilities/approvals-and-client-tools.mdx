@@ -1,0 +1,193 @@
+---
+title: "Approvals and client tools"
+description: "Pause a run until a person approves a tool call, or hand a tool call to your own application to execute and answer."
+---
+
+Two features pause a run until something outside the agent responds. An **approval** holds a tool call until a person approves or rejects it. A **client tool** hands the tool call to the application that submitted the run, which executes it and sends the result back. Use approvals for actions that need a human decision. Use client tools for actions that only your application can perform, such as reading device state or showing a confirmation screen.
+
+Both put the run in a waiting status, and you resume it through the runtime API.
+
+## Approvals
+
+### When a run asks for approval
+
+A tool call needs approval when the [tool policy](/docs/capabilities/tools) that applies to it, or the tool's default policy action, resolves to `require_approval`. When the model makes such a call:
+
+- The run moves to `waiting-for-approval`.
+- The tool call moves to `waiting`, with `policyAction: "require-approval"`.
+- The platform creates an approval with status `pending` and emits an `approval.requested` event on the thread stream.
+
+The approval's `request` describes the call with `toolName`, `effect`, `inputSummary`, and `requiredScopes`. The approval also carries `runId`, `toolCallId`, and an optional `expiresAt`. For a customer run it names the deployment in `requestedByAgentDeploymentId`. For a preview run it names the execution binding in `executionBindingId`.
+
+### Resolve an approval
+
+`POST /v1/runs/{runId}/approvals/{approvalId}/resolve` takes `decision` (`approved` or `rejected`) and the run's `threadId`. The CLI sends the decision for you with `approval approve` and `approval reject`.
+
+| Decision                              | Approval status | Tool call                                   | Run                             |
+| ------------------------------------- | --------------- | ------------------------------------------- | ------------------------------- |
+| `approved`                            | `approved`      | Returns to `pending` and executes           | Returns to `queued` and resumes |
+| `rejected`                            | `rejected`      | `failed` with "Tool approval was rejected." | `failed`                        |
+| Any decision after `expiresAt` passed | `expired`       | `failed` with "Tool approval expired."      | `failed`                        |
+
+Resolving is safe to repeat. Sending the recorded decision again returns the same result. Sending the other decision fails with `409 approval_already_resolved`.
+
+Canceling a run that waits for approval also resolves the approval. The approval becomes `rejected`, the tool call fails, and the run becomes `canceled`.
+
+| Error                                                                | Status | Cause                                                                            |
+| -------------------------------------------------------------------- | ------ | -------------------------------------------------------------------------------- |
+| `approval_not_found`, `run_not_found`, `tool_call_not_found`         | 404    | The approval, run, or tool call does not exist in your scope.                    |
+| `approval_already_resolved`                                          | 409    | The approval already has a different decision.                                   |
+| `run_not_waiting_for_approval`, `tool_call_not_waiting_for_approval` | 409    | The run or tool call is no longer waiting for this approval.                     |
+| `evaluation_approval_unsupported`                                    | 409    | Evaluation runs reject approval-gated tool calls instead of waiting.             |
+| `execution_binding_expired`                                          | 409    | The preview that owns the run has expired, so the run cannot resume.             |
+| `thread_publication_pending`                                         | 409    | The thread still has run activity that the platform has not finished publishing. |
+
+`GET /v1/approvals` lists approvals in the environment, and the `status` filter accepts `pending`, `approved`, `rejected`, or `expired`. Reading approvals needs the `approvals:read` scope, and resolving needs `approvals:write`.
+
+### Audit callback dispatches
+
+When an [HTTP callback tool](/docs/capabilities/extensions-and-hosted-code) dispatches, the platform stores callback dispatch evidence under the tool call's ID. The evidence records the policy decision (`allow` or `require-approval`), the approval that allowed the call with who resolved it, a hash of the input, and the release and deployment that made the call. Read it with `GET /v1/callback-dispatch-evidence/{evidenceId}`, using the tool call ID as `evidenceId`. The route needs `approvals:read`.
+
+## Client tools
+
+### Register a client tool
+
+A client tool is an [extension tool](/docs/capabilities/extensions-and-hosted-code) whose `execution.type` is `client`. The worker never calls it. Instead, the platform hands the call to your application.
+
+| Field                                             | Rules                                                                                                         |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `execution.type`                                  | `client`.                                                                                                     |
+| `execution.timeoutMs`                             | How long your application has to answer, from 1,000 to 3,600,000 milliseconds. Default 900,000 (15 minutes).  |
+| `inputSchema`                                     | Required JSON schema with `type: "object"`. The worker validates the model's input against it before pausing. |
+| `outputSchema`                                    | Optional JSON schema that a completed result must satisfy.                                                    |
+| `effect`, `defaultPolicyAction`, `requiredScopes` | The same as for other extension tools.                                                                        |
+
+To use the tool, declare it in the manifest's `spec.capabilities.tools` and list it in `spec.runtime.modelTools`. A client tool needs a caller that can answer, so the manifest must restrict `spec.triggers` to `["api"]`. Otherwise publishing, deploying, retargeting, starting a canary, and promoting all fail with `client_tool_on_autonomous_trigger`. See [Tool capabilities](/docs/capabilities/agent-manifests#tool-capabilities).
+
+<Callout type="warn" title="Availability">
+  Client tools work only in runs with an interactive caller. In a workflow, a client tool call fails
+  at once, and evaluation runs deny client tool calls instead of pausing.
+</Callout>
+
+### Answer a client tool call
+
+1. Submit a run as usual. See [Threads and runs](/docs/capabilities/threads-and-runs#submit-a-run).
+2. When the model calls the client tool, the run moves to `waiting-for-tool`. The tool call has `executionType: "client"`, `status: "running"`, the model's `input`, an `expiresAt` deadline, and the tool's `outputSchema` when it has one.
+3. Find the call. The thread stream emits a `tool.running` event whose `payload.clientTool` carries `input`, `expiresAt`, and `outputSchema`. You can also poll `GET /v1/runs/{runId}/tool-calls` and select calls with `executionType: "client"` and `status: "running"`.
+4. Execute the tool in your application.
+5. Send the result with `POST /v1/runs/{runId}/tool-calls/{toolCallId}/results`.
+
+The result body has these fields:
+
+| Field                 | Rules                                                                                                |
+| --------------------- | ---------------------------------------------------------------------------------------------------- |
+| `threadId`            | Required. The run's thread.                                                                          |
+| `outcome`             | Required. `completed` or `failed`.                                                                   |
+| `output`              | Required when `outcome` is `completed`. A JSON object of at most 96 KiB that matches `outputSchema`. |
+| `outputSummary`       | Optional text the model sees, at most 1,000 characters. Use it to explain a failure.                 |
+| `externalOperationId` | Optional for client tools. It defaults to the tool call ID.                                          |
+
+Both outcomes resume the run. With `failed`, the model sees the failure and can try another approach.
+
+If no result arrives by `expiresAt`, the platform fails the tool call with "Client tool did not return a result before it expired." and resumes the run. A completed result that arrives after `expiresAt` fails with `409 tool_call_expired`, or with `409 tool_call_already_resolved` once the platform has failed the call.
+
+Sending the same result twice is safe and returns the recorded result. A different result for a call that already has one fails with `409 tool_call_already_resolved`.
+
+| Error                         | Status | Cause                                                                                                         |
+| ----------------------------- | ------ | ------------------------------------------------------------------------------------------------------------- |
+| `invalid_tool_output`         | 400    | `output` is missing for a completed call, is not an object, exceeds 96 KiB, or does not match `outputSchema`. |
+| `invalid_tool_output_schema`  | 400    | The tool's `outputSchema` cannot be compiled.                                                                 |
+| `external_operation_mismatch` | 409    | `externalOperationId` does not match the call.                                                                |
+| `run_not_waiting_for_tool`    | 409    | The run is no longer waiting for this call.                                                                   |
+| `tool_call_expired`           | 409    | The deadline passed before the result arrived.                                                                |
+| `tool_call_already_resolved`  | 409    | The call already has a different result.                                                                      |
+
+Listing tool calls needs `runs:read`, and sending a result needs `runs:write`.
+
+## Use it
+
+1. Register a client tool. The example gives the application two minutes to answer.
+
+   ```bash
+   deployments extension create --name weather.lookup --description "Look up the current weather on the user's device." --effect read --execution '{"type":"client","timeoutMs":120000}' --input-schema '{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}' --scopes '[]' --default-action allow
+   ```
+
+2. Add `weather.lookup` to the manifest's tools and `modelTools`, set `spec.triggers` to `["api"]`, then publish and deploy. Submit a run and wait for the tool call.
+
+   ```bash
+   deployments tool-call list --run $RUN_ID
+   ```
+
+3. Answer the call with the tool's output.
+
+   ```bash
+   deployments tool-call result $TOOL_CALL_ID --run $RUN_ID --thread $THREAD_ID --outcome completed --output '{"temperatureC":18}'
+   ```
+
+4. For tools behind a `require_approval` policy, list pending approvals and decide.
+
+   ```bash
+   deployments approval list --status pending
+   deployments approval approve $APPROVAL_ID --run $RUN_ID --thread $THREAD_ID
+   deployments approval reject $APPROVAL_ID --run $RUN_ID --thread $THREAD_ID
+   ```
+
+5. Check what authorized an HTTP callback dispatch.
+
+   ```bash
+   deployments callback-evidence show $TOOL_CALL_ID
+   ```
+
+A client loop through the SDK reads the pending calls of a run and answers each one:
+
+```ts
+import {
+  createClient,
+  createConfig,
+  listRunToolCalls,
+  resolveToolResult,
+} from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const runId = process.env.RUN_ID!;
+const threadId = process.env.THREAD_ID!;
+
+async function runClientTool(name: string, input: Record<string, unknown>) {
+  if (name === "weather.lookup") return { temperatureC: 18, city: String(input.city) };
+  throw new Error(`Unknown client tool ${name}`);
+}
+
+const { data } = await listRunToolCalls({ client, path: { runId } });
+const pending = (data?.toolCalls ?? []).filter(
+  (call) => call.executionType === "client" && call.status === "running",
+);
+
+for (const call of pending) {
+  try {
+    const output = await runClientTool(call.toolName, call.input ?? {});
+    await resolveToolResult({
+      client,
+      path: { runId, toolCallId: call.id },
+      body: { threadId, outcome: "completed", output },
+    });
+  } catch (cause) {
+    await resolveToolResult({
+      client,
+      path: { runId, toolCallId: call.id },
+      body: { threadId, outcome: "failed", outputSummary: String(cause).slice(0, 1000).trim() },
+    });
+  }
+}
+```
+
+## Reference
+
+- API: [list approvals](/docs/api/reference/runtime/list-approvals), [get approval](/docs/api/reference/runtime/get-approval), [resolve approval](/docs/api/reference/runtime/resolve-approval), [list tool calls](/docs/api/reference/runtime/list-run-tool-calls), [submit tool result](/docs/api/reference/runtime/resolve-tool-result), [get callback dispatch evidence](/docs/api/reference/runtime/get-callback-dispatch-evidence), [create extension tool](/docs/api/reference/extensions/create-extension-tool)
+- CLI: [`deployments approval`](/docs/cli/reference/approval), [`deployments tool-call`](/docs/cli/reference/tool-call), [`deployments callback-evidence`](/docs/cli/reference/callback-evidence), [`deployments extension`](/docs/cli/reference/extension)
+- SDK: [Runtime functions](/docs/sdk/reference#runtime), [Extensions functions](/docs/sdk/reference#extensions)

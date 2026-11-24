@@ -1,0 +1,25 @@
+export * from "./provider-oauth-material.ts";
+export * from "./tenant-role-sessions.ts";
+export {
+  CREDENTIAL_VAULT_ALGORITHM,
+  CREDENTIAL_VAULT_SCHEMA_VERSION,
+  CREDENTIAL_VAULT_STORE,
+  CredentialDataKeyCache,
+  CredentialVaultError,
+  credentialVaultEncryptionContext,
+  credentialVaultEncryptionContextHash,
+  decryptCredentialDocument,
+  encryptCredentialDocument,
+  normalizeCredentialVaultIdentity,
+  normalizeCredentialVaultSecret,
+  type CredentialVaultIdentity,
+  type CredentialVaultOwnerType,
+  type CredentialVaultPreparedMutation,
+  type CredentialVaultReadRequest,
+  type CredentialVaultReference,
+  type CredentialVaultReferenceRequest,
+  type CredentialVaultSecretDocument,
+  type CredentialVaultSecretInput,
+  type CredentialVaultService,
+  type CredentialVaultWriteRequest,
+} from "@deployments-ai/db";

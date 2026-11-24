@@ -1,0 +1,67 @@
+#!/bin/bash
+set -euo pipefail
+
+# User data runs once, so a transient repository failure must not leave the relay unbootstrapped.
+for attempt in $(seq 10); do
+  if curl -fsSL -o /etc/yum.repos.d/tailscale.repo https://pkgs.tailscale.com/stable/amazon-linux/2023/tailscale.repo &&
+    dnf install -y tailscale socat; then
+    break
+  fi
+  [ "$attempt" = 10 ] && exit 1
+  sleep 15
+done
+systemctl enable --now tailscaled
+
+install -m 0755 /dev/stdin /usr/local/sbin/tailscale-join <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+# tailscaled restores a persisted login shortly after boot; only an unjoined node needs a key.
+for _ in $(seq 12); do
+  tailscale status >/dev/null 2>&1 && exit 0
+  sleep 5
+done
+key_file=$(mktemp /run/tailscale-auth-key.XXXXXX)
+trap 'rm -f "$key_file"' EXIT
+while :; do
+  aws ssm get-parameter --region '${aws_region}' --name '${auth_key_parameter_name}' \
+    --with-decryption --query Parameter.Value --output text >"$key_file" || true
+  if [ -s "$key_file" ] && [ "$(cat "$key_file")" != pending ]; then break; fi
+  sleep 30
+done
+tailscale up --auth-key="file:$key_file" --hostname='${tailnet_hostname}' --accept-dns=false --shields-up --timeout=120s
+SCRIPT
+
+cat >/etc/systemd/system/tailscale-join.service <<'UNIT'
+[Unit]
+Description=Join the tailnet with the auth key from SSM
+Wants=network-online.target
+After=network-online.target tailscaled.service
+Requires=tailscaled.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/sbin/tailscale-join
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat >/etc/systemd/system/tailnet-relay.service <<'UNIT'
+[Unit]
+Description=Forward TCP ${upstream_port} to ${upstream_address}:${upstream_port} over the tailnet
+
+[Service]
+ExecStart=/usr/bin/socat TCP-LISTEN:${upstream_port},fork,reuseaddr TCP:${upstream_address}:${upstream_port}
+DynamicUser=yes
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable tailscale-join.service tailnet-relay.service
+systemctl start --no-block tailscale-join.service tailnet-relay.service

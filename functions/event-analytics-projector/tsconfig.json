@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/functions/event-analytics-projector",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/event-analytics-projector.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    {
+      "path": "../../packages/events"
+    }
+  ]
+}

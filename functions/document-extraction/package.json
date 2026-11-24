@@ -1,0 +1,24 @@
+{
+  "name": "@deployments-ai/document-extraction",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "smoke:textract": "bun scripts/textract-smoke.ts",
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-textract": "3.1090.0",
+    "@deployments-ai/agent-manifest": "workspace:*",
+    "@deployments-ai/file-text": "workspace:*",
+    "@deployments-ai/net-security": "workspace:*",
+    "effect": "4.0.0-beta.92",
+    "fflate": "0.8.3",
+    "htmlparser2": "10.1.0",
+    "pdfjs-dist": "6.4.299",
+    "saxes": "6.0.0"
+  }
+}

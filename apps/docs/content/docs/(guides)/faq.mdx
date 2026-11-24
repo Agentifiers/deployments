@@ -1,0 +1,79 @@
+---
+title: "FAQ"
+description: "Answers about licensing, self-hosting, costs, supported regions, security reports, and contributing."
+---
+
+## Licensing
+
+### What license is the platform under?
+
+The platform repository is licensed under the Functional Source License, Version 1.1, with the Apache 2.0 future license (`FSL-1.1-ALv2`). The full terms are in the repository's `LICENSE` file. FSL is a source-available license, not an OSI-approved open source license.
+
+### What does the license let me do?
+
+You may use, copy, modify, create derivative works of, and redistribute the software for any purpose other than a Competing Use. The license names these permitted purposes explicitly:
+
+- your internal use and access;
+- non-commercial education;
+- non-commercial research;
+- professional services you provide to a licensee who uses the software under the license.
+
+When you redistribute the software or a modified copy, you must include the license terms or a link to them and keep the copyright notices.
+
+### What is a Competing Use?
+
+A Competing Use is making the software available to others in a commercial product or service that substitutes for the software, substitutes for another product or service the licensor offers using the software as of the date that version was released, or offers the same or substantially similar functionality. In plain words: you can run the platform for your own organization and its agents, but you cannot sell or host it as a service that competes with it.
+
+The `LICENSE` file is the authority. This summary does not change it.
+
+### When does it become Apache 2.0?
+
+Each version becomes available under the Apache License, Version 2.0, on the second anniversary of the date it was made available. The grant is irrevocable, so on and after that date you may use that version under Apache 2.0 instead.
+
+### What license are the CLI and SDK under?
+
+`@agentifiers/deployments-cli` and `@agentifiers/deployments-sdk` are licensed under the MIT License. Each package carries its own `LICENSE` file, and its `package.json` declares `MIT`. You can use them in any project, including commercial ones.
+
+### What about third-party components?
+
+The repository's `NOTICE` file lists incorporated and bundled third-party software and its licenses. The web tools runtime runs some AGPL-3.0 programs as separate containers that communicate with the platform only over the network. They are not part of the platform's code and stay under their own licenses.
+
+## Running the platform
+
+### Is there a hosted service?
+
+No public hosted service is available. You run the platform in your own AWS account. [Install in your AWS account](/docs/operate/install) walks through the account bootstrap, the installation root, and the first deploy.
+
+### Which cloud does it run on?
+
+AWS only. One installation runs in one AWS account and one region. [Architecture](/docs/operate) lists the AWS services it uses.
+
+### Which regions are supported?
+
+[Regions and quotas](/docs/operate/regions-and-quotas) lists the regions and the service quotas to raise before the first deploy.
+
+### What does it cost to run?
+
+You pay AWS and your model providers directly. [Costs](/docs/operate/costs) breaks down what drives the bill.
+
+### How do people sign in?
+
+The platform runs its own identity service. Self-service registration is off by default. [Users and sign-in](/docs/operate/users) explains how the first administrator and everyone else get accounts.
+
+### How do I upgrade?
+
+Build a release bundle from a newer commit and deploy it. [Upgrades and rollbacks](/docs/operate/upgrades) covers what to check first.
+
+## Security and contributions
+
+### How do I report a vulnerability?
+
+Report it privately through GitHub private vulnerability reporting on the repository, as the repository's `SECURITY.md` describes. Do not open a public issue for a suspected vulnerability. [Security model](/docs/operate/security) describes how the platform isolates tenants and authenticates its components.
+
+### Can I contribute code?
+
+The repository is source available and does not accept pull requests. Open an issue to report a bug or request a change; the maintainers write, review, and ship every change. The repository's `CONTRIBUTING.md` describes the policy.
+
+### How do I build and test changes?
+
+The repository's `README.md` lists the prerequisites and the commands that build and test it. `bun run signoff:verify` runs the full check suite and build. Commit messages follow Conventional Commits, and `AGENTS.md` describes the repository's conventions. Contributor documentation for the end-to-end suites is in `packages/e2e/README.md`.

@@ -1,0 +1,137 @@
+---
+title: "Configuration and context"
+description: "Where the CLI keeps its config, how flags, environment variables, and profiles combine, and how to store a tenancy context."
+---
+
+Every command resolves the same settings before it runs: the profile, the API host, the credential, the organization, project, environment, and workspace, and whether to call the live API or the local mock. This page explains where those values come from and how to store the ones you use every day.
+
+## Where the CLI keeps its config
+
+The CLI stores profiles in one JSON file. It picks the location in this order:
+
+1. `$DEPLOYMENTS_CONFIG_DIR/deployments/config.json`, when `DEPLOYMENTS_CONFIG_DIR` is set. The value must be an absolute path. Anything else fails with exit code `7`.
+2. `$XDG_CONFIG_HOME/deployments/config.json`, when `XDG_CONFIG_HOME` is an absolute path.
+3. `~/.config/deployments/config.json` otherwise.
+
+The CLI creates the directory with mode `0700` and writes the file with mode `0600`. Each write goes to a temporary file that then replaces the config, so an interrupted command never leaves half a file. SQLite lock files named after the config file sit next to it and stop two commands from writing at once.
+
+Point `DEPLOYMENTS_CONFIG_DIR` at a temporary directory to give a test or a CI job its own config:
+
+```bash
+export DEPLOYMENTS_CONFIG_DIR="$RUNNER_TEMP/deployments"
+```
+
+If the file does not exist, the CLI behaves as if it held one profile named `default` that calls `https://api.us.deployments.ai` in live mode.
+
+### What the file holds
+
+```json
+{
+  "version": 1,
+  "currentProfile": "default",
+  "profiles": {
+    "default": {
+      "apiUrl": "https://api.example.com",
+      "mock": false,
+      "organizationId": "<organization-id>",
+      "projectId": "<project-id>",
+      "environmentId": "<environment-id>"
+    }
+  }
+}
+```
+
+`deployments auth login` adds the credential fields `apiKey`, `apiKeyExpiresAt`, and `refreshToken` to a profile. Change the file through `deployments auth` and `deployments context` rather than by hand. The CLI rejects a file that is not valid JSON or that has an unknown `version`, with exit code `7`.
+
+## How the CLI resolves a setting
+
+For each setting, the CLI takes the first value it finds in this order:
+
+1. A flag on the command, such as `--env` or `--api-url`.
+2. A `DEPLOYMENTS_*` environment variable.
+3. The active profile in the config file.
+4. The built-in default.
+
+| Setting      | Flag                 | Environment variable                         | Profile field    | Default                         |
+| ------------ | -------------------- | -------------------------------------------- | ---------------- | ------------------------------- |
+| Profile      | `--profile`          | `DEPLOYMENTS_PROFILE`                        | `currentProfile` | `default`                       |
+| API host     | `--api-url`          | `DEPLOYMENTS_API_URL`                        | `apiUrl`         | `https://api.us.deployments.ai` |
+| Credential   | `--api-key`          | `DEPLOYMENTS_API_KEY`                        | `apiKey`         | none                            |
+| Organization | `--org`              | `DEPLOYMENTS_ORG`                            | `organizationId` | none                            |
+| Project      | `--project`          | `DEPLOYMENTS_PROJECT`                        | `projectId`      | none                            |
+| Environment  | `--env`              | `DEPLOYMENTS_ENVIRONMENT`                    | `environmentId`  | none                            |
+| Workspace    | `--workspace`        | `DEPLOYMENTS_WORKSPACE`                      | `workspaceId`    | none                            |
+| Mode         | `--mock` or `--live` | `DEPLOYMENTS_MOCK=1` or `DEPLOYMENTS_LIVE=1` | `mock`           | live                            |
+
+A flag or variable that is set but empty, or that has leading or trailing spaces, fails with exit code `7`. The API host must be an HTTPS origin with no path, query, or fragment. Plain HTTP works only for loopback hosts such as `localhost` and `127.0.0.1`.
+
+Two more variables affect every command. `DEPLOYMENTS_CONFIG_DIR` moves the config file, as described above. `NO_COLOR` turns off ANSI color, the same as `--no-color`.
+
+The credential follows one extra rule. The CLI uses `DEPLOYMENTS_API_KEY` only when the API host comes from `DEPLOYMENTS_API_URL` or the profile, never when you pass `--api-url`. A stored `apiKey` goes only to the origin it was saved for. [Signing in](/docs/cli/authentication#credentials-stay-with-their-host) explains why.
+
+### A new organization drops the levels below it
+
+Organizations contain projects, projects contain environments, and environments contain workspaces. When you set a level at a higher precedence than the levels below it, the CLI drops those lower levels instead of mixing IDs from two places.
+
+Suppose the active profile stores an organization, project, and environment, and you run a command with only `--org` set to another organization. The command runs with the new organization and no project or environment. A command that needs an environment then fails with exit code `7`. Pass the lower levels at the same or a higher precedence. When the organization comes from a flag, pass the project and environment as flags too:
+
+```bash
+deployments agent list --org "$OTHER_ORG_ID" --project "$OTHER_PROJECT_ID" --env "$OTHER_ENV_ID"
+```
+
+The same rule applies one level down. A new project drops the stored environment and workspace, and a new environment drops the stored workspace.
+
+## Store a context
+
+Most commands need an environment. Store your usual organization, project, and environment in the profile so you can leave the flags off:
+
+```bash
+deployments context set --org "$ORG_ID" --project "$PROJECT_ID" --env "$ENV_ID"
+```
+
+The command saves the values and prints the resolved context. Add `--workspace` to store a workspace too.
+
+`deployments context set` follows the hierarchy:
+
+- If you change the organization, the CLI clears the stored project, environment, and workspace, unless you pass new ones in the same command.
+- If you set only a lower level, such as `--env`, the CLI keeps the levels above it as they currently resolve.
+- `--api-url` changes the profile's host. If the new host is a different origin, the CLI deletes the stored credential.
+- `--live` and `--mock` change the profile's mode.
+
+To see the context that commands resolve from the active profile and the environment variables, run:
+
+```bash
+deployments context show
+```
+
+The output lists `profileName`, `apiUrl`, the organization, project, environment, and workspace IDs, and `mock`. If a credential resolves, it shows as `[REDACTED]`.
+
+To remove the stored organization, project, environment, and workspace from a profile, run:
+
+```bash
+deployments context clear
+```
+
+The host, credential, and mode stay. Like `deployments auth login`, the `context set` and `context clear` commands make the profile they change the current profile.
+
+## How context reaches the API
+
+The CLI sends the resolved IDs as the `x-deployments-organization`, `x-deployments-project`, `x-deployments-environment`, and `x-deployments-workspace` request headers. Tenancy commands, such as those for projects, environments, API keys, and agent definitions, send only the header that matches the command's scope. For those commands the CLI also checks that the IDs are canonical ULIDs and fails with exit code `7` if they are not. [Organizations, projects, and environments](/docs/capabilities/tenancy) explains the hierarchy itself.
+
+## Mock or live
+
+Live mode is the default and calls the API host. Mock mode uses a local transport that returns fixed sample data. The CLI picks the mode in the usual order:
+
+1. `--mock` or `--live` on the command.
+2. `DEPLOYMENTS_MOCK=1` or `DEPLOYMENTS_LIVE=1`.
+3. The profile's `mock` field.
+
+Passing both flags, or setting both variables without a flag, is a usage error with exit code `2`.
+
+In mock mode, the CLI fills in a sample organization, project, and environment for any you did not set. It prints a `MOCK` banner before human-readable output and skips the confirmation prompt for destructive commands.
+
+## Reference
+
+- [`deployments context show`](/docs/cli/reference/context#context-show), [`deployments context set`](/docs/cli/reference/context#context-set), and [`deployments context clear`](/docs/cli/reference/context#context-clear)
+- [Global flags](/docs/cli/reference#global-flags)
+- [Signing in](/docs/cli/authentication)

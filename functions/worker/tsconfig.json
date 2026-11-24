@@ -1,0 +1,40 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/functions/worker",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/functions/worker.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../channel-provider-runtime" },
+    { "path": "../memory-runtime" },
+    { "path": "../../packages/agent-manifest" },
+    { "path": "../../packages/agent-runtime" },
+    { "path": "../../packages/app-database" },
+    { "path": "../../packages/automations" },
+    { "path": "../../packages/browser-screenshot" },
+    { "path": "../../packages/channel-adapters" },
+    { "path": "../../packages/conversations" },
+    { "path": "../../packages/credential-vault" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/events" },
+    { "path": "../../packages/file-text" },
+    { "path": "../../packages/ingress-media" },
+    { "path": "../../packages/memory" },
+    { "path": "../../packages/mcp-client" },
+    { "path": "../../packages/model-gateway" },
+    { "path": "../../packages/net-security" },
+    { "path": "../../packages/observability" },
+    { "path": "../../packages/organization-admission" },
+    { "path": "../../packages/providers" },
+    { "path": "../../packages/sandbox-hosts" },
+    { "path": "../../packages/secret-store" },
+    { "path": "../../packages/tools" },
+    { "path": "../../packages/usage" },
+    { "path": "../../packages/streaming" },
+    { "path": "../../packages/tenant-limits" },
+    { "path": "../../packages/web-tools" }
+  ]
+}

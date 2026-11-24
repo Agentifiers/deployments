@@ -1,0 +1,10 @@
+---
+"@deployments-ai/cli": minor
+"@deployments-ai/sdk": minor
+---
+
+Add custom domains to agent-built apps. Four operations manage them. `listAppDomains` (`GET /v1/apps/{appId}/domains`) needs `apps:read`. `attachAppDomain` (`POST /v1/apps/{appId}/domains`), `refreshAppDomain` (`POST /v1/apps/{appId}/domains/{domainId}/refresh`), and `detachAppDomain` (`DELETE /v1/apps/{appId}/domains/{domainId}`) need `apps:publish` and admit the same members and API keys as `setAppPublication`. The CLI calls them with `deployments app-domain list|attach|refresh|detach`.
+
+Attach takes `{ hostname }` and answers 200 with the domain and the DNS records to publish: a `TXT` record `_deployments-app.<hostname>` = `deployments-app=<token>` and a `CNAME` to the installation's routing endpoint, with a note on ALIAS, ANAME, or CNAME flattening for a zone apex. Attaching a hostname the app already holds returns the existing domain. The API trims and lowercases the hostname. A hostname that is not a multi-label ASCII name of at most 236 characters answers 422 `invalid_hostname`, because a longer one would push the `TXT` name past the 253 characters DNS allows. The installation's own hostnames and every name under them answer 422 `hostname_reserved`. Refresh checks the `TXT` record and moves the domain from `unverified` to `verified`. It needs no `Idempotency-Key`. It answers 422 `txt_not_found`, 409 `domain_claimed` when another app, in any organization, verified the hostname first, and 503 `dns_lookup_failed` when the lookup fails. A refresh before the `TXT` record exists can leave resolvers answering `txt_not_found` for up to the zone's negative-caching TTL. An app holds at most 10 domains, and an organization at most 50 verified domains. Erasing an app detaches its domains first.
+
+Installations that set `APPS_DOMAIN` for the API now also set `APPS_CUSTOM_DOMAIN_TARGET` and `APPS_RESERVED_HOSTNAMES`, and the API refuses to start without either. The platform module wires the first from the app runtime's routing endpoint and the second from the API, identity, console, and stream gateway hostnames.

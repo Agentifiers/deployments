@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/web-tools",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/web-tools.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../browser-screenshot" },
+    { "path": "../db" },
+    { "path": "../events" },
+    { "path": "../tools" }
+  ]
+}

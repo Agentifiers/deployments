@@ -1,0 +1,301 @@
+---
+title: "Model gateway"
+description: "How the model gateway authorizes, routes, and records model traffic, and how you run it."
+---
+
+Every model call that a platform runtime makes goes through the model gateway. The gateway is a small service that checks a short-lived signed token, then forwards the request to a pinned Bifrost model router that holds the provider credentials. This page is for operators who run the model runtime. To choose models for an agent or set an environment model policy, see [Models and model policies](/docs/capabilities/models).
+
+<Callout type="warn" title="Availability">
+  The `platform` OpenTofu module creates the model runtime by default (`model_runtime_enabled`),
+  with `bifrost_desired_count` `0` and the hosted providers `openai` and `openrouter`. The customer
+  root in `infrastructure/environments/customer` always runs the model runtime, defaults
+  `bifrost_desired_count` to `1`, and hosts only `bedrock` unless you change
+  `model_runtime_hosted_providers`.
+</Callout>
+
+## How a model call flows
+
+1. The caller invokes its token issuer, a Lambda function, and receives a token that names the models it may call.
+2. The caller sends an OpenAI-compatible request to the gateway with the token as a bearer token.
+3. The gateway verifies the token and checks every requested model against it. For a run token, it also checks that the run still holds its thread lease.
+4. The gateway replaces the caller's credentials with an internal key and forwards the request to Bifrost. Bifrost calls the provider.
+
+The agent worker calls models during a run. Evaluations, memory, brain, and web tools call models outside a run. No caller ever holds a provider API key or the signing key.
+
+## Components
+
+| Component              | What it is                                                                                                                                                                                                    |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Internal load balancer | An internal Application Load Balancer in the private subnets. Its HTTP listener on port 80 accepts traffic from the VPC CIDR and forwards it to the gateway on port 8080. The health check path is `/health`. |
+| Gateway service        | One ECS service on Fargate (ARM64, never Spot). Each task runs three containers that share a task-local volume.                                                                                               |
+| Token signing key      | An asymmetric KMS key (`ECC_NIST_P256`, `SIGN_VERIFY`). Only the token issuer roles may sign with it. The gateway task role may only read its public key.                                                     |
+| Token issuers          | One Lambda function per issuer. IAM grants on each function decide which runtime roles may invoke it.                                                                                                         |
+| Runtime parameters     | SecureString parameters in SSM Parameter Store for each hosted provider's API key and for the operator model grants. OpenTofu creates them with a placeholder and never writes their values.                  |
+| Model catalog sync     | A Lambda function that an EventBridge schedule runs every 6 hours.                                                                                                                                            |
+
+The three containers in a gateway task are:
+
+- **`bifrost-config`** runs once at task start. It renders the Bifrost configuration for the hosted providers and generates a fresh internal virtual key. Both files are read-only and stay on the task-local volume. The configuration allows direct keys, so a request can name the provider key Bifrost uses. Only the gateway can send one, because Bifrost listens on loopback and the gateway never forwards a caller's direct-key header.
+- **`bifrost`** listens only on `127.0.0.1:8081` and has no port mapping. The load balancer, the VPC, and other tasks cannot reach it.
+- **`model-gateway`** listens on port 8080, verifies tokens, reads run leases from the execution table, and forwards admitted requests to Bifrost.
+
+## Tokens
+
+A gateway token is a compact JWS signed with ES256. Its `kid` header names the KMS key that signed it.
+
+| Claim    | Value                                                                             |
+| -------- | --------------------------------------------------------------------------------- |
+| `iss`    | `deployments-ai-model-token-issuer`                                               |
+| `aud`    | `model-gateway`                                                                   |
+| `sub`    | `run:<runId>` for run tokens, `service:<service>` for service tokens              |
+| `iat`    | Issue time in seconds                                                             |
+| `exp`    | Expiry time in seconds                                                            |
+| `jti`    | A random token ID                                                                 |
+| `kind`   | `run` or `service`                                                                |
+| `models` | The canonical platform model IDs the bearer may call, resolved when it was minted |
+
+Run tokens also carry the run's organization, project, environment, and workspace. They carry whichever agent definition, release, deployment, or execution binding the run has, plus the run ID, thread ID, and `leaseOwner`. Service tokens carry the service name and any tenant context the calling service supplied for attribution.
+
+A token may also carry `funding`, which names, for `openai` or `openrouter`, the organization's model credential ID and key version that pays for that provider's calls. A provider that `funding` does not name is paid for with the deployment's provider key. A token that carries `funding` must name an organization. [Organization model keys](#organization-model-keys) describes when the issuers set it.
+
+| Limit                                 | Value                   |
+| ------------------------------------- | ----------------------- |
+| Run token lifetime                    | 600 s                   |
+| Service token lifetime                | 900 s                   |
+| Longest lifetime the gateway accepts  | 900 s                   |
+| Clock skew allowed on `iat` and `exp` | 30 s                    |
+| Models per token                      | 64                      |
+| Caller refreshes a token              | 120 s before it expires |
+
+### Token issuers
+
+Each issuer is its own Lambda function, so the caller's AWS identity selects the issuer and the service. No request field can claim another service.
+
+| Issuer         | Kind    | Models it signs                                               | Tenant models  |
+| -------------- | ------- | ------------------------------------------------------------- | -------------- |
+| `run`          | run     | The run's primary and fallback models                         | Not applicable |
+| `agent-worker` | service | Its configured service models and the service fallback models | No             |
+| `evaluations`  | service | The service fallback models                                   | Yes            |
+| `memory`       | service | Its configured service models and the service fallback models | Yes            |
+| `brain`        | service | Its configured service models and the service fallback models | No             |
+| `web-tools`    | service | Its configured service models                                 | No             |
+
+The run issuer mints a token only while the requested owner holds the run's thread execution lease, the lease has not expired, and the run is `running` under that owner. It then re-admits the run's primary and fallback models against the environment model policy, the model catalog, and the operator grants.
+
+A service issuer signs its configured service models. An issuer with tenant models enabled also signs other models when the request names an organization, project, and environment whose model policy, catalog, and operator grants admit them.
+
+An issuer refuses a request with one of these codes. A failure to read the database or the grants, or to sign, fails the invocation instead.
+
+| Code                          | Cause                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `lease_inactive`              | The lease is missing, expired, held by another owner, or names another run, or the run is not running under that owner. Run tokens, and service tokens that carry a run claim.                                                                                                                                                                                                                                                             |
+| `run_not_found`               | The run of a run token or of a service token's run claim does not exist.                                                                                                                                                                                                                                                                                                                                                                   |
+| `model_not_admitted`          | A requested model is not admitted, or a service issuer without tenant models was asked for a model outside its configuration.                                                                                                                                                                                                                                                                                                              |
+| `model_outside_data_boundary` | The organization has a `phi` data boundary and a requested model is not a Bedrock model. Service tokens are checked when the context or run claim names the organization, including service and embedding models. A failed boundary read fails the invocation.                                                                                                                                                                             |
+| `operator_funding_exhausted`  | The organization's month-to-date operator-funded model spend has reached its ceiling, and the token's primary model would be paid for with the deployment's keys. The message names the spend, the ceiling, and the model.                                                                                                                                                                                                                 |
+| `organization_suspended`      | The organization holds a suspension. A token of only embedding models is never refused. A run token, or a service token that carries a running run's claim, is refused only while a hold stops running work (abuse, policy, or manual). Under a payment hold the run keeps minting until it finishes. Any other service token whose context names the organization is refused under any hold. A failed standing read fails the invocation. |
+| `invalid_request`             | The payload is malformed or is for the other issuer kind, or a service token's run claim names an organization or run that its context does not.                                                                                                                                                                                                                                                                                           |
+
+The service fallback models come from `model_gateway_service_fallback_model_ids`. The stack passes the list to the agent worker, the evaluation worker, the platform API, the memory runtime, and the Brain index worker, whose service chat calls request those fallbacks when they name none. The agent-worker, evaluations, memory, and brain issuers admit the same list, because a token must cover every model of a request the deployment pays for. The default equals the gateway client's built-in fallbacks.
+
+## Requests the gateway accepts
+
+| Method and path             | Behavior                                                                                                                            |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /livez`                | Returns `200` while the process runs. The container health check uses it.                                                           |
+| `GET /health`               | Probes Bifrost with a 2-second timeout. Returns `503` when Bifrost does not answer, so the load balancer stops routing to the task. |
+| `POST /v1/chat/completions` | Forwarded to Bifrost.                                                                                                               |
+| `POST /v1/embeddings`       | Forwarded to Bifrost.                                                                                                               |
+| `POST /v1/responses`        | Forwarded to Bifrost.                                                                                                               |
+
+Every other method and path returns `404 not_found`. The gateway applies these rules to a forwarded request:
+
+- The body must be a JSON object of at most 32 MiB with a `model` and an optional `fallbacks` array. Bifrost reads body keys without regard to letter case, so the gateway refuses a key such as `Model` or `Fallbacks`.
+- The gateway normalizes `model` and each `fallbacks` entry to the canonical platform model ID, checks `model` and each fallback it forwards against the token, and forwards the normalized IDs.
+- It forwards only the `accept`, `content-type`, and `x-bf-passthrough-extra-params` headers. It drops the caller's `authorization` header and sends the internal key instead.
+- It streams a successful response back unchanged.
+- It buffers an error response from Bifrost of up to 1 MiB and redacts the internal key, any organization key it sent, and any value shaped like an `sk-` API key, a bearer token, or an AWS access key ID before it returns the body. A larger error body becomes `502 upstream_unavailable`.
+
+For a run token, the gateway caches the lease check for up to 5 seconds per thread, run, and owner, and never past the lease's own expiry. A run token stops working within about 5 seconds after its run loses the lease.
+
+### Organization-funded requests
+
+On `/v1/chat/completions` and `/v1/responses`, the gateway checks the token's `funding` against the provider of `model`:
+
+- When `funding` names that provider, the gateway reads the organization's key for the named credential and key version. It sends the key to Bifrost as a direct key (`x-bf-direct-key: true` and the key as the bearer value) next to the internal key, and Bifrost calls the provider with it.
+- When `funding` names the provider of `model` or of any `fallbacks` entry, the gateway removes `fallbacks` from the request before it checks the request against the token. Bifrost serves every fallback attempt with the deployment's provider keys, so a fallback would charge the deployment for a call the organization pays for. The token therefore does not need to carry the removed fallbacks.
+- When the gateway has no key for the credential and key version, it refuses the request with `401 model_credential_unavailable`. It also refuses a key that starts with `sk-bf-` or is not a single printable token, because Bifrost would ignore it as a direct key and serve the request with the deployment's key. The gateway never sends an organization-funded request with the deployment's key.
+- After Bifrost answers, the gateway reads the `x-bifrost-routing-info-key` response header, which names the key that served the request. A successful response served by any key other than the organization's (`header-provided`) becomes `502 funding_mismatch`.
+
+`/v1/embeddings` always uses the deployment's provider keys. Stored vectors must not depend on a key the organization can revoke.
+
+Bifrost also names the serving key in a response's `extra_fields.routing_info.key`, which the gateway returns unchanged. The value is `header-provided` for an organization's key and the provider key name, such as `deployments-ai-openai`, for the deployment's key.
+
+### Errors
+
+Errors use the envelope `{"error":{"code","message","type":"model_gateway_error"}}`.
+
+| Status | `code`                                                                                                                                                                    | Cause                                                                                                                                                                                                                                        |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400    | `invalid_request`                                                                                                                                                         | The body is missing, is not a JSON object, has an invalid `model` or `fallbacks`, or spells either key in another letter case.                                                                                                               |
+| 401    | `missing_token`                                                                                                                                                           | No bearer token.                                                                                                                                                                                                                             |
+| 401    | `malformed`, `unsupported_algorithm`, `unknown_key`, `bad_signature`, `wrong_issuer`, `wrong_audience`, `expired`, `not_yet_valid`, `lifetime_too_long`, `invalid_claims` | The token failed verification.                                                                                                                                                                                                               |
+| 401    | `model_credential_unavailable`                                                                                                                                            | The token's `funding` names the request's provider, and the gateway has no usable key for that credential and key version. The credential is missing, replaced, revoked, or malformed, or this installation does not read organization keys. |
+| 403    | `model_not_allowed`                                                                                                                                                       | The `model` or a forwarded `fallbacks` entry is not in the token's `models`.                                                                                                                                                                 |
+| 403    | `run_inactive`                                                                                                                                                            | The run token's run no longer holds its lease.                                                                                                                                                                                               |
+| 403    | `operator_funding_exhausted`                                                                                                                                              | The organization's operator-funded spend this UTC month has reached its ceiling, and the deployment would pay for the request's `model`. The message names the spend, the ceiling, and the model.                                            |
+| 413    | `request_too_large`                                                                                                                                                       | The body exceeds 32 MiB.                                                                                                                                                                                                                     |
+| 502    | `signing_key_unavailable`                                                                                                                                                 | The gateway could not fetch a trusted key's public key from KMS.                                                                                                                                                                             |
+| 502    | `run_state_unavailable`                                                                                                                                                   | The gateway could not read the run lease.                                                                                                                                                                                                    |
+| 502    | `operator_spend_unavailable`                                                                                                                                              | The gateway could not read the organization's operator-funded spend or its ceiling.                                                                                                                                                          |
+| 502    | `upstream_unavailable`                                                                                                                                                    | Bifrost did not answer, or its error body exceeded 1 MiB.                                                                                                                                                                                    |
+| 502    | `model_credential_store_unavailable`                                                                                                                                      | The gateway could not read the organization's model credentials.                                                                                                                                                                             |
+| 502    | `funding_mismatch`                                                                                                                                                        | Bifrost served an organization-funded request with a key other than the organization's.                                                                                                                                                      |
+| 500    | `internal_error`                                                                                                                                                          | Any other failure.                                                                                                                                                                                                                           |
+
+## Model admission and operator grants
+
+The token is the only credential the gateway accepts, so the issuer sets the model ceiling when it mints a token. Bifrost routes every model of each hosted provider. Environment model policies and the curated defaults decide most admissions, as [Models and model policies](/docs/capabilities/models) describes. Operator grants are the installation-level override.
+
+An operator grant admits a model that the environment policy does not. The grants are a JSON array, and each entry has these fields:
+
+| Field            | Meaning                                                                                                                                                                              |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `organizationId` | Scope the grant to an organization. `"*"` applies it to every scope that names an organization, as the least specific match, and cannot be combined with `workspaceId` or `agentId`. |
+| `workspaceId`    | Scope the grant to a workspace.                                                                                                                                                      |
+| `agentId`        | Scope the grant to an agent definition.                                                                                                                                              |
+| `providers`      | The providers the grant serves: `bedrock`, `openai`, or `openrouter`. Defaults to `openai` and `openrouter`.                                                                         |
+| `allowedModels`  | The models the grant admits. Omitted or `"*"` means the curated models, which admits nothing extra.                                                                                  |
+
+Each grant needs at least one scope field. Among the grants that serve a model's provider, only the most specific matching scope counts, in the order agent, then workspace, then organization, then deployment-wide. A grant admits a model only when it lists that model explicitly in `allowedModels`.
+
+```json
+[
+  {
+    "organizationId": "org_123",
+    "allowedModels": ["openrouter/<vendor>/<model>"]
+  },
+  {
+    "agentId": "agent_123",
+    "providers": ["bedrock"],
+    "allowedModels": ["bedrock/<model-id>"]
+  }
+]
+```
+
+To change the grants, set `DEPLOYMENTS_AI_MODEL_GRANTS_JSON` and run the deploy tool's secret sync against your deployment target file:
+
+```bash
+DEPLOYMENTS_AI_MODEL_GRANTS_JSON="$(cat grants.json)" \
+  bun run deploy -- secrets sync model-runtime --target ./target.json
+```
+
+If the variable is unset, the sync keeps the stored grants. A first deployment with no grants stores `[]`. Grant changes need no gateway restart. The token issuers re-read the grants at most once a minute per container, and each new token reflects them. When a run's model depends on a grant you remove, the run issuer refuses that run's next token.
+
+## Hosted providers
+
+`model_runtime_hosted_providers` lists the providers Bifrost serves: `bedrock`, `openai`, and `openrouter`. OpenTofu creates an API key parameter only for `openai` and `openrouter` when you host them.
+
+The deploy tool writes provider keys from its environment:
+
+| Provider     | Variables, in the order the tool reads them                    |
+| ------------ | -------------------------------------------------------------- |
+| `openai`     | `DEPLOYMENTS_AI_OPENAI_API_KEY`, then `OPENAI_API_KEY`         |
+| `openrouter` | `DEPLOYMENTS_AI_OPENROUTER_API_KEY`, then `OPENROUTER_API_KEY` |
+
+An unset key reuses the stored value. The sync fails when neither the environment nor the store has a key for a hosted provider. When a provider key changes, the sync forces a rolling deployment of the gateway service and waits until it is stable, because Bifrost reads keys only at task start. The service keeps 100 percent of its tasks healthy during a rollout and rolls back on failure.
+
+To see whether the OpenAI and OpenRouter keys are configured and when each last changed, run `deployments system model-providers`. See [System operator](/docs/operate/system-operator).
+
+### Amazon Bedrock
+
+Add `bedrock` to `model_runtime_hosted_providers` to serve Bedrock models from your own AWS account. Bedrock needs no API key. Bifrost calls Bedrock in the deployment region with the gateway task role, and OpenTofu grants that role permission to invoke models only when Bedrock is hosted. Enabling model access in Bedrock stays a manual step in your account.
+
+The curated models include two Bedrock global inference profiles, `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0` and `bedrock/global.cohere.embed-v4:0`, so an environment without a model policy can run them. Allow other Bedrock models with an environment model policy (`bedrock/*` or exact IDs), or with an operator grant that lists `bedrock` in `providers` and names each model in `allowedModels`. The customer root's service models default to the same two models; see [Features](/docs/operate/features#service-models).
+
+### Organization model keys
+
+`model_credential_providers` on the stack lists the providers whose key an organization can store for its own model calls: `openai`, `openrouter`, or both. List a provider only when its Bifrost endpoint is the vendor's public API. Bedrock is not allowed, because it authenticates with the task role and has no API key. The default is `[]`. The customer root does not declare the variable, so set it in a root of your own.
+
+With the list empty, OpenTofu creates nothing and every `/v1/organizations/{organizationId}/model-credentials` route returns `404 model_credentials_not_enabled`. A provider left out of a non-empty list gets the same refusal. With at least one provider listed, OpenTofu creates these resources:
+
+| Resource                                      | Behavior                                                                                                                                                                                                                                                                |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| KMS key `alias/platform-model-credentials`    | A symmetric key with rotation on. With `operations.deletion_protection` set, the key is protected from destroy and has a 30-day deletion window. Otherwise its window is `operations.kms_deletion_window_days`.                                                         |
+| Key policy                                    | The account can administer the key but cannot use it through IAM policies. The platform API role can call only `kms:GenerateDataKey`, only when the encryption context `purpose` is `model-provider-credential` and the context has no keys beyond the credential ones. |
+| `DEPLOYMENTS_AI_MODEL_CREDENTIAL_PROVIDERS`   | The listed providers, set on the platform API.                                                                                                                                                                                                                          |
+| `DEPLOYMENTS_AI_MODEL_CREDENTIAL_KMS_KEY_ARN` | The key, set on the platform API. The stack also outputs it as `model_credential_kms_key_arn`.                                                                                                                                                                          |
+
+An organization owner or admin sets a key with `PUT /v1/organizations/{organizationId}/model-credentials/{provider}`, or with `deployments model-credential set`. The platform API first lists the provider's models with the key, over HTTPS pinned to public addresses, and stores nothing when the provider refuses it. The API seals the key with a data key bound to the organization, provider, credential ID, key version, and deployment stage. It never decrypts a stored key, and no read returns one. Replacing a key increments its key version. Removing a key deletes its ciphertext and keeps the provider, last four characters, key version, and who removed it. Each change records an `organization.model-credential-set` or `organization.model-credential-removed` event that carries no key material.
+
+Stored keys pay for model calls once the gateway can open them. The token issuers decide the payer when they mint a run token, or a service token whose context names an organization (memory, Brain, evaluations, and the in-run Brain token, which carries the run's organization):
+
+- An active stored key for the provider of a token model pays for that model. The issuer signs its credential ID and key version into `funding`. An operator grant does not admit a model the organization pays for; the environment's model policy and the catalog must.
+- Embedding models stay on the deployment's keys and are never refused. The issuers read them from `DEPLOYMENTS_AI_MODEL_TOKEN_EMBEDDING_MODELS`, the memory and Firecrawl embedding models.
+- Every other model is paid for with the deployment's keys while the organization's operator-funded spend this UTC month is below its ceiling. The ceiling comes from the organization's operator grant, then its service grant, then `DEPLOYMENTS_AI_OPERATOR_FUNDED_MODEL_SPEND_CEILING_USD_MICROS` on the issuers (unset means unlimited).
+- At or above the ceiling, the issuer drops the fallback models the deployment would pay for from the token. A run or a Brain answer whose primary model the organization pays for keeps working on the organization's key, without those fallbacks. When the deployment would pay for the primary model, the issuer refuses the token with `operator_funding_exhausted`.
+
+The issuer reads the first model of a token request as its primary. Run tokens list the run's primary model first. Service clients send a route's primary model first and its fallbacks after it.
+
+The issuers check the ceiling when they mint a token, and the gateway checks it again on every request. Before the gateway forwards a chat or Responses call that the deployment would pay for, it reads the organization's operator-funded spend this UTC month and its effective ceiling. Each gateway task caches that answer for 5 seconds per organization. At or above the ceiling, the gateway refuses the call with `403 operator_funding_exhausted` and the issuers' message, even when the token was minted below the ceiling. The gateway never checks or refuses a call the organization pays for with its own key, an embedding call, or a call with a token that names no organization. The model clients do not retry the refusal.
+
+Spend counts toward the ceiling only after it is recorded. The agent worker records a model call's usage as soon as the call returns. The usage materializer then adds it to the month total from the usage table's stream, which it reads with no batching window, so recording normally finishes within a few seconds of the call. A failed materializer batch is retried and delays it further. Once recorded spend reaches the ceiling, the gateway refuses new operator-funded calls within 5 seconds. Calls already in flight finish and are charged in full. Embedding calls keep counting toward the spend and are never refused.
+
+The model gateway task role, shared with Bifrost, may call `dynamodb:GetItem` only on organization partitions of the control table (`dynamodb:LeadingKeys` matching `ORG#*`), where it reads standing and sealed keys. It may call `dynamodb:Query` only on organization spend partitions of the usage table (`ORG#*#SPEND#ORGANIZATION`). It may call `kms:Decrypt` on the key only when the encryption context `purpose` is `model-provider-credential`, and the key policy grants it the same decrypt and nothing else. [Security](/docs/operate/security) describes what that shared role means for Bifrost. The gateway reads the record for the token's credential and key version and caches the decrypted key for 60 seconds per credential version, so a replaced or removed key stops serving within a minute.
+
+## Model catalog
+
+Every 6 hours, the catalog sync function reads model lists from OpenRouter, from OpenAI when an OpenAI key is configured, and from Amazon Bedrock when Bedrock is hosted. For an OpenAI provider served through a private relay, the operator lists the served model IDs instead of a key. Those models get catalog entries with limits, prices, and capabilities from OpenRouter's metadata for the same models. It refuses a provider snapshot that would retire more than a quarter of that provider's active entries and treats it as partial. A provider whose sync fails keeps its catalog entries as they were, and the function error raises an alarm.
+
+To pick up a newly enabled model or a price change before the next scheduled run, invoke the function yourself. Pass `{"allowMassRetirement":true}` as the payload only after you confirm that a provider really retired many models.
+
+```bash
+aws lambda invoke --function-name <model-catalog-sync-function> /dev/stdout
+```
+
+## Run the model runtime
+
+1. In a root of your own, set `model_runtime_enabled = true` on the stack, two `model_runtime_availability_zones`, and a digest-pinned `model_gateway_image`. Keep `bifrost_desired_count = 0` and apply. The customer root does not declare `model_runtime_enabled`; it always runs the model runtime.
+2. Write the provider keys and grants with `bun run deploy -- secrets sync model-runtime --target ./target.json`.
+3. Set `bifrost_desired_count` to `1` or more and apply.
+
+A full `bun run deploy -- deploy` run does step 2 for you. It seeds absent parameters before the full OpenTofu apply and syncs them after. See [Deploying the platform](/docs/operate/deployment). The environment roots refuse to enable the agent runtime unless the model runtime is enabled with a positive `bifrost_desired_count`.
+
+### Rotate the token signing key
+
+KMS cannot rotate asymmetric keys automatically, so the module turns key rotation off. The gateway trusts the module's current signing key plus every key ARN listed in `model_gateway_previous_signing_key_arns`. The list takes key ARNs, not aliases. The gateway reads the list at task start and fetches each trusted public key once per process, so a trust change takes effect when the gateway service rolls out.
+
+A token signed by a key the gateway does not trust fails with `401 unknown_key`. When the gateway cannot fetch a trusted key's public key, it answers `502 signing_key_unavailable`. After the issuers switch to a new key, keep the old key's ARN in `model_gateway_previous_signing_key_arns` until every token it signed has expired. A token lives at most 900 seconds, and the gateway accepts it until 30 seconds past its `exp`.
+
+## Logs, metrics, and alarms
+
+The gateway writes one `model_gateway.request` log line per request with the method, path, status, duration, error code, model, request ID, and token identifiers. It never logs tokens, keys, or prompt content.
+
+For service-token requests, the gateway reads the response's token usage without changing the bytes it returns, and writes a CloudWatch Embedded Metric Format record. The namespace is `DeploymentsAi/ModelGateway`, the dimension is `Service`, and the metrics are `Requests`, `InputTokens`, and `OutputTokens`. The record also carries the model, status, duration, any provider-reported cost, and the token's tenant context. The gateway writes no usage record for run tokens, because the agent worker meters agent runs. See [Usage and budgets](/docs/capabilities/usage-and-budgets).
+
+OpenTofu creates these alarms:
+
+| Alarm                      | Condition                                                                           |
+| -------------------------- | ----------------------------------------------------------------------------------- |
+| Gateway CPU                | Average CPU above 90 percent for 3 minutes.                                         |
+| Gateway 5xx                | Any target 5xx response in a minute.                                                |
+| No healthy gateway targets | Fewer than 1 healthy target for 2 minutes while `bifrost_desired_count` is above 0. |
+| Catalog sync errors        | Any catalog sync function error in 5 minutes.                                       |
+
+## Failure modes
+
+| Failure                     | Effect                                                                                                                                                                   |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A token issuer fails        | Callers cannot get new tokens. Existing tokens work until they expire.                                                                                                   |
+| KMS is unavailable          | Issuers cannot sign. The gateway keeps verifying with public keys it already fetched, and answers `502 signing_key_unavailable` for a key it has not fetched.            |
+| The run lease read fails    | Run-token requests fail with `502 run_state_unavailable`. Service-token requests are unaffected.                                                                         |
+| The spend read fails        | Operator-funded chat and Responses requests fail with `502 operator_spend_unavailable` until a read succeeds. Organization-funded and embedding requests are unaffected. |
+| Bifrost is unhealthy        | `/health` returns `503`, the load balancer stops routing to the task, and ECS replaces it.                                                                               |
+| A task restarts             | The new task generates a new internal key and renders a fresh Bifrost configuration. Caller tokens stay valid, because the internal key never leaves the task.           |
+| Clock skew above 30 seconds | Tokens fail as `expired` or `not_yet_valid`.                                                                                                                             |
+
+## Reference
+
+- API: [List models](/docs/api/reference/models/list-models), [List system model providers](/docs/api/reference/system/list-system-model-providers)
+- CLI: [`deployments model list`](/docs/cli/reference/model#model-list), [`deployments model-policy`](/docs/cli/reference/model-policy), [`deployments system model-providers`](/docs/cli/reference/system#system-model-providers)
+- Related: [Models and model policies](/docs/capabilities/models), [Architecture](/docs/operate), [Security model](/docs/operate/security)

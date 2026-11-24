@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2024",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": "../../../../dist/apps/console-evilcharts",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../../../dist/console-evilcharts.tsbuildinfo"
+  },
+  "include": ["*.ts", "ui/*.tsx", "charts/*.tsx"]
+}

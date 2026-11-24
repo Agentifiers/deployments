@@ -1,0 +1,142 @@
+---
+title: "Local preview loop"
+description: "Chat with a local agent manifest through a temporary preview with deployments dev, and pick up manifest edits on the next message."
+---
+
+`deployments dev` runs an agent manifest from your disk as a temporary preview and opens a chat in your terminal. Use it to try instructions, tools, and models before you publish a release. You edit the file, send the next message, and the CLI picks up the change.
+
+## What the command does
+
+1. It reads the manifest file and validates it with the same rules the platform applies to previews. An invalid manifest stops the command with exit code `7` and an error that lists each problem as `<path>: <message>`.
+2. It creates a [preview](/docs/capabilities/previews) from the manifest and a runtime configuration. The preview lives until its time to live runs out or until it is expired.
+3. Each message you send becomes a preview turn. The turn starts a run on the preview's thread, and the CLI streams that run's events to your terminal.
+4. Before each turn, it reads the manifest again. If the content changed, it creates a new preview, starts a new thread, and expires the old preview. If nothing changed, the conversation continues on the same thread.
+5. When the session ends, it expires the preview.
+
+## Before you start
+
+- Set an environment in your context, or pass `--env`. The command needs an environment and fails with exit code `7` without one. See [Configuration and context](/docs/cli/configuration).
+- Sign in with a credential that has the `runs:write` and `agents:write` scopes, which preview creation and turns require, and `runs:read` to read the run's stream. See [Signing in](/docs/cli/authentication).
+- Pick a model that your environment allows. `deployments model list --allowed` lists them.
+
+## Run a session
+
+<Steps>
+<Step>
+
+Save a manifest as `agent.json`. Replace `<model-id>` with a model ID from `deployments model list --allowed`:
+
+```json
+{
+  "apiVersion": "agents.deployments.ai/v1",
+  "kind": "Agent",
+  "metadata": {
+    "key": "example.assistant",
+    "name": "Example Assistant",
+    "version": "1.0.0"
+  },
+  "spec": {
+    "instructions": "Answer briefly.",
+    "model": { "id": "<model-id>" },
+    "capabilities": { "tools": [] },
+    "memory": { "mode": "off" },
+    "sandbox": { "mode": "none" },
+    "triggers": ["api"]
+  }
+}
+```
+
+[Agent manifests](/docs/capabilities/agent-manifests) describes every field.
+
+</Step>
+<Step>
+
+Start the session:
+
+```bash
+deployments dev agent.json
+```
+
+The CLI prints `Preview <preview-id> (Example Assistant) expires <timestamp>.` and then a `Message` prompt.
+
+</Step>
+<Step>
+
+Type a message and press Enter. The reply prints as the model generates it. When the agent calls a tool, the CLI prints an indented line with the tool name, its status, and a summary of its input, for example `  records.read running - Look up records`.
+
+</Step>
+<Step>
+
+Edit `agent.json`, for example by changing `instructions`, and send another message. The CLI prints `Manifest changed; started preview <preview-id> with a new thread.` and answers with the new manifest. The new thread starts without the earlier messages.
+
+</Step>
+<Step>
+
+Type `/exit`, or press Ctrl-C at the prompt, to end the session. The CLI expires the preview and prints `Preview <preview-id> expired.`
+
+</Step>
+</Steps>
+
+If a turn fails during a session, for example because you saved an invalid manifest, the CLI prints `Turn failed:` with the reason and shows the prompt again. Fix the file and send the message again.
+
+If you press Ctrl-C while a reply is streaming, the CLI stops the session, expires the preview, and exits with code `130`.
+
+## Answer approvals and tool calls
+
+A run can pause until someone acts. In an interactive session, the CLI asks you directly:
+
+| The run waits for       | The CLI shows                                                     | You answer                                                                                   |
+| ----------------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| An approval             | The tool name, its effect, the approval ID, and the input summary | **Approve** or **Reject**                                                                    |
+| A client tool result    | The tool input as JSON and, if set, when the call expires         | **Completed** or **Failed**, then a JSON object as the output, optional when the call failed |
+| An external tool result | The tool name and its input summary                               | A JSON value as the output, then **Completed** or **Failed**                                 |
+
+The CLI checks each answer before it sends it. A client tool output must be a JSON object of at most 96 KiB. An external tool output must serialize to at most 1,000 characters. If a client tool call has already expired, the CLI says so and leaves it to the platform to time out.
+
+[Approvals and client tools](/docs/capabilities/approvals-and-client-tools) explains why runs pause and what each answer does.
+
+## Choose the runtime configuration
+
+By default, the preview uses the default runtime configuration. Two flags change that, and you can use only one of them per session:
+
+- `--runtime-config <file>` reads a runtime configuration from a JSON file. The CLI validates it before it creates the preview and fails with exit code `7` if it is invalid.
+- `--config-from-deployment <agent-deployment-id>` copies the runtime configuration of an existing agent deployment, so the preview runs your local manifest the way that deployment would.
+
+```bash
+deployments dev agent.json --config-from-deployment "$AGENT_DEPLOYMENT_ID"
+```
+
+Passing both flags is a usage error with exit code `2`.
+
+## Set how long the preview lives
+
+`--ttl` sets the preview's lifetime in seconds, from 60 to 604800, which is seven days. Without it, the API gives the preview 24 hours. The CLI expires the preview when the session ends. If it cannot, it prints `Could not expire preview` with the reason, and the preview expires when its lifetime runs out.
+
+```bash
+deployments dev agent.json --ttl 600
+```
+
+## Send one message from a script
+
+`--message` sends one message, prints the reply, expires the preview, and exits. Use it in scripts and CI to check a manifest change:
+
+```bash
+deployments dev agent.json --message "Reply with the word ready." --no-color
+```
+
+| Exit code | Meaning                                                                     |
+| --------- | --------------------------------------------------------------------------- |
+| `0`       | The run completed.                                                          |
+| `1`       | The run failed. The CLI prints `Run <run-id> failed:` with the run's error. |
+| `130`     | The run was canceled.                                                       |
+
+Without an interactive terminal, `deployments dev` requires `--message` and fails with exit code `2` otherwise. If the run then waits for an approval or a tool result, nobody can answer, so the command expires the preview and fails with exit code `2`. Run it in a terminal to answer.
+
+`deployments dev` has no `--json` output. To work with previews from a program, use the `deployments preview` commands or the preview operations in the API.
+
+## Reference
+
+- [`deployments dev`](/docs/cli/reference/dev#dev)
+- [`deployments preview`](/docs/cli/reference/preview) commands
+- API operations: [`createPreview`](/docs/api/reference/runtime/create-preview), [`submitPreviewTurn`](/docs/api/reference/runtime/submit-preview-turn), [`getPreview`](/docs/api/reference/runtime/get-preview), [`deletePreview`](/docs/api/reference/runtime/delete-preview)
+- [Preview runs](/docs/capabilities/previews)

@@ -1,0 +1,25 @@
+{
+  "name": "@deployments-ai/web-bff-auth",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/fake-identity.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@deployments-ai/db": "workspace:*",
+    "@deployments-ai/identity": "workspace:*",
+    "effect": "4.0.0-beta.92",
+    "jose": "6.2.4"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-kms": "3.1090.0",
+    "ulid": "3.0.2"
+  }
+}

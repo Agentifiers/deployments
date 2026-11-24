@@ -1,0 +1,6 @@
+---
+"@deployments-ai/cli": patch
+"@deployments-ai/sdk": patch
+---
+
+Agent manifests accept `spec.runtime.ingressAttachments: "attach"`. With it, the images and documents that channel and agent email bindings capture attach to the runs those bindings submit. A turn takes, in message order, at most four images (JPEG, PNG, WebP) and four documents (PDF, DOCX, XLSX, CSV, TXT, Markdown, JSON, HTML, ZIP) of at most 10 MiB each, and the agent reads a document as its extracted text. Other file types, legacy Office files (`.doc`, `.xls`, `.ppt`), larger files, and files past those limits are skipped and never downloaded. A captured file that cannot attach is left out and the turn still runs. That happens when the release does not opt in (`ingress_attachments_disabled`), when the file is missing or invalid, when a document is unusable (`input_file_<reason>`, for example an encrypted PDF or one with no readable text), when the images exceed 20 MiB together, or when the primary model cannot read images. The agent is told the name of each skipped file and each unusable document and why it was left out. The setting does not require a primary model that reads images, so publishing, deploying, and creating an execution binding accept it with any admitted model. API run submissions are unchanged.

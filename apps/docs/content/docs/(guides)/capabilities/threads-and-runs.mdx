@@ -1,0 +1,284 @@
+---
+title: "Threads and runs"
+description: "Conversations as threads, executions as runs, and how to submit, inspect, cancel, retry, and replay them."
+---
+
+A **thread** is one conversation with an agent deployment. A **run** is one execution of the agent on a thread. You submit a user message, the platform queues a run, and the run produces the assistant's reply. Use threads and runs whenever your application talks to a deployed agent, and use the run routes to follow progress and recover from failures.
+
+## Threads hold the conversation
+
+A thread belongs to one agent deployment, or to the execution binding of a [preview](/docs/capabilities/previews) or [evaluation](/docs/capabilities/evaluations). It stores the messages of the conversation in order.
+
+| Thread field                                | Meaning                                                                                                        |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `agentDeploymentId` or `executionBindingId` | What the thread runs on.                                                                                       |
+| `executionPurpose`                          | `customer` for a deployment, `preview` or `evaluation` for an execution binding.                               |
+| `title`                                     | At most 120 characters.                                                                                        |
+| `workspaceId`                               | The workspace the thread is scoped to, when it has one.                                                        |
+| `pinnedAgentReleaseId`                      | The release this thread's runs stay on. See [canary releases](/docs/capabilities/agents#canary-a-new-release). |
+| `continuedFromThreadId`                     | The predecessor thread, for a [continued thread](#continue-a-thread-on-another-deployment).                    |
+| `archived`                                  | Whether the thread accepts new runs.                                                                           |
+
+Each message has a `role` (`user`, `assistant`, `system`, or `tool`), a `sequence` number, and its content. Large message bodies come back as a short-lived `bodyAccess` download instead of an inline `body`.
+
+You get a thread in one of two ways:
+
+- Create it with `POST /v1/threads`. The deployment must be ready and running, or the request fails with `deployment_unavailable`.
+- Submit a run without `threadId`. The platform creates the thread and titles it with your `title` or the first line of the message.
+
+Archive a thread to close it. Archiving fails with `409 thread_active` while any of its runs is not terminal, and archiving an archived thread returns it unchanged. An archived thread rejects new runs and replays with `409 thread_archived`.
+
+To tie a thread to one of your end users, send your own ID for that user as `endUserId` when you create the thread, either on `POST /v1/threads` or on the run submission that creates it. The platform keeps only a keyed pseudonym of the ID and never returns it. The end user is set once: a [continued thread](#continue-a-thread-on-another-deployment) inherits it, and naming a different end user fails with `409 end_user_mismatch`. IDs may not start with `channel:`, which the platform reserves for channel users. Naming the end user lets you [erase every thread of that end user](#erase-a-thread-or-an-end-user) later.
+
+`GET /v1/threads` lists customer threads. Preview and evaluation threads appear only when you filter by `executionBindingId`.
+
+## Submit a run
+
+`POST /v1/agent-deployments/{agentDeploymentId}/runs` adds a user message to a thread and queues a run. The request needs an `Idempotency-Key` header.
+
+| Body field            | Rules                                                                                                                                                                  |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `content`             | Required. The user message, at most 256 KiB of UTF-8.                                                                                                                  |
+| `threadId`            | Continue an existing thread. Omit it to start a new one.                                                                                                               |
+| `title`               | Title for a new thread, at most 120 characters.                                                                                                                        |
+| `workspaceId`         | Workspace scope for a new thread.                                                                                                                                      |
+| `endUserId`           | Your ID for the end user a new thread belongs to, 1 to 256 characters. Refused for an existing thread of another end user.                                             |
+| `runContext`          | Per-run data for the model, at most 256 KiB. See [Context management](/docs/capabilities/context-management#pass-per-run-data-in-runcontext).                          |
+| `inputArtifacts`      | One to eight `type: "input"` artifact IDs: images, audio, or documents. See [Context management](/docs/capabilities/context-management#send-files-as-input-artifacts). |
+| `responseFormat`      | A JSON schema contract for the final answer. See [Structured output](/docs/capabilities/agent-manifests#structured-output).                                            |
+| `responsePublication` | `external` keeps the answer out of visible history until you publish it. See [Publish automation output](#publish-automation-output).                                  |
+| `rebaseRelease`       | `true` drops the thread's pinned release and selects again.                                                                                                            |
+
+The response is `202` with `created`, `message`, `run`, and `thread`. If you repeat a request with the same idempotency key, you get the original submission back with `created: false`.
+
+Before it queues the run, the platform checks the deployment, the release, and the request:
+
+| Error                           | Status | Cause                                                                                                                                                                                          |
+| ------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deployment_unavailable`        | 409    | The deployment is not ready and running.                                                                                                                                                       |
+| `release_unavailable`           | 409    | The selected release is not active or not selectable on the deployment.                                                                                                                        |
+| `trigger_not_allowed`           | 409    | The release declares `spec.triggers` without `api`.                                                                                                                                            |
+| `thread_archived`               | 409    | The thread is archived.                                                                                                                                                                        |
+| `workspace_unavailable`         | 409    | The workspace is not active.                                                                                                                                                                   |
+| `invalid_request`               | 400    | The body fails validation, for example `content` over 256 KiB.                                                                                                                                 |
+| `response_format_conflict`      | 422    | The request's `responseFormat` differs from the one the release pins.                                                                                                                          |
+| `budget_exhausted`              | 429    | A [budget](/docs/capabilities/usage-and-budgets) has no capacity left.                                                                                                                         |
+| `input_artifact_unavailable`    | 404    | An input artifact is missing or outside the caller's private scope.                                                                                                                            |
+| `input_file_<reason>`           | 422    | An input artifact resolved to `unusable`, such as `input_file_no_text` for a PDF with no readable text. The message names the file. See [Artifacts](/docs/capabilities/artifacts#input-files). |
+| `model_image_input_unsupported` | 422    | An input artifact is an image and the release's primary model cannot read images. See [Models](/docs/capabilities/models#image-input).                                                         |
+| `model_image_input_unknown`     | 422    | An input artifact is an image and the platform does not know whether the release's primary model reads images.                                                                                 |
+| `end_user_mismatch`             | 409    | `endUserId` differs from the end user of the thread or its predecessor.                                                                                                                        |
+| `end_user_erasure_in_progress`  | 409    | An erasure of the new thread's end user is still running.                                                                                                                                      |
+
+## Run lifecycle
+
+A run moves through these statuses:
+
+| Status                 | Meaning                                                                                                                                                                       |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `queued`               | Waiting for a worker, or for a free slot under the organization's concurrent run limit. A run also returns here after an approval, a tool result, or an execution checkpoint. |
+| `running`              | A worker is executing the agent.                                                                                                                                              |
+| `waiting-for-approval` | A tool call needs a human decision. See [Approvals and client tools](/docs/capabilities/approvals-and-client-tools).                                                          |
+| `waiting-for-tool`     | A tool call is running outside the worker, such as a client tool or an awaited sub-agent.                                                                                     |
+| `completed`            | The run finished and its answer is final.                                                                                                                                     |
+| `failed`               | The run stopped with an `error`.                                                                                                                                              |
+| `canceled`             | Someone canceled the run.                                                                                                                                                     |
+
+`completed`, `failed`, and `canceled` are terminal. An approval decision moves a waiting run back to `queued`, or to `failed` when the approval is rejected or expired. A completed tool result moves a `waiting-for-tool` run back to `queued`. A failed client tool or an expired one also resumes the run, and so does a failed awaited sub-agent, so the model can recover. You can cancel a run in any status that is not terminal.
+
+Every run records the release it runs in `agentReleaseId` and why in `releaseSelection`. It also carries `trigger`, `executionPurpose`, a `traceId` for [observability](/docs/capabilities/observability), and `replayedFromRunId` when it is a replay. A run that a schedule or heartbeat fire started carries `automation`, which names the automation and the fire. See [Schedules and heartbeats](/docs/capabilities/automations#trace-an-automation-to-its-creator-and-its-runs).
+
+The worker increments `attempt` each time it claims the run. After 30 claims that were not execution checkpoints, the run fails with `run_retry_limit_exhausted`. `checkpointCount` counts the run's execution checkpoints so far, and starts at `0`. [Context management](/docs/capabilities/context-management#long-tool-loops-stay-bounded) explains execution checkpoints.
+
+## Concurrent run limit
+
+Each organization can execute a limited number of runs at once, set by its `concurrentRuns` limit. Only a run in `running` holds one of these slots. A run that waits for an approval, a client tool, or an awaited sub-agent holds none, so paused runs never block other work. When the paused run returns to `queued`, it needs a free slot again.
+
+When every slot is in use, new runs stay `queued`. The worker checks again every 30 to 60 seconds and starts the run once a slot is free. A check that finds no free slot does not change the run, so waiting does not use up `attempt`. Runs on the same thread start in the order you submitted them. Runs on different threads have no fixed order, so a run submitted later on another thread can start first.
+
+A run fails with `organization_concurrency_wait_expired` when it has waited more than 6 hours since it last entered `queued` and the organization is still at its limit. Retry it with `POST /v1/runs/{runId}/retry` once the organization has capacity.
+
+To see your organization's limit, run `deployments org limits $ORGANIZATION_ID`. [Versioning and limits](/docs/api/versioning-and-limits#organization-limits) lists every organization limit.
+
+## Cancel, retry, and replay
+
+| Action | Route                          | Applies to                                | Result                                                                                                                       |
+| ------ | ------------------------------ | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Cancel | `POST /v1/runs/{runId}/cancel` | Runs that are not terminal                | The run becomes `canceled`. A pending approval becomes `rejected` and its tool call fails.                                   |
+| Retry  | `POST /v1/runs/{runId}/retry`  | `failed` runs                             | The same run returns to `queued` with `attempt` reset to 0.                                                                  |
+| Replay | `POST /v1/runs/{runId}/replay` | `completed`, `failed`, or `canceled` runs | A new run on the same thread with a copy of the user message, release, `runContext`, `inputArtifacts`, and `responseFormat`. |
+
+- Canceling a canceled run returns it again. Canceling a completed or failed run fails with `409 run_terminal`.
+- Retrying a run in any other status fails with `409 run_not_retryable`.
+- Replay needs an `Idempotency-Key` header, and the CLI generates one. Replaying a run that is not terminal fails with `409 run_not_replayable`. Runs whose prompt body is stored outside the message cannot be replayed.
+- Retry and replay need the run's deployment to still be ready and its release to still be active, or they fail with `409 run_not_executable`. For preview runs, the preview must not have expired (`execution_binding_expired`).
+- Retry and replay check budgets, so both can fail with `429 budget_exhausted`.
+- Retry and replay check the organization's standing, so both fail with `403 organization_suspended` while the organization is suspended.
+
+## Read results
+
+- `GET /v1/threads/{threadId}/runs/{runId}` and `GET /v1/runs/{runId}` return a run.
+- `GET /v1/threads/{threadId}/runs/{runId}/message` returns the run's finalized assistant message.
+- `GET /v1/threads/{threadId}/messages` pages through the thread's messages.
+- `GET /v1/runs` lists runs, and `POST /v1/runs/search` takes the same filters in the body. Filter by `status`, `threadId`, `agentReleaseId`, `executionPurpose`, and a creation time range. Set at most one of `agentDeploymentId` and `executionBindingId`. With neither, you get every run in the environment, newest first.
+- `GET /v1/runs/{runId}/tool-calls` lists the run's tool calls. A tool call that a model generation requested has `modelCallIndex`, the run's index of that generation, and `modelAttemptId`, the model attempt whose result requested it. The two fields appear together and never on tool-plan calls. The generation that read the tool's result has index `modelCallIndex + 1`. Both stay the same after the run resumes from a checkpoint, so use them rather than timestamps to group calls by generation.
+
+To watch a run as it happens, read the thread stream. See [Streaming](/docs/capabilities/streaming).
+
+## Runtime logs
+
+`GET /v1/runs/{runId}/logs` returns what the runtime logged while it executed a run, oldest first. Each line has a `time`, a `level` (`debug`, `info`, `warn`, or `error`), a `source`, a `message`, and the run's `threadId` and `traceId`. A line can also carry a `spanId`, a `toolCallId`, and up to 16 scalar `attributes`.
+
+| Source        | What writes it                                                                |
+| ------------- | ----------------------------------------------------------------------------- |
+| `runtime`     | The run lifecycle, memory recall, and brain retrieval.                        |
+| `model`       | Model generations starting, finishing, and failing.                           |
+| `tool`        | Tool calls starting, finishing, and failing, with the tool call's span.       |
+| `sandbox`     | Sandboxes starting, running commands, and stopping.                           |
+| `hosted-code` | What a hosted code tool printed, one line per output line, and its exit code. |
+
+Filter with `level`, which keeps that level and every more severe one, and with `source`, `toolCallId`, `from`, and `to`. `limit` takes 1 to 500 and defaults to 200. Every page returns `nextCursor` and `caughtUp`. When `caughtUp` is `false`, keep paging. When it is `true`, you have every stored line, and requesting `nextCursor` again later returns only the lines written since. That is how you follow a run that is still executing. A cursor works only with the filters it was issued for.
+
+The environment's capture mode decides what a line keeps:
+
+| Capture mode       | Messages                    | Attributes                             | Hosted code output |
+| ------------------ | --------------------------- | -------------------------------------- | ------------------ |
+| `metadata-only`    | Kept, with secrets redacted | Only names that do not suggest content | Not kept           |
+| `redacted-content` | Kept, with secrets redacted | All, with secrets redacted             | Kept               |
+| `full-content`     | Kept as written             | All, as written                        | Kept               |
+
+Hosted code output never contains the values of the secrets the tool declares, in any mode. Lines are bounded: a message keeps 2,000 characters, an attribute value 256, one execution of a run 1,000 lines, and one hosted code call 200 output lines. A warning line marks each cut. Lines are kept for 30 days, as long as trace spans, and erasing the thread erases them. Runtime logs do not depend on the observability hot plane, so they work on every install.
+
+## Publish automation output
+
+Heartbeat runs, schedule runs, and runs submitted with `responsePublication: "external"` keep their answer provisional. The worker does not stream tokens for them, and the final message stays out of the visible history. Deliver the answer through your own channel, then record the outcome:
+
+1. `POST /v1/threads/{threadId}/runs/{runId}/message/publication-reservations` reserves the message's place in the conversation before you deliver it.
+2. `POST /v1/threads/{threadId}/runs/{runId}/message/publications` publishes the delivered text as a visible message.
+3. `POST /v1/threads/{threadId}/runs/{runId}/message/publication-releases` releases the reservation when delivery is uncertain or did not happen.
+
+A publication moves through `reserved`, `committed`, `published`, and `released`. While a thread waits for a delivery outcome, replays on it fail with `409 publication_busy`. See [Schedules and heartbeats](/docs/capabilities/automations).
+
+## Continue a thread on another deployment
+
+`POST /v1/threads` with `continueFromThreadId` starts a successor thread that carries a predecessor's conversation over to a new deployment. The successor inherits the predecessor's [conversation checkpoint](/docs/capabilities/context-management#keep-long-conversations-coherent-with-checkpoints), and its spare history budget fills with the predecessor's recent turns. Stored messages are never copied or rewritten.
+
+The request fails with `409 thread_continuity_mismatch` in these cases:
+
+- The predecessor is archived.
+- The predecessor is a preview or evaluation thread.
+- The two deployments run different agent definitions.
+- The request names a different workspace than the predecessor's.
+
+The predecessor's checkpoint must also cover its whole history. If it does not, the request fails with `409 thread_continuity_incomplete`, and the platform queues the missing checkpoint work. Retry after that work completes. Set `contextCheckpointMode: "auto"` on releases whose threads you plan to continue.
+
+## Erase a thread or an end user
+
+Erasure permanently deletes conversation data inside one environment. It runs in the background, and you poll the erasure until its `status` is `completed`, `failed`, or `canceled`.
+
+| Action            | Route                                                                                                      | Scope                                      |
+| ----------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| Erase a thread    | `POST /v1/threads/{threadId}/erasures`, then `GET /v1/threads/{threadId}/erasures/{erasureId}`             | `runs:erase` to start, `runs:read` to poll |
+| Erase an end user | `POST /v1/end-users/erasures` with `{ "endUserId": "..." }`, then `GET /v1/end-users/erasures/{erasureId}` | `end-users:erase`                          |
+
+<Callout type="error" title="Erasure is permanent">
+  The thread is gone from every route as soon as the erase request returns, and it cannot be
+  restored.
+</Callout>
+
+Erasing a thread deletes its messages, runs, tool calls, approvals, checkpoints, artifacts that nothing else references, the files attached to its runs or captured from its channel or email messages with the text extracted from them, memories formed in it, its schedules and heartbeats, its stream, stream sessions, channel messages staged for it, and its traces. When the thread started from agent email, it also deletes the mail of that email thread up to the erasure, received and sent, with its attachments and the drafts that answer it. The first request returns `202`. A repeated request returns `200` with the same erasure. The request fails with `409 thread_active` while any run of the thread is not terminal, so cancel the runs first. Preview and evaluation threads fail with `409 thread_not_erasable`.
+
+Erasing an end user erases every thread whose `endUserId` names that user, and cancels their active runs instead of refusing. While it runs, a repeated request returns the same erasure, and creating a thread for that end user fails with `409 end_user_erasure_in_progress`. A one-to-one channel conversation, such as an SMS thread or a Slack direct message, belongs to the end user `channel:{provider}:{workspace or -}:{sender}`. Pass that string as `endUserId` to erase a channel user.
+
+An agent email correspondent is the end user `channel:email:-:{address}`, with the address lowercased and percent-encoded, such as `channel:email:-:alice%40example.com`. Build that string yourself, or pass `--email` to `deployments end-user erase`. The route also accepts the address in any letter case. Erasing that end user deletes, up to the erasure, every email thread with a message that names the address on From, To, Cc, Bcc, or Reply-To and every draft addressed to it, including mail that never started a conversation. It also erases every thread that mail started or continued. Naming one of your own inbox addresses fails with `409 end_user_is_inbox`.
+
+The erasure reports its `phase` and `counts`, including `threadsErased`, `runsCanceled`, `recordsDeleted`, `memoriesErased`, `emailMessagesErased`, and `emailThreadsErased`. It keeps counts only. A completed end-user erasure does not hold the end user's ID or its pseudonym. Audit events, spend and meter records, and a tombstone that stops the thread ID from being reused survive. Agent email mail that arrived after the erasure was requested survives too. See [Data governance](/docs/capabilities/governance#thread-and-end-user-erasure).
+
+## Access
+
+Reads need the `runs:read` scope and writes need `runs:write`. Erasing a thread needs `runs:erase`, and erasing an end user needs `end-users:erase`. A person also needs the `owner` or `admin` organization role to erase. An API key carries its own tenant, so tenant headers are optional and must match the key when you send them. A user sign-in must send `x-deployments-organization`, `x-deployments-project`, and `x-deployments-environment`. See [Authentication](/docs/getting-started/authentication).
+
+## Use it
+
+1. Send a message. The platform creates a thread and prints the run with its `threadId`.
+
+   ```bash
+   deployments run create --agent $AGENT_DEPLOYMENT_ID --message "Summarize yesterday's open tickets."
+   ```
+
+2. Follow the run until it reaches a terminal status.
+
+   ```bash
+   deployments run tail $RUN_ID --thread $THREAD_ID --follow
+   ```
+
+3. Read the answer, then send the next turn on the same thread.
+
+   ```bash
+   deployments run message $RUN_ID --thread $THREAD_ID
+   deployments run create --agent $AGENT_DEPLOYMENT_ID --thread $THREAD_ID --message "Group them by owner."
+   ```
+
+4. Find failed runs of the deployment and retry one.
+
+   ```bash
+   deployments run list --agent-deployment-id $AGENT_DEPLOYMENT_ID --status failed
+   deployments run retry $RUN_ID
+   ```
+
+5. Run a finished turn again as a new run, or stop a run that is still going.
+
+   ```bash
+   deployments run replay $RUN_ID
+   deployments run cancel $RUN_ID
+   ```
+
+6. Erase a thread, or every thread of one end user, and poll the erasure until `status` is `completed`. In a terminal the CLI asks you to confirm. In scripts or with `--json`, pass `--yes`.
+
+   ```bash
+   deployments thread erase $THREAD_ID
+   deployments thread erasure-status $ERASURE_ID --thread $THREAD_ID
+   deployments end-user erase --end-user-id "$END_USER_ID"
+   deployments end-user erase --email "alice@example.com"
+   deployments end-user erasure-status $ERASURE_ID
+   ```
+
+The same submission through the SDK, with a structured answer:
+
+```ts
+import { createClient, createConfig, submitAgentRun } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data, error } = await submitAgentRun({
+  client,
+  path: { agentDeploymentId: process.env.AGENT_DEPLOYMENT_ID! },
+  headers: { "idempotency-key": crypto.randomUUID() },
+  body: {
+    content: "Classify this request: the export button is missing.",
+    responseFormat: {
+      type: "json_schema",
+      name: "triage_result",
+      schema: {
+        type: "object",
+        properties: {
+          category: { type: "string", enum: ["billing", "bug", "other"] },
+        },
+        required: ["category"],
+        additionalProperties: false,
+      },
+    },
+  },
+});
+```
+
+## Reference
+
+- API: [submit run](/docs/api/reference/runtime/submit-agent-run), [create thread](/docs/api/reference/runtime/create-thread), [list threads](/docs/api/reference/runtime/list-threads), [list messages](/docs/api/reference/runtime/list-thread-messages), [get run](/docs/api/reference/runtime/get-run), [list runs](/docs/api/reference/runtime/list-runs), [list run logs](/docs/api/reference/runtime/list-run-logs), [search runs](/docs/api/reference/runtime/search-runs), [cancel run](/docs/api/reference/runtime/cancel-run), [retry run](/docs/api/reference/runtime/retry-run), [replay run](/docs/api/reference/runtime/replay-run), [archive thread](/docs/api/reference/runtime/archive-thread), [erase thread](/docs/api/reference/runtime/erase-thread), [get thread erasure](/docs/api/reference/runtime/get-thread-erasure), [erase end user](/docs/api/reference/runtime/erase-end-user), [get end-user erasure](/docs/api/reference/runtime/get-end-user-erasure)
+- CLI: [`deployments run`](/docs/cli/reference/run), [`deployments thread`](/docs/cli/reference/thread), [`deployments end-user`](/docs/cli/reference/end-user), [`deployments chat`](/docs/cli/reference/chat)
+- SDK: [Runtime functions](/docs/sdk/reference#runtime)

@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/providers",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/providers.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../db" }]
+}

@@ -1,0 +1,11 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "erasableSyntaxOnly": true,
+    "outDir": "../../../dist/apps/sandbox-microvm-browser",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../../dist/sandbox-microvm-browser.tsbuildinfo"
+  },
+  "include": ["*.ts"]
+}

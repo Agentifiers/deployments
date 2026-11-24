@@ -1,0 +1,23 @@
+{
+  "name": "@deployments-ai/automations",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./run-key": "./src/run-key.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-scheduler": "3.1090.0",
+    "@deployments-ai/agent-manifest": "workspace:*",
+    "@deployments-ai/conversations": "workspace:*",
+    "@deployments-ai/db": "workspace:*",
+    "@deployments-ai/events": "workspace:*",
+    "effect": "4.0.0-beta.92"
+  }
+}

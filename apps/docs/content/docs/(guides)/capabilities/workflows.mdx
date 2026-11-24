@@ -1,0 +1,181 @@
+---
+title: "Workflows"
+description: "Define deterministic multi-step workflows, release them as immutable versions, and run executions with agent, tool, and approval steps."
+---
+
+A workflow is a fixed graph of steps that the platform runs in order: call an agent, call a tool, ask a person to approve, branch on data, or emit a notification. Use a workflow when the order of work must not depend on a model's choices, for example "draft with an agent, wait for approval, then call the tool that publishes."
+
+## Lifecycle
+
+| Resource            | Scope       | What it is                                                                 |
+| ------------------- | ----------- | -------------------------------------------------------------------------- |
+| Workflow definition | Environment | A mutable draft document. `status` is `active` or `archived`.              |
+| Workflow release    | Environment | An immutable copy of the draft with a `releaseNumber` and a `contentHash`. |
+| Workflow execution  | Environment | One run of one release, pinned to its content hash.                        |
+| Step attempt        | Execution   | One attempt at one step, with its input, output, and error.                |
+| Workflow approval   | Execution   | A pending decision created by an approval step.                            |
+
+Publishing takes the definition's `expectedDefinitionVersion`, increments the release number, and stores the exact document with a SHA-256 `contentHash`. Executions start only from `active` releases. Starting from an archived release fails with 409 `workflow_release_unavailable`.
+
+## Definition document
+
+```json
+{
+  "schemaVersion": 1,
+  "name": "Publish weekly summary",
+  "slug": "publish-weekly-summary",
+  "entryStepId": "draft",
+  "steps": [
+    { "id": "draft", "type": "agent", "agentDeploymentId": "dep_123", "next": "review" },
+    {
+      "id": "review",
+      "type": "approval",
+      "prompt": "Publish this summary?",
+      "timeoutSeconds": 86400,
+      "onApproved": "publish",
+      "onRejected": "done",
+      "onExpired": "done"
+    },
+    {
+      "id": "publish",
+      "type": "tool",
+      "agentDeploymentId": "dep_123",
+      "toolName": "cms.pages.publish",
+      "approvalStepId": "review",
+      "next": "done",
+      "onFailure": "escalate"
+    },
+    {
+      "id": "escalate",
+      "type": "escalation",
+      "target": "editors",
+      "message": "Publishing failed.",
+      "next": "done"
+    },
+    { "id": "done", "type": "end" }
+  ]
+}
+```
+
+| Step type      | Fields                                                                          | What it does                                                          |
+| -------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `agent`        | `agentDeploymentId`, `input`, `next`, `onFailure`                               | Submits a turn to the deployment and waits for the child run.         |
+| `tool`         | `agentDeploymentId`, `toolName`, `input`, `approvalStepId`, `next`, `onFailure` | Calls one tool through the deployment's release and authorization.    |
+| `approval`     | `prompt`, `timeoutSeconds`, `onApproved`, `onRejected`, `onExpired`             | Creates an approval and waits for a decision.                         |
+| `branch`       | `condition`, `onTrue`, `onFalse`                                                | Picks the next step from execution input or an earlier step's output. |
+| `notification` | `channel`, `target`, `message`, `next`, `onFailure`                             | Records a `workflow-notification.requested` event.                    |
+| `escalation`   | `target`, `message`, `next`, `onFailure`                                        | Records a `workflow-escalation.requested` event.                      |
+| `end`          | `outcome`                                                                       | Completes the execution with `outcome` as its output.                 |
+
+### Validation rules
+
+| Rule                          | Limit                                                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Steps per definition          | 1 to 500                                                                                                                  |
+| Document size                 | 192 KiB                                                                                                                   |
+| Step IDs                      | Unique. Lowercase, start with a letter, at most 64 characters (`[a-z][a-z0-9_-]{0,63}`).                                  |
+| `prompt`, `message`, `target` | 1 to 32,000 characters                                                                                                    |
+| `timeoutSeconds`              | 60 to 2,592,000 (30 days)                                                                                                 |
+| Graph                         | `entryStepId` names a declared step. Every edge names a declared step. No cycles. Every step is reachable from the entry. |
+| Success paths                 | `agent`, `tool`, `notification`, and `escalation` steps need `next`. Only `end` steps finish successfully.                |
+| Branches                      | A branch can read only the output of a step that can come before it, and never its own.                                   |
+| `approvalStepId`              | Names an `approval` step that can come before the tool step.                                                              |
+
+### Inputs and conditions
+
+An `agent` or `tool` step receives its own `input` object when it sets one. Otherwise it receives the execution's input. The platform does not template values into `input`.
+
+A branch `condition` has a `left` operand and an `operator`. The operand reads `{ "source": "input" }` or `{ "source": "step", "stepId": "..." }`, with an optional `path` of up to 32 keys or array indexes. Operators are `exists`, `truthy`, `equals`, and `not-equals`. `equals` and `not-equals` compare `right` as canonical JSON.
+
+Step outputs available to branches:
+
+| Step           | Output                                                       |
+| -------------- | ------------------------------------------------------------ |
+| `agent`        | `{ messageId, runId }` of the completed child run            |
+| `tool`         | `{ status, outputSummary, externalOperationId }`             |
+| `approval`     | `{ outcome }`, which is `approved`, `rejected`, or `expired` |
+| `branch`       | `{ conditionResult }`, which is `true` or `false`            |
+| `notification` | `{ channel, target, emitted: true }`                         |
+| `escalation`   | `{ target, emitted: true }`                                  |
+
+## How steps run
+
+- **Agent steps** submit a turn to the deployment on the `workflow` channel, with the step input as JSON content and the execution's workspace. The deployment must be running, and its manifest must allow the `workflow` trigger. The step waits until the child run completes or fails.
+- **Tool steps** run synchronously through the same release, grant, and tool policy that an agent run of that deployment uses. The tool must be declared in the deployment's release, and the release must allow the `workflow` trigger. The input must match the tool's input schema. A `deny` decision fails the step. A `require_approval` decision fails the step unless `approvalStepId` names an earlier approval step whose outcome was `approved`. Tools that return an asynchronous operation, and client-executed tools, fail the step.
+- **Approval steps** create a workflow approval. Without `timeoutSeconds` the approval does not expire. An approval that expires follows `onExpired`.
+- **Notification and escalation steps** record a semantic event and continue. They do not send messages themselves. Subscribe a [webhook](/docs/capabilities/webhooks) endpoint to `workflow-notification.requested` or `workflow-escalation.requested` to act on them.
+
+A failed step follows `onFailure`. Without `onFailure`, or when an approval expires without `onExpired`, the execution fails.
+
+## Executions
+
+| Execution status                                                                        | Meaning                                                     |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `queued`, `running`                                                                     | Advancing to or running a step.                             |
+| `waiting-for-agent`, `waiting-for-tool`, `waiting-for-approval`, `waiting-for-delivery` | Waiting on a child run, a tool, a person, or an event step. |
+| `completed`, `failed`                                                                   | Finished. `output` or `error` is set.                       |
+| `canceling`, `canceled`                                                                 | Cancellation requested, then done.                          |
+
+Step attempts move through `queued`, `running`, `waiting`, and then `succeeded`, `failed`, or `canceled`.
+
+Start an execution with an optional `input` object of up to 64 KiB and an optional `workspaceId` of an active workspace. Each step output is limited to 64 KiB. An execution fails with `workflow_context_too_large` when its stored step outputs exceed 192 KiB as JSON.
+
+Cancel with the execution's `expectedVersion`. Cancellation is final for the workflow. A child run or tool call already in progress can still finish, and the workflow ignores its result.
+
+## Permissions
+
+| Action                                                    | Capability                          |
+| --------------------------------------------------------- | ----------------------------------- |
+| Read definitions, releases, executions, and step attempts | `workflows:read`                    |
+| Create, update, publish, and archive                      | `workflows:write`                   |
+| Start and cancel executions                               | `workflows:execute`                 |
+| Read and resolve workflow approvals                       | `approvals:read`, `approvals:write` |
+
+## Use it
+
+1. Create the definition from a file, then publish it.
+
+   ```bash
+   deployments workflow create --definition "$(cat workflow.json)"
+   deployments workflow release $WORKFLOW_ID --expected-definition-version 0
+   ```
+
+2. Start an execution of the release.
+
+   ```bash
+   deployments workflow-execution start --release $WORKFLOW_RELEASE_ID --input '{"week":"2026-40"}'
+   ```
+
+3. Follow its progress and approve the pending step.
+
+   ```bash
+   deployments workflow-execution show $WORKFLOW_EXECUTION_ID
+   deployments workflow-execution steps $WORKFLOW_EXECUTION_ID
+   deployments workflow-approval approve $WORKFLOW_APPROVAL_ID --execution $WORKFLOW_EXECUTION_ID
+   ```
+
+Start an execution from the SDK:
+
+```ts
+import { createClient, createConfig, startWorkflowExecution } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data, error } = await startWorkflowExecution({
+  client,
+  path: { workflowReleaseId: process.env.WORKFLOW_RELEASE_ID! },
+  headers: { "idempotency-key": crypto.randomUUID() },
+  body: { input: { week: "2026-40" } },
+});
+```
+
+## Reference
+
+- API: [Create a workflow definition](/docs/api/reference/workflows/create-workflow-definition), [Publish a workflow release](/docs/api/reference/workflows/publish-workflow-release), [Start a workflow execution](/docs/api/reference/workflows/start-workflow-execution), [List step attempts](/docs/api/reference/workflows/list-workflow-step-attempts), [Resolve a workflow approval](/docs/api/reference/workflows/resolve-workflow-approval)
+- CLI: [`deployments workflow`](/docs/cli/reference/workflow#workflow-create), [`deployments workflow-execution`](/docs/cli/reference/workflow-execution#workflow-execution-start), [`deployments workflow-approval`](/docs/cli/reference/workflow-approval#workflow-approval-approve)
+- SDK: [Workflows functions](/docs/sdk/reference#workflows)

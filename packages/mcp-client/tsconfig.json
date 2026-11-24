@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/mcp-client",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/mcp-client.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../net-security" }]
+}

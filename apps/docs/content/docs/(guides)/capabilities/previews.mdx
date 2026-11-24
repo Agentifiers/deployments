@@ -1,0 +1,166 @@
+---
+title: "Preview runs"
+description: "Run an unpublished agent manifest on the hosted runtime through a temporary preview, isolated from deployments, memory, and delivery."
+---
+
+A preview runs an unpublished agent manifest on the hosted runtime. It creates no agent definition, release, or deployment. Use a preview to try instructions, tools, and models against real infrastructure before you publish a release, then let it expire. [`deployments dev`](/docs/cli/preview-loop) is built on previews.
+
+## What a preview holds
+
+A preview stores the validated manifest and its `contentHash`, a runtime configuration that is fixed when you create the preview, the caller that created it, and an expiration time. Its runs use the same worker, model routing, tool execution, streaming, and run and thread APIs as a deployed agent.
+
+The preview's runtime configuration comes from one of three sources, chosen at creation:
+
+| Request field           | Runtime configuration                                                                                                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runtimeConfig`         | The [deployment configuration](/docs/capabilities/agent-manifests#deployment-configuration) document you send.                                                                        |
+| `fromAgentDeploymentId` | A copy of that deployment's runtime configuration. Later changes to the deployment do not reach the preview. The response reports the source as `runtimeConfigFromAgentDeploymentId`. |
+| Neither                 | The default runtime configuration.                                                                                                                                                    |
+
+`runtimeConfig` and `fromAgentDeploymentId` are mutually exclusive. Sending both fails with `invalid_request`.
+
+Creation checks the preview the way publishing and deploying check a release:
+
+- The manifest must pass the same validation as publishing a release. An invalid manifest fails with `400 invalid_request` and nothing is stored.
+- Every model the manifest names must be admitted by the environment's [model policy](/docs/capabilities/models). A rejected model fails with `422` and the rejection reason as the error code.
+- The runtime configuration must satisfy the manifest, or creation fails with `invalid_agent_deployment_config`.
+
+## Lifetime
+
+`ttlSeconds` sets the lifetime, an integer from 60 to 604,800 seconds (seven days). The default is 86,400 seconds (24 hours).
+
+| Status    | Meaning                                                                                         |
+| --------- | ----------------------------------------------------------------------------------------------- |
+| `active`  | The preview accepts turns until `expiresAt`.                                                    |
+| `expired` | `expiresAt` has passed, or someone deleted the preview. `expiredAt` records an explicit delete. |
+
+`DELETE /v1/previews/{previewId}` expires the preview and returns it. Deleting a preview that was already deleted returns it unchanged. Once a preview expires:
+
+- New turns fail with `409 execution_binding_expired`.
+- The worker refuses to start a queued run of the preview.
+- A run that waits for an approval cannot resume.
+
+## Turns, threads, and runs
+
+`POST /v1/previews/{previewId}/turns` takes `content`, an optional `responseFormat`, and an optional `threadId`, and answers `202` with `created`, `message`, `run`, and `thread`. Omit `threadId` to start a new thread. Pass the returned thread ID to continue the conversation. A thread from another preview fails with `404`, and an archived thread fails with `thread_archived`.
+
+Each turn creates an ordinary run and thread, pinned to the preview instead of a deployment:
+
+| Field                | Run of a deployment         | Run of a preview |
+| -------------------- | --------------------------- | ---------------- |
+| `executionPurpose`   | `customer`                  | `preview`        |
+| `executionBindingId` | Absent                      | The preview ID   |
+| `agentDeploymentId`  | The deployment ID           | Absent           |
+| `trigger`            | The trigger that started it | `preview`        |
+| Thread `channel`     | The originating channel     | `preview`        |
+
+Read preview runs with the usual [run and thread routes](/docs/capabilities/threads-and-runs) and [streams](/docs/capabilities/streaming). Thread listings leave preview threads out unless you filter by `executionBindingId`. Run listings take the same filter. Preview turns count against the environment's [budgets](/docs/capabilities/usage-and-budgets), and an exhausted budget fails the turn with `429 budget_exhausted`.
+
+## Isolation from production
+
+A preview never changes a definition, a release, a deployment, or any state a deployment owns.
+
+| Area                                                                                         | In a preview run                                                                                                                                                                                                                 |
+| -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Webhooks and channels                                                                        | Preview events stay with the preview. They never reach [webhooks](/docs/capabilities/webhooks) or [channels](/docs/capabilities/channels).                                                                                       |
+| [Memory](/docs/capabilities/memory)                                                          | Read-only. Recall reads the memory of the `fromAgentDeploymentId` deployment. Without a source deployment, recall fails with `execution_binding_memory_unavailable`. Memory writes and conversation checkpoints never happen.    |
+| [Brains](/docs/capabilities/brains)                                                          | Brain read tools work through the `fromAgentDeploymentId` deployment's grant and mount. Without a source deployment, the preview has no Brain access. Brain writes are denied. A preview never publishes a Brain-derived answer. |
+| `agent.delegate`, `agent.schedule.create`, `agent.schedule.remind`, `agent.schedule.archive` | The tool call completes with `{ "denied": true, "reason": "..." }`. The model reads the denial and the run continues. These tools never wait for approval in a preview.                                                          |
+
+Every other tool follows the manifest's authorization exactly as it would in a deployment. An approval-gated tool pauses the run in `waiting-for-approval`, and a client-executed tool pauses it in `waiting-for-tool`. You answer both through the same routes as for a deployed run. See [Approvals and client tools](/docs/capabilities/approvals-and-client-tools).
+
+<Callout type="warn" title="Preview tool calls have real effects">
+  A preview does not sandbox tool effects. A write tool in a preview acts through the connections
+  and credentials that the preview's runtime configuration binds. Point the preview at test
+  connections when you try tools that change data.
+</Callout>
+
+[Evaluations](/docs/capabilities/evaluations) run on the same mechanism with a stricter tool policy. It allows only read tools and denies approval-gated and client tool calls.
+
+## Scopes and idempotency
+
+| Operation                                                        | Scopes                       | `Idempotency-Key` |
+| ---------------------------------------------------------------- | ---------------------------- | ----------------- |
+| [Create a preview](/docs/api/reference/runtime/create-preview)   | `runs:write`, `agents:write` | Required          |
+| [Get a preview](/docs/api/reference/runtime/get-preview)         | `runs:read`                  | None              |
+| [Submit a turn](/docs/api/reference/runtime/submit-preview-turn) | `runs:write`, `agents:write` | Required          |
+| [Delete a preview](/docs/api/reference/runtime/delete-preview)   | `runs:write`, `agents:write` | None              |
+
+The write operations need `agents:write` because they run agent code that has never been released. Replaying an idempotency key with the same request returns the original result. Reusing it with a different request fails with `409 idempotency_conflict`. See [Idempotency](/docs/api/idempotency).
+
+## Use it
+
+For an interactive loop that reloads your manifest file on every message, use `deployments dev`, described in [Local preview loop](/docs/cli/preview-loop). The steps below drive a preview with individual commands.
+
+1. Create a preview from a manifest file, reusing the runtime configuration of an existing deployment.
+
+   ```bash
+   deployments preview create --manifest-file agent.json --from-agent-deployment-id $AGENT_DEPLOYMENT_ID --ttl-seconds 3600
+   ```
+
+2. Send the first turn. The output includes the run ID and the new thread ID.
+
+   ```bash
+   deployments preview turn $PREVIEW_ID --message "Classify this request: the export button is missing."
+   ```
+
+3. Follow the run until it ends.
+
+   ```bash
+   deployments run tail $RUN_ID --thread $THREAD_ID --follow
+   ```
+
+4. Continue on the same thread.
+
+   ```bash
+   deployments preview turn $PREVIEW_ID --thread $THREAD_ID --message "Now reply in one sentence."
+   ```
+
+5. List the preview's runs, then expire the preview.
+
+   ```bash
+   deployments run list --execution-binding-id $PREVIEW_ID
+   deployments preview delete $PREVIEW_ID --yes
+   ```
+
+The same create and turn through the SDK:
+
+```ts
+import {
+  createClient,
+  createConfig,
+  createPreview,
+  submitPreviewTurn,
+} from "@agentifiers/deployments-sdk";
+import { readFile } from "node:fs/promises";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data: preview } = await createPreview({
+  client,
+  headers: { "idempotency-key": crypto.randomUUID() },
+  body: {
+    manifest: JSON.parse(await readFile("agent.json", "utf8")),
+    ttlSeconds: 3600,
+  },
+});
+if (!preview) throw new Error("Preview creation failed.");
+
+const { data: turn } = await submitPreviewTurn({
+  client,
+  path: { previewId: preview.id },
+  headers: { "idempotency-key": crypto.randomUUID() },
+  body: { content: "Classify this request: the export button is missing." },
+});
+```
+
+## Reference
+
+- API: [create preview](/docs/api/reference/runtime/create-preview), [get preview](/docs/api/reference/runtime/get-preview), [submit preview turn](/docs/api/reference/runtime/submit-preview-turn), [delete preview](/docs/api/reference/runtime/delete-preview)
+- CLI: [`deployments preview`](/docs/cli/reference/preview), [`deployments dev`](/docs/cli/reference/dev#dev)
+- SDK: [Runtime functions](/docs/sdk/reference#runtime)

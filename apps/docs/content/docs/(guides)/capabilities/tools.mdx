@@ -1,0 +1,214 @@
+---
+title: "Tools and tool policies"
+description: "The platform tool catalog, how agents declare and bind tools, and the policies that allow, gate, or deny each call."
+---
+
+A tool is a named operation an agent can call during a run, such as `web.search`, `code.execute`, or a tool you register yourself. Tool policies decide whether a call to a connection-backed tool runs, waits for approval, or is denied. Use this page to find tools, attach them to an agent, and predict what the runtime decides before you deploy.
+
+## Where tools come from
+
+Every tool has a name, an effect, a default policy action, and a list of required scopes. Tools reach an environment from three places.
+
+| Source           | How it is created                                                                    | Listed by            |
+| ---------------- | ------------------------------------------------------------------------------------ | -------------------- |
+| Platform catalog | Code-owned and the same in every environment                                         | `GET /v1/tools`      |
+| Extension tools  | You register them per environment (MCP, HTTP callback, client-executed, hosted code) | `GET /v1/extensions` |
+| Vendor MCP tools | Created when you sync tools from a vendor-hosted MCP connection                      | `GET /v1/extensions` |
+
+Catalog names always win. An extension cannot take the name of a catalog tool (`tool_name_reserved`), and the runtime resolves a catalog definition before it looks at extensions. See [Extensions and hosted code](/docs/capabilities/extensions-and-hosted-code) and [MCP servers](/docs/capabilities/mcp) for the tenant-defined kinds.
+
+### Tool fields
+
+| Field                  | Values                                                   | Meaning                                                                                          |
+| ---------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `effect`               | `read`, `write`, `execute`                               | What the call does. Policy rules can match on it.                                                |
+| `defaultPolicyAction`  | `allow`, `require_approval`, `deny`                      | The decision when no policy rule matches.                                                        |
+| `requiredScopes`       | Provider scopes                                          | Scopes the connection grant must hold before the call can run.                                   |
+| `status`               | `active`, `archived`                                     | Archived tools are denied at run time.                                                           |
+| `policyBinding`        | `catalog`, `connection`, or `null`                       | Which inputs decide a call (see below). `null` means the runtime has no way to execute the tool. |
+| `route` and `category` | Provider route and category, or `builtin` and `platform` | Where the tool runs.                                                                             |
+
+`GET /v1/tools` returns catalog tools ordered by name. It filters by `providerKey`, `prefix`, `search` (a case-insensitive substring of the name or description), and `status` (`active` by default, `archived`, or `all`). `GET /v1/tools/:toolName` adds the input and output schemas and also returns archived tools. A provider tool is archived with a default of `deny` when its provider is not usable or the provider's registered scopes do not cover the tool.
+
+<Callout type="warn" title="Availability">
+  Some catalog tools depend on how the operator configured the agent worker. `web.*` tools run only
+  when the operator enables web tools, which the customer root does by default. `browser.*` and
+  `sandbox.files.*` tools need the Lambda MicroVM sandbox provider, and `code.execute` needs a
+  sandbox provider. The catalog lists these tools either way. See [Web and browser
+  tools](/docs/capabilities/web-tools-and-browser) and [Code sandbox](/docs/capabilities/sandbox).
+</Callout>
+
+## Declare and bind tools
+
+An agent can use a tool only when its manifest declares it in `spec.capabilities.tools`. A manifest declares at most 256 tools. Each entry has these fields:
+
+| Field            | Meaning                                                          |
+| ---------------- | ---------------------------------------------------------------- |
+| `name`           | The tool name.                                                   |
+| `required`       | Whether the deployment must bind the tool.                       |
+| `requiredScopes` | Scopes the agent expects the tool to need.                       |
+| `authorization`  | `none` or `workspace`. Connection-backed tools need `workspace`. |
+
+One catalog tool is platform-managed. `attachment.read` pages the text of a document attached to the run or to an earlier turn of its thread, and the platform adds it to a run that has one. A manifest cannot declare it in `spec.capabilities.tools` or `spec.runtime.modelTools`, and publishing such a release fails with `platform_managed_tool`. See [Artifacts](/docs/capabilities/artifacts#attach-files-to-a-run).
+
+Connection-backed tools also need a binding in the deployment configuration (`AgentDeploymentConfig`). `toolAuthorizations` maps each tool name to a connection grant and an optional tool policy:
+
+```json
+{
+  "apiVersion": "agents.deployments.ai/v1",
+  "kind": "AgentDeploymentConfig",
+  "toolAuthorizations": {
+    "shopify.orders.search": {
+      "authorizationId": "$GRANT_ID",
+      "toolPolicyId": "$TOOL_POLICY_ID"
+    }
+  }
+}
+```
+
+`authorizationId` is the ID of a connection grant (see [Providers and connections](/docs/capabilities/providers-and-connections)). The platform validates the configuration against the release manifest:
+
+| Error code                       | Cause                                                               |
+| -------------------------------- | ------------------------------------------------------------------- |
+| `undeclared_tool_authorization`  | The configuration binds a tool the manifest does not declare.       |
+| `tool_authorization_not_allowed` | The tool's capability does not set `authorization: "workspace"`.    |
+| `missing_tool_authorization`     | A `required` tool with `authorization: "workspace"` has no binding. |
+
+See [Agents, releases, and deployments](/docs/capabilities/agents) for where the configuration lives.
+
+In the console, the deploy page and **Edit tool bindings** on an agent's **Deployments** tab set these bindings per tool, offering only grants that fit each tool and previewing the decision its policy gives. See [Deploy a release and bind its tools](/docs/getting-started/console#deploy-a-release-and-bind-its-tools).
+
+## How the runtime decides a call
+
+The runtime runs the same steps for every tool call. `POST /v1/tool-policies/evaluate` uses the same functions, so it reports the same answer.
+
+1. **Admission.** The tool must be registered and active, and it must have an execution route. Otherwise the call is denied with a reason such as `Runtime tool <name> is not registered.` or `Runtime tool <name> is not active.`
+2. **Policy binding.** The route sets which inputs decide the call.
+   - `catalog` tools are platform built-ins, hosted code tools, and client-executed tools. Their own default action decides every call. Environment tool policies never apply to them.
+   - `connection` tools are provider tools, MCP tools, and HTTP callback tools. The deployment's grant and its pinned tool policy decide the call.
+3. **Required scopes.** For a connection tool, the grant must hold every scope in the tool's `requiredScopes`. If it does not, the call is denied with the basis `required_scopes`.
+4. **Rules.** The policy's rules run in order and the first matching rule decides. If none matches, the policy's `defaultAction` decides. If the policy sets no default, or the binding pins no policy, the tool's own default action decides.
+
+| Decision           | What happens                                                                                                                                |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `allow`            | The call runs.                                                                                                                              |
+| `require_approval` | The run pauses until someone approves or rejects the call. See [Approvals and client tools](/docs/capabilities/approvals-and-client-tools). |
+| `deny`             | The call does not run, and the run fails with the reason.                                                                                   |
+
+## Write a tool policy
+
+A tool policy is an environment resource with a name, an optional description, and a policy document.
+
+<TypeTable
+  type={{
+    defaultAction: {
+      type: '"allow" | "require_approval" | "deny"',
+      description: "Decision when no rule matches. When absent, the tool's default action applies.",
+    },
+    defaultReason: { type: "string", description: "Reason reported with the default decision." },
+    rules: {
+      type: "Rule[]",
+      description: "Evaluated in order. The first matching rule wins.",
+      required: true,
+    },
+  }}
+/>
+
+A rule matches when every field it sets matches the call. Fields it omits match anything.
+
+| Rule field          | Matches when                                                                  |
+| ------------------- | ----------------------------------------------------------------------------- |
+| `action`            | Required. The decision to return.                                             |
+| `toolName`          | The tool name is exactly this value.                                          |
+| `toolPrefix`        | The tool name starts with this value.                                         |
+| `effect`            | The tool's effect equals this value, or is in this list.                      |
+| `providerKey`       | The grant's provider resolves to the same catalog provider, aliases included. |
+| `connectorProvider` | The grant's provider key equals this value exactly.                           |
+| `requiredScopes`    | The grant holds all of these scopes.                                          |
+| `reason`            | Not a match field. The reason reported when the rule decides.                 |
+
+This policy allows reads, requires approval for one write, and denies everything else:
+
+```json
+{
+  "defaultAction": "deny",
+  "defaultReason": "Only listed Shopify tools are allowed.",
+  "rules": [
+    { "action": "allow", "effect": "read", "toolPrefix": "shopify." },
+    {
+      "action": "require_approval",
+      "toolName": "shopify.fulfillments.create",
+      "reason": "Fulfillments need a reviewer."
+    }
+  ]
+}
+```
+
+Updates require the current `expectedVersion`. Archiving a policy keeps its record. A deployment that still pins an archived policy has its calls denied, and evaluation reports `Runtime tool policy is not active.`
+
+## Check decisions before you deploy
+
+`POST /v1/tool-policies/evaluate` has no side effects and accepts two request forms. Each lists at most 100 unique tool names.
+
+- `{ toolPolicyId, toolNames }` evaluates one policy. It assumes a connection to each tool's own provider that grants the tool's required scopes.
+- `{ agentDeploymentId, toolNames? }` evaluates a deployment as it runs. It reads the deployment's release, the tools the release declares (all of them when you omit `toolNames`), and each tool's pinned grant and policy. Missing grants, inactive policies, and ungranted scopes appear as denials.
+
+Each result reports `action`, `basis` (`rule`, `default`, `required_scopes`, or `unavailable`), `matchedRuleIndex`, `reason`, `catalogStatus`, `policyApplies`, and the `toolPolicyId` used. `unavailable` means the runtime denies the call before any policy runs. Evaluation cannot see which tools the operator disabled on the worker.
+
+## Permissions
+
+Reading the catalog and evaluating policies need `tools:read`. Creating, updating, and archiving tool policies, MCP servers and connections, extension tools, and hosted code need `tools:write`. Both are capability scopes on the caller's credential. See [Authentication](/docs/getting-started/authentication). A person also needs the `owner` or `admin` organization role to make changes; other roles receive `403 insufficient_role`, and `GET /v1/whoami` reports only `tools:read` for them. API keys are governed by their scopes alone.
+
+## Use it
+
+1. Find the tools you need and read their schemas.
+
+   ```bash
+   deployments tool list --provider-key shopify
+   deployments tool get --name shopify.fulfillments.create
+   ```
+
+2. Create a tool policy from a JSON file.
+
+   ```bash
+   deployments tool-policy create --name "Shopify access" --policy "$(cat policy.json)"
+   ```
+
+3. Check what the policy decides for each tool.
+
+   ```bash
+   deployments tool-policy evaluate --tool-policy-id $TOOL_POLICY_ID --tool shopify.orders.search --tool shopify.fulfillments.create
+   ```
+
+4. Declare the tools in the agent manifest, bind them in the deployment configuration, and deploy. Then evaluate the deployment.
+
+   ```bash
+   deployments tool-policy evaluate --agent-deployment-id $AGENT_DEPLOYMENT_ID
+   ```
+
+The same check from the SDK:
+
+```ts
+import { createClient, createConfig, evaluateToolPolicy } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data, error } = await evaluateToolPolicy({
+  client,
+  headers: { "x-deployments-environment": "env_123" },
+  body: { agentDeploymentId: process.env.AGENT_DEPLOYMENT_ID! },
+});
+```
+
+In the console, **Tool policies** under **Govern** lists the catalog, edits policies with a rules editor that flags rules that can never decide a call, and runs both evaluation forms. See [Manage tool policies](/docs/getting-started/console#manage-tool-policies).
+
+## Reference
+
+- API: [List tools](/docs/api/reference/tools/list-tools), [Get a tool](/docs/api/reference/tools/get-tool), [Evaluate tool policies](/docs/api/reference/tools/evaluate-tool-policy), [Create a tool policy](/docs/api/reference/tools/create-tool-policy), [Update a tool policy](/docs/api/reference/tools/update-tool-policy)
+- CLI: [`deployments tool`](/docs/cli/reference/tool#tool-list), [`deployments tool-policy`](/docs/cli/reference/tool-policy#tool-policy-create)
+- SDK: [Tools functions](/docs/sdk/reference#tools)

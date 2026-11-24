@@ -1,0 +1,241 @@
+---
+title: "Agent-built apps"
+description: "Web apps that deployed agents build with a Postgres database and a static site, the members who can open them, the publication settings that decide who an app serves, and the custom domains it can answer on."
+---
+
+An agent-built app is a web app that a deployed agent builds with the `app.*` tools. Each app has its own Postgres database and a static site at `https://<slug>.<apps domain>`. The database's `api` functions are the app's API, and the site calls them at `/_platform/api/<name>`. Members of the organization sign in to use the app. A [public app](#public-apps) also serves its pages and its `visitor` functions to people who do not sign in.
+
+## What an agent does
+
+| Tool                  | What it does                                                                                                            |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `app.create`          | Creates the app and its database. The slug becomes the subdomain and is never reused.                                   |
+| `app.list`            | Lists the apps the agent owns in its workspace.                                                                         |
+| `app.describe`        | Returns the publication settings, the schema, the `api` and `visitor` functions, the releases, and a TypeScript client. |
+| `app.migrate`         | Applies one schema migration as a single transaction.                                                                   |
+| `app.query`           | Runs one read-only SQL statement.                                                                                       |
+| `app.dev_token`       | Mints a short-lived token so a dev server in the sandbox can call the app's API.                                        |
+| `app.release`         | Uploads a built site from the sandbox as a new release.                                                                 |
+| `app.promote`         | Makes a release the live site. Promoting an earlier release rolls back.                                                 |
+| `app.set_publication` | Changes the app's `audience`, `serving`, or both.                                                                       |
+
+An agent can also write `visitor` functions, which anyone can call without signing in once the app is public. Visitors can call no other function. The agent cannot attach a custom domain.
+
+An app is a draft until its first promotion. A person must approve these agent calls:
+
+| Call                                       | Needs approval when                                                                                            |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `app.migrate`, `app.promote`               | The app has a live release or its audience is `public`. Promoting the release that is already live never does. |
+| `app.set_publication` to `public`          | Always, unless the app is already public.                                                                      |
+| `app.set_publication` with a new `serving` | The app has a live release.                                                                                    |
+
+A call that only sets `audience` back to `members` never needs approval, and no other agent call does. The approval request states why the call needs approval, such as "it opens app orders, which has no live release yet, to anyone on the internet". A promotion's reason names the release that is live, which the promotion replaces. The rule is checked again when the call runs. The call fails with `approval_required` if it now needs approval and was allowed without it, or if the reason it would state now differs from the reason the person approved. That happens when the app goes live, becomes public, or returns to members in between, and for a promotion when a different release goes live. The agent then calls again to ask for approval.
+
+## Who can open an app
+
+A member opens an app by signing in on its URL. The member's role in the app comes from two settings:
+
+- `access.organizationMembers` gives every organization member `none`, `viewer`, or `editor`.
+- A grant gives one member `viewer` or `editor` on top of that.
+
+A viewer can call the app's read functions. An editor can also call its write functions.
+
+## Publication settings
+
+Every app has a `publication` setting with two fields.
+
+| Field      | Values                       | Default       |
+| ---------- | ---------------------------- | ------------- |
+| `audience` | `members`, `public`          | `members`     |
+| `serving`  | `single-page`, `static-site` | `single-page` |
+
+`audience` says whether the app serves only signed-in members or also visitors who do not sign in. `serving` says whether every page path returns the app's `index.html`, as a single-page app expects, or each path returns its own HTML file, as a static site expects. An app created before these settings existed reports the defaults.
+
+The app gateway reads both fields. [Public apps](#public-apps) describes what `audience` changes, and [Static-site serving](#static-site-serving) describes `serving`.
+
+When you set `audience` to `public`, the platform first brings the app's database up to the current layout through the same idempotent step that creates it. Then it writes the new setting. If the database step fails, the setting does not change. The first `app.migrate` on an app created before these settings existed runs the same step. For 10 minutes after the step starts, the platform refuses to erase the app, so the step cannot recreate the database of an erased app. An erase in that window answers 409 `app_state_conflict` and names the time it becomes possible, whether the app is active or archived.
+
+Change the settings with `setAppPublication`:
+
+```bash
+deployments app set-publication <appId> --audience public --serving static-site
+```
+
+Send one field or both. The field you leave out keeps its value.
+
+## Public apps
+
+An app is public when its `audience` is `public`, it is active, and it has a live release. An app with a public audience but no live release behaves as a members app until its first promotion.
+
+| Request                                     | Members app                          | Public app                                                 |
+| ------------------------------------------- | ------------------------------------ | ---------------------------------------------------------- |
+| A page, signed in with a role               | The page                             | The page                                                   |
+| A page, not signed in                       | A 302 redirect to sign-in            | The page                                                   |
+| A page, with a session the app refuses      | 403                                  | The page                                                   |
+| An API call, signed in with a role          | The call, run with the member's role | The call, run with the member's role                       |
+| An API call, not signed in                  | 401 `unauthenticated`                | A visitor call                                             |
+| An API call, with a session the app refuses | 403                                  | A visitor call, or 403 for a function visitors cannot call |
+| `/_platform/me`, not signed in              | 401                                  | 401                                                        |
+
+A visitor gets the same page a member gets, with the same `cache-control: no-store` header. The app refuses a session that belongs to another app or another host, and a session whose person is not an active member or has no role in the app.
+
+A visitor call runs only functions in the app database's `visitor` schema, as the app's visitor role. A visitor who is not signed in and calls an `api` function or a name the app does not have gets 401 `unauthenticated`, the same answer for both, so signing in may help and the answer does not reveal which names exist. A person whose session the app refuses gets that refusal instead, such as 403 `not_a_member`, so signing in again does not change the answer. A signed-in member who calls a `visitor` function on a public app runs it as the visitor role too.
+
+The generated client sends the browser to sign-in only on 401 `unauthenticated`. On a 503 it waits for the `Retry-After` delay, at most 30 seconds, and sends the call once more, so a retried visitor call counts twice against the address limit. Every other error, and a second 503, throws `PlatformApiError` with the status, the code, the message and `retryAfter`, the seconds from the `Retry-After` header or `null`.
+
+A visitor call must come from the app's own pages. The gateway refuses it with 403 unless the request sends `Sec-Fetch-Site: same-origin` and `Content-Type: application/json`, which a `fetch` from the app's pages does. A call with an `Authorization: Bearer` header skips this check, because a browser never attaches one on a page's behalf. A bearer token the app refuses still runs as a visitor call. The gateway also limits visitor calls and visitor page loads.
+
+| Limit                                         | Value                               | Answer when exceeded                                                                    |
+| --------------------------------------------- | ----------------------------------- | --------------------------------------------------------------------------------------- |
+| Pages from one address, across apps           | A burst of 60, then 300 per minute  | 429 page with `Retry-After`                                                             |
+| Calls from one address to one app             | A burst of 10, then 10 per minute   | 429 `rate_limited` with `Retry-After`                                                   |
+| Visitor calls to one app                      | A burst of 120, then 300 per minute | 429 `rate_limited` with `Retry-After`                                                   |
+| Request body                                  | 16 KiB                              | 413 `body_too_large`                                                                    |
+| Visitor calls running at once for one app     | 2                                   | 503 `gateway_busy` with `Retry-After`                                                   |
+| Visitor calls running at once across all apps | 16                                  | 503 `gateway_busy` with `Retry-After`                                                   |
+| Time to answer                                | 2 seconds                           | 504 `deadline_exceeded`, or 503 `gateway_busy` if the call was still waiting for a slot |
+
+Only requests the gateway answers with a page count against the page limit. Its redirects do not: the 307s that send asset paths such as `/site.css` to the release's files, so a page and its assets count once, and the 308s that add or remove a trailing slash, such as `/about/` to `/about`. Page loads by signed-in members do not count either.
+
+A visitor call that answers 504 `deadline_exceeded` was rolled back, so a form can retry it without writing twice. A call that answers 504 `outcome_unknown` had sent its commit when the gateway lost the database's answer, so its changes may have been saved. This can happen to any call, a member's too. Retrying it may write twice, so check first, or make the function safe to repeat, for example with `INSERT ... ON CONFLICT DO NOTHING` on a key the form sends again.
+
+The gateway counts an IPv4 address on its own and an IPv6 address by its /56 prefix. Each gateway task keeps its own counts, so the limit a visitor meets is the value above times the number of gateway tasks your installation runs. The `app-runtime` infrastructure module sets these values in `gateway.tf`, and an operator changes one by changing the module.
+
+A session works only on the host where the person signed in. If its cookie reaches another host of the same app, a members app answers 403 `other_host` and a public app serves the request as a visitor.
+
+## Static-site serving
+
+When `serving` is `static-site`, each page path returns its own HTML file from the live release. On a members app, a person still signs in first.
+
+| Request                                                         | Response                                                                        |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `/`                                                             | `index.html`                                                                    |
+| `/about.html`                                                   | `about.html`                                                                    |
+| `/about`                                                        | `about.html`. If only `about/index.html` exists, a 308 redirect to `/about/`.   |
+| `/about/`                                                       | `about/index.html`. If only `about.html` exists, a 308 redirect to `/about`.    |
+| A missing path with another file extension, such as `/site.css` | A 307 redirect to the release's copy under `/_r/<releaseId>/`                   |
+| Any other missing path                                          | The release's `404.html` with status 404, or a platform 404 page if it has none |
+
+Redirects keep the query string. A path with an empty, `.` or `..` segment, an encoded `/`, or a backslash counts as missing. Page paths also answer `HEAD`.
+
+The gateway removes any `<base>` element from a page. It points the page's images, media, scripts, style sheets, icons, preloads, and manifest at the release's files, resolved against the page's directory. It leaves links between pages alone. The redirects above serve every page from its own directory, so a relative link resolves to the right page.
+
+`app.release` records the release's `.html` and `.htm` files. A release may hold at most 500 of them, with paths of at most 64 KiB in total, and a larger build is refused. A release created before the platform recorded these files serves only its home page in static-site mode. Its other paths return a 404 page that says so. Release and promote the app again to serve every page.
+
+SVG, PDF, XML, XSL, and XHTML files are never served, either as pages or from `/_r/`.
+
+With the default `single-page` serving, every page path returns `index.html` with a `<base href="/_r/<releaseId>/">`.
+
+## Custom domains
+
+An app can also answer on a hostname your organization controls, such as `www.example.com` or `example.com`. You attach the hostname to the app, publish two DNS records, and then refresh the domain so the platform checks that you own it.
+
+Activation is automatic. Once a domain is `verified`, the platform requests a TLS certificate for the hostname, connects the hostname to the app, and moves the domain to `active` when CloudFront serves it. That usually takes a few minutes after the `CNAME` record resolves. The platform checks every domain every 5 minutes, and a refresh queues a check of that domain right away. List the domains to follow the progress.
+
+### Attach a domain
+
+```bash
+deployments app-domain attach <appId> --hostname www.example.com
+```
+
+The response lists the DNS records to publish in `dnsRecords`.
+
+| Type    | Name                          | Value                               |
+| ------- | ----------------------------- | ----------------------------------- |
+| `TXT`   | `_deployments-app.<hostname>` | `deployments-app=<token>`           |
+| `CNAME` | `<hostname>`                  | The installation's routing endpoint |
+
+The `TXT` record proves that your organization controls the hostname. The token is random and belongs to this attachment only. The `CNAME` record sends traffic for the hostname to the platform. A zone apex such as `example.com` cannot hold a `CNAME`. For an apex, publish an `ALIAS` or `ANAME` record with the same value, or use your DNS provider's CNAME flattening.
+
+Attaching a hostname that the app already holds returns the existing domain and its token. The platform trims the hostname and lowercases it before it checks it. A hostname is ASCII, with punycode for international names. It has at least two labels and at most 236 characters, so that `_deployments-app.<hostname>` fits the 253 characters DNS allows. It cannot be an IP address. The platform answers 422 `invalid_hostname` for any other value, including an empty or longer one. It answers 422 `hostname_reserved` for the apps domain, for the API, identity, console, and stream gateway hostnames of the installation, and for every name under them. This release does not reserve the installation's docs hostname.
+
+### Verify a domain
+
+After you publish the `TXT` record, refresh the domain:
+
+```bash
+deployments app-domain refresh <appId> <domainId>
+```
+
+Refresh looks up the `TXT` record. If the record holds the token, the domain moves from `unverified` to `verified`. If the record is missing or holds another value, refresh answers 422 `txt_not_found` and changes nothing. If the DNS lookup itself fails, refresh answers 503 `dns_lookup_failed`. Try again later. Refreshing a domain that is already `verified` or `active` skips the DNS lookup. A refresh of a `verified` or `active` domain then queues its setup at the edge and answers the domain as it stands, without waiting for the setup. The queued setup also requests a failed or timed-out certificate again. It usually starts within seconds, but it can wait for the 5-minute check of every domain to finish first.
+
+The platform runs a queued setup once and does not retry it. If the setup fails, or cannot start within 10 minutes, the platform drops it. The 5-minute check still connects the hostname, but only a refresh requests a failed or timed-out certificate again. If the domain still shows `certificate_failed` or `certificate_timed_out` a few minutes after a refresh, refresh it again.
+
+When CloudFront refuses to connect the hostname, the platform records `domain_conflict` or `edge_rejected` and tries again on its own: after 10 minutes, then after twice as long each time, up to once a day, until it succeeds. A refresh does not skip that wait, because every refused attempt can use up one of the installation's yearly TLS certificate requests. The problem message says when the next attempt runs.
+
+Each TLS certificate request also counts against two daily limits: one for your organization and one for the whole installation. The defaults are 5 and 12 requests per UTC day. Connecting a hostname, and requesting a new certificate on refresh, each make one request. Detaching a hostname and attaching it again does not give the requests back. When a limit is reached, the platform records `organization_certificate_limit` or `platform_certificate_limit` and makes the request on its own after 00:00 UTC. The problem message gives the time.
+
+Publish the `TXT` record before the first refresh. A refresh that finds no record makes DNS resolvers remember the miss for up to your zone's negative-caching TTL, which the zone's `SOA` record sets. Until that time passes, refresh can keep answering `txt_not_found` after you publish the record.
+
+An attachment that is not verified claims nothing. Two organizations can attach the same hostname, and the first one to verify it wins. Every later attempt to verify that hostname, from any app, answers 409 `domain_claimed` until the winner detaches it.
+
+A domain moves through these states:
+
+| State        | Meaning                                                                                                                  |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `unverified` | Attached. The platform has not seen the `TXT` record yet and claims nothing.                                             |
+| `verified`   | Ownership is proven and the hostname is claimed. The platform is requesting the certificate and connecting the hostname. |
+| `active`     | CloudFront serves the app on the hostname with its own certificate. `activatedAt` records when.                          |
+
+A `verified` or `active` domain also carries `problem`, which is `null` or a code with a message. The platform clears it once the cause is gone.
+
+| Code                             | Cause                                                                                                                  | What to do                                                                                 |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `certificate_failed`             | The certificate authority refused or revoked the certificate, or it expired.                                           | Check that the `CNAME` points at the routing endpoint, then refresh to request a new one.  |
+| `certificate_timed_out`          | The certificate was not validated in time, usually because the `CNAME` did not resolve to the routing endpoint.        | Fix the `CNAME`, then refresh to request a new one.                                        |
+| `domain_conflict`                | Another CloudFront resource, in this account or another, already serves the hostname.                                  | Remove the hostname there. The platform tries again at the time the message gives.         |
+| `edge_rejected`                  | CloudFront refused the hostname, usually because its `CNAME` does not point at the routing endpoint yet.               | Fix the `CNAME`. The platform tries again at the time the message gives.                   |
+| `organization_certificate_limit` | Your organization has made all the TLS certificate requests it may make today.                                         | Wait. The platform requests the certificate at the time the message gives.                 |
+| `platform_certificate_limit`     | The installation has made all the TLS certificate requests it may make today.                                          | Wait. The platform requests the certificate at the time the message gives.                 |
+| `previous_tenant_draining`       | The hostname was detached and attached again, and the platform is still removing the earlier attachment from the edge. | Wait. The platform connects the hostname once the earlier one is gone, usually in minutes. |
+
+### Limits
+
+| Limit                                                 | Value                    | Error when exceeded                      |
+| ----------------------------------------------------- | ------------------------ | ---------------------------------------- |
+| Domains attached to one app, in any state             | 10                       | 409 `app_domain_limit_reached`           |
+| Verified and active domains in one organization       | 50                       | 409 `organization_domain_limit_reached`  |
+| TLS certificate requests for one organization per day | 5 by default (UTC days)  | `organization_certificate_limit` problem |
+| TLS certificate requests for the installation per day | 12 by default (UTC days) | `platform_certificate_limit` problem     |
+
+The domain limits are the same for every organization in this release. The certificate request limits are set per installation.
+
+### Detach a domain
+
+```bash
+deployments app-domain detach <appId> <domainId>
+```
+
+Detaching deletes the domain and releases the hostname at once, so another app or organization can verify it. You can detach a domain while the app is provisioning, active, failed, archived, or being erased. Attaching and refreshing need an app that is provisioning or active, and answer 409 `app_state_conflict` otherwise.
+
+Erasing an app detaches every one of its domains before the platform erases the app's data.
+
+### Serve and sign in on a domain
+
+An app answers on a custom domain only while the domain is `active` and attached to that app. The domain serves the same pages and API calls as the app's slug URL, under the same publication settings. Every other hostname that reaches the platform gets 404 before the platform reads the app or touches its database. That includes a domain that is `unverified` or `verified` and a domain of another app.
+
+Members sign in on a custom domain only when a person attached it. An API key can attach and verify a domain with no person involved, so on a domain that a key attached, the sign-in link sends the member to sign in at `https://<slug>.<apps domain>`. The member then uses the app at that URL. Visitors to a public app use every active domain, whoever attached it.
+
+A session works only on the host where the person signed in. A session from the slug URL does not work on a custom domain, and a session from one domain does not work on another, so a member signs in separately on each.
+
+The platform checks the domain again when the identity provider sends the member back. If the domain was detached, moved to another app, or attached again by an API key while the member was signing in, sign-in stops with a link to sign in at the slug URL.
+
+After you detach a domain, the app stops answering pages and API calls on it within 5 seconds. The release files under `/_r/` keep loading on that hostname until the platform removes the hostname from its edge, because release files are public. A domain that just became `active` can take up to 5 seconds to start serving.
+
+## Who can change an app
+
+| Operation                                                            | Scope          | People             | API keys                                                         |
+| -------------------------------------------------------------------- | -------------- | ------------------ | ---------------------------------------------------------------- |
+| List and read apps, grants, releases, and domains                    | `apps:read`    | Every role         | Allowed                                                          |
+| Rename, set access, change the agent, grant, archive, erase, promote | `apps:write`   | `owner` or `admin` | Refused                                                          |
+| Set publication; attach, refresh, and detach a domain                | `apps:publish` | `owner` or `admin` | Allowed when the key and its service account name `apps:publish` |
+
+To find one app by its slug, list apps with `?slug=<slug>` (`deployments app list --slug <slug>`). The list holds that app, or nothing when no app in the environment has the slug. It reads one record however many apps the environment has.
+
+Every change except a domain refresh also needs an `Idempotency-Key` header. A refresh moves the domain to the state that DNS shows, so repeating it is safe without one.
+
+An API key that lacks `apps:write` gets 403 `insufficient_scope` on those changes. A key that holds it, directly or through a wildcard, gets 403 `human_principal_required`.
+
+An API key gets `apps:publish` only when the key and its service account both name it. Neither `apps:*` nor `platform:*` grants it to a key, though both still grant it to a person. A key that relies on a wildcard gets 403 `insufficient_scope`, and it cannot create a service account or key that names `apps:publish` either. Publishing an app can expose its data to people outside the organization, and a domain decides where they reach it, so an automation gets these changes only when someone grants them on purpose. Agents have no tool for domains.
+
+The CLI and the console request `apps:publish` when you sign in. If you signed in before your installation added the scope, sign in again before you change an app's publication.

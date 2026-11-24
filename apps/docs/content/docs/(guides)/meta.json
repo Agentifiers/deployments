@@ -1,0 +1,6 @@
+{
+  "title": "Guides",
+  "description": "Concepts and platform capabilities",
+  "root": true,
+  "pages": ["index", "getting-started", "capabilities", "faq"]
+}

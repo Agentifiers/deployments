@@ -1,0 +1,20 @@
+{
+  "name": "@deployments-ai/web-tools-proxy",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    "./egress-proxy": "./src/egress-proxy.ts",
+    "./model-gateway-proxy": "./src/model-gateway-proxy.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-lambda": "3.1090.0",
+    "@deployments-ai/model-gateway": "workspace:*",
+    "@deployments-ai/net-security": "workspace:*"
+  }
+}

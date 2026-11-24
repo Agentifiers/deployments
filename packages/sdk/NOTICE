@@ -1,0 +1,17 @@
+@agentifiers/deployments-sdk
+Copyright (c) 2026 Cinematic Software LLC d/b/a Agentifiers
+https://github.com/Agentifiers/deployments/tree/main/packages/sdk
+
+The source code in this directory and the published @agentifiers/deployments-sdk npm
+package are licensed under the MIT License. See the LICENSE file.
+
+The published package is generated from the Deployments public API contract,
+which lives in another workspace package of the Deployments repository. The
+generated code, as distributed in this package, is licensed under the MIT
+License too. The rest of the Deployments repository remains licensed under the
+Functional Source License, Version 1.1, ALv2 Future License, as stated in the
+repository's LICENSE file.
+
+The client/ and core/ modules of the published package are emitted from the
+client templates of @hey-api/openapi-ts, which is licensed under the MIT
+License. The published NOTICE file reproduces its license.

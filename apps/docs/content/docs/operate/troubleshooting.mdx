@@ -1,0 +1,135 @@
+---
+title: "Troubleshooting"
+description: "Causes and fixes for common first-deploy failures: accounts and targets, OpenTofu and state, release builds, Lambda concurrency, certificates, the identity domain, sign-in email, and Bedrock model access."
+---
+
+This page lists failures operators hit on a first install, with the message the deploy tool, OpenTofu, or AWS prints and the fix. The deploy tool writes progress to stderr and stops at the first failure. It prints the error, then each underlying cause on its own line after `Caused by:`. Pass `--events <file>` to `deploy` to keep one JSON line per stage, so you can see which stage failed. A failed stage's `message` holds the same error and causes on one line.
+
+## Accounts and targets
+
+**`Expected AWS account <target account>, received <caller account>.`** The credentials in your environment belong to another account than the target's `aws.accountId`. The tool checks this before it changes anything. Assume the bootstrap's deploy role in the installation account, then run the command again.
+
+**`Deployment target <path> does not exist or is unreadable.`** or **`Invalid deployment target: ...`** The target file is missing or breaks a rule. The tool rejects unknown keys, a `name` that does not match `^[a-z][a-z0-9-]{1,30}$`, and a profile it does not know. See [Write a deployment target](/docs/operate/deployment#write-a-deployment-target).
+
+**`OpenTofu var file <path> does not exist or is unreadable.`** Relative var file paths resolve against the directory of the target file, not your working directory.
+
+## OpenTofu
+
+### Version
+
+Every root requires OpenTofu 1.13.0 or later, and `tofu init` fails on an older binary. The deploy tool runs the `tofu` on your `PATH`. Install 1.13.2, the version the repository's deploy action pins, and check it with `tofu version`.
+
+### Variable validation
+
+The roots validate variables before they plan. These messages are common on a first var file:
+
+| Message                                                                                                                                   | Fix                                                                                    |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `agent_runtime_enabled, channel_provider_runtime_enabled, and memory_runtime_enabled must all be true when platform_api_enabled is true.` | Turn on the agent, channel provider, and memory runtimes with the public API.          |
+| `Agent runtime requires platform events, channel/provider, Durable Streams, and model runtimes with positive backing-service counts.`     | Set `enable_platform_events` and give each backing service a desired count above zero. |
+| `Set two distinct model_runtime_availability_zones.`                                                                                      | List two different Availability Zones in the installation region.                      |
+| `platform_identity_application_origin must be an exact lowercase HTTPS origin without a path or trailing slash.`                          | Use a value such as `https://app.example.com`.                                         |
+| `platform_api_certificate_arn must be a valid ACM certificate ARN when platform_api_enabled is true.`                                     | Pass the ARN of the API certificate. See [Certificates](#certificates).                |
+
+A message that asks for a `*_image`, `*_artifact_bucket`, `*_artifact_key`, or `*_artifact_version` means OpenTofu ran without the variables the deploy tool generates. Deploy with the tool instead of running `tofu` directly.
+
+### State backend
+
+The deploy tool initializes the S3 backend with your target's `terraform.stateBucket`, the key `platform/<name>/terraform.tfstate` unless you set `terraform.stateKey`, the target region, `encrypt=true`, and `use_lockfile=true`. It does not create the bucket.
+
+- **The bucket does not exist or is in another region.** Use the bootstrap's `state_bucket_name` output, and keep the target's `aws.region` equal to the bootstrap's `aws_region`.
+- **Access denied on the bucket.** The bootstrap's bucket policy denies requests that do not use TLS. Run the deploy as the bootstrap's deploy role.
+- **The state is locked.** OpenTofu keeps a lock file next to the state object while a run applies. An interrupted run can leave it behind, and the next run fails to acquire the lock. Make sure no other deploy is running, then release the lock from the root with the same backend settings and the lock ID from the error:
+
+```bash
+tofu -chdir=infrastructure/environments/customer init \
+  -backend-config=bucket=<state bucket> \
+  -backend-config=key=platform/<name>/terraform.tfstate \
+  -backend-config=region=<region> \
+  -backend-config=encrypt=true \
+  -backend-config=use_lockfile=true
+tofu -chdir=infrastructure/environments/customer force-unlock <lock ID>
+```
+
+## Release builds
+
+**`docker buildx build failed: ...`** `release build` builds every image with Docker Buildx, provenance, and an SBOM. The default `docker` driver cannot produce attestations. Create and select a builder that can, then build again:
+
+```bash
+docker buildx create --name platform-release --driver docker-container --use
+```
+
+**`Unable to resolve an immutable 40-hex release commit.`** `release build` reads the commit from `git rev-parse HEAD`. Run it inside a git checkout of this repository.
+
+**`Refusing to replace <dir>; it is not empty and is not a release bundle.`** The bundle directory holds other files. Choose an empty directory with `--bundle`, or remove the files.
+
+**`The release bundle is from <commit>, but the deploy tool runs from <commit>. Run the deploy tool from the release's commit.`** Check out the commit the bundle was built from, or build a new bundle at your current commit.
+
+**`The deploy tool's checkout has tracked modifications (...). Deploy from a clean checkout of <commit>.`** Commit, stash, or discard the listed changes. No flag skips this check.
+
+## Lambda concurrency
+
+OpenTofu reserves concurrency for four functions: 100 for the public API, 20 for the identity API, 20 for the runtime API, and 10 for webhook event delivery. With agent-built apps enabled it also reserves 1 for the `apps-domains` app domain reconciler. AWS Lambda also keeps at least 100 concurrent executions unreserved in every account and region. A new account can start with a concurrent execution quota as low as 10, so the apply fails with a Lambda error saying that the reserved concurrency would decrease the account's unreserved concurrency below its minimum.
+
+Request a **Concurrent executions** quota of at least 1,000 for AWS Lambda in Service Quotas, wait for AWS to apply it, and deploy again. [Regions and quotas](/docs/operate/regions-and-quotas) lists the other quotas to check.
+
+## Certificates
+
+The API certificate is yours to provide. `platform_api_certificate_arn` must name an ACM certificate in the installation region whose status is **Issued** and that covers `platform_api_domain_name`.
+
+OpenTofu requests the identity, stream gateway, and console certificates itself when you give it a Route 53 zone, and it validates them with DNS records in that zone. The console certificate lives in `us-east-1`. If the zone is not authoritative for the domain, for example because the parent domain does not delegate to it, ACM never sees the records and the validation step waits until it times out. Check that the parent domain's `NS` records point at the zone's name servers before you deploy.
+
+## Untagged app domain certificates
+
+With agent-built apps on, a rejected app domain create can leave a CloudFront-managed certificate in `us-east-1` that the `apps-domains` reconciler never tags, so it never deletes it. Each sweep reports these as the `UntaggedIdleCertificates` metric in the `DeploymentsAI/Apps` namespace, which has no alarm. They count against the account's ACM certificate quota. A leftover certificate of a tenant you created yourself counts too.
+
+List the candidates. For each one, confirm that it has no `deployments:managed-by` tag and that no tenant for its hostname requested it, and only then delete it:
+
+```sh
+aws acm list-certificates --region us-east-1 \
+  --includes keyTypes=EC_prime256v1,RSA_2048 \
+  --query "CertificateSummaryList[?ManagedBy=='CLOUDFRONT' && InUse==\`false\`].[CertificateArn,DomainName,CreatedAt]"
+aws acm list-tags-for-certificate --region us-east-1 --certificate-arn <certificate-arn>
+aws cloudfront list-distribution-tenants \
+  --query "DistributionTenantList[?Domains[?Domain=='<hostname>']].Id"
+aws cloudfront get-managed-certificate-details --identifier <tenant-id>
+aws acm delete-certificate --region us-east-1 --certificate-arn <certificate-arn>
+```
+
+## The identity domain is not published
+
+The deploy tool publishes the identity custom domain only after the identity OAuth client bootstrap has finished and OpenTofu reports the identity service ready for publication. OpenTofu reports it ready only when `platform_identity_route53_zone_id` is set. Without that zone, the domain stays unpublished, and `admin bootstrap` tells the administrator to sign in at "the identity sign-in page once the identity domain is published".
+
+Set `platform_identity_route53_zone_id` to the zone that holds `platform_identity_domain_name` and deploy again.
+
+**`Identity publication marker lookup failed; refusing to change domain publication: ...`** The tool could not read the `/identity/oauth-clients-bootstrapped` SSM parameter for a reason other than its absence, usually missing permissions. It stops rather than guess.
+
+## Sign-in email never arrives
+
+The identity service sends sign-in, verification, password reset, and invitation email through Amazon SES from `platform_identity_email_sender`. OpenTofu creates the SES domain identity for the sender's domain, and when `platform_identity_route53_zone_id` is set, it writes the verification and DKIM records into that zone. A new SES account is in the sandbox, where SES delivers only to verified addresses.
+
+The identity email worker tries each email up to five times. After that it marks the delivery failed, the message moves to the dead-letter queue, and the `identity-email-dlq-visible` alarm fires. Request SES production access in the installation region, and check that the sender's domain identity shows as verified in the SES console. Then ask for a new email; the failed one is not resent.
+
+## Bedrock model access
+
+OpenTofu grants the model gateway permission to call Amazon Bedrock when `model_runtime_hosted_providers` includes `bedrock`, but it cannot enable model access in your account. Bedrock rejects calls to a model the account has not enabled. `deployments system model-providers` reports Bedrock as configured either way, because it does not check model access.
+
+Enable access to each model you use in the Bedrock console, in the installation region. Then allow the models with an environment model policy or an operator grant. See [Model gateway](/docs/operate/model-gateway#amazon-bedrock).
+
+## The OpenSearch service-linked role exists
+
+The stack creates the OpenSearch service-linked role, which an account can hold only once. If something else created it first, the apply fails because the role name is taken. The [install guide](/docs/operate/install) asks for a dedicated account for this reason. Delete the role if nothing in the account uses OpenSearch, or import it into the root's state at `module.platform.aws_iam_service_linked_role.opensearch`.
+
+## Verification fails
+
+The deploy runs the same checks as `bun run deploy -- verify --target <file>`: the API `/health` endpoint, the public end-to-end suite, and the console `/health` endpoint. A failed check stops the deploy before it writes the installation record, so `deployments system installation` still shows the previous release. Run `verify` again once the API answers. [Verify a deployment](/docs/operate/deployment#verify-a-deployment) lists the retries and timeouts.
+
+## Find the alarm
+
+When something fails after a successful deploy, the installation's CloudWatch alarms usually name the component. A platform administrator lists the ones in alarm with:
+
+```bash
+deployments system alarms --state ALARM
+```
+
+[Ops alerts](/docs/operate/ops-alerts) routes alarm notifications to Slack or email.

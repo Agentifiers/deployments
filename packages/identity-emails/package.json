@@ -1,0 +1,22 @@
+{
+  "name": "@deployments-ai/identity-emails",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "email": "email dev --dir src/emails --port 3000",
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "react": "19.2.8",
+    "react-email": "6.9.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.17"
+  }
+}

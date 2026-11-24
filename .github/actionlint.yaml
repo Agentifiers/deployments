@@ -1,0 +1,5 @@
+self-hosted-runner:
+  # The self-hosted runner pool that CI jobs select with the srv label.
+  labels:
+    - srv
+config-variables: null

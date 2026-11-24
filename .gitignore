@@ -1,0 +1,38 @@
+.DS_Store
+node_modules/
+dist/
+.artifacts/
+coverage/
+.nx/
+/.worktrees/
+.amp/portals/*
+**/__pycache__/
+*.pyc
+
+# Environment files are never committed.
+.env*
+.env.keys
+
+# OpenTofu local state and generated plans.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Packer writes this on every ClickHouse AMI bake.
+infrastructure/images/clickhouse/manifest.json
+
+# Docs site build output and generated reference content.
+apps/docs/.next/
+apps/docs/.source/
+apps/docs/out/
+apps/docs/next-env.d.ts
+apps/docs/generated/
+apps/docs/content/docs/api/reference/
+apps/docs/content/docs/cli/reference/
+apps/docs/content/docs/sdk/reference.mdx

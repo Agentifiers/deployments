@@ -1,0 +1,186 @@
+---
+title: "Memory"
+description: "Long-term agent memory: spaces, grants, recall, review, and import and export."
+---
+
+Memory stores short facts that agents learn and recall across runs, such as a user's preferences, past decisions, and learned procedures. Use memory when an agent should remember what happened in earlier conversations. To give agents governed company knowledge built from source documents, use [Brains](/docs/capabilities/brains) instead.
+
+<Callout type="info" title="Availability">
+  An installation from the customer root runs the memory runtime by default, and every new
+  organization gets its own memory search index automatically, with no operator step. The index is
+  provisioned right after the organization is created; until it is active, memory search, recall,
+  and writes that update the index fail. See
+  [Features](/docs/operate/features#memory-and-brain-search).
+</Callout>
+
+## Resources
+
+| Resource           | What it is                                                                                                                                                                                                              |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Memory space       | A container for memories. `kind` is `agent`, `organization`, `shared`, or `workspace`. `retentionDays` (1 to 3,650) sets the default retention.                                                                         |
+| Memory             | One stored item. It has a `scope` (`thread`, `agent`, `workspace`, or `organization`), a `memoryType` (`fact` by default, or `preference`, `episode`, `procedure`, `summary`), a review status, and a lifecycle status. |
+| Memory space grant | Gives one agent definition `read` or `read-write` access to one space.                                                                                                                                                  |
+| Memory policy      | Recall and governance settings for the `environment`, `organization`, or a `workspace`.                                                                                                                                 |
+| Review item        | A memory that waits for a human decision before agents can recall it.                                                                                                                                                   |
+| Flush              | A job that extracts candidate memories from a completed run.                                                                                                                                                            |
+
+Memory is environment scoped. Every route reads the organization, project, and environment from the token or the tenant headers.
+
+## How agents use memory
+
+The agent manifest sets `memory.mode` to `thread`, `agent`, `workspace`, `organization`, or `off`, and `memory.reviewMode` to `manual` (the default) or `auto-approve`. See [Agent manifests](/docs/capabilities/agent-manifests). An agent reads and writes only the spaces it holds a grant on.
+
+- **Tools.** `agent.memory.search` searches the granted spaces and returns 8 results by default, at most 20. `agent.memory.save` writes one memory to a space the agent holds a `read-write` grant on. Its scope defaults to `agent`.
+- **Automatic recall.** When `memory.mode` is not `off` and the effective memory policy sets `activeRecallEnabled: true`, the runtime recalls up to 32 memories, within about 4,000 tokens, before the model answers. When every memory the run can read fits in 32 memories and 7,000 tokens, recall returns all of them, oldest first. `activeRecallRolloutPercent` limits recall to a share of runs. New policies start with recall off. If recall fails or times out, the run continues without recalled memory.
+- **Flushes.** After a run completes, the platform queues a flush for it. The flush asks the agent's model for up to 10 candidate memories from the conversation. A message with secret-like material reaches the model as `[omitted sensitive content]`. What happens to a message with personal or health data depends on the manifest's `memory.transcriptPrivacy`. See [Personal data in flushes](#personal-data-in-flushes). When the platform operator configures a flush model, a flush uses that model instead if the run's environment model policy allows it, and keeps the agent's model otherwise. It runs when the conversation has at least 2 recent messages or used at least 16,000 model tokens. A candidate with an invalid field is dropped on its own, and the flush keeps the rest.
+
+### Default workspace memory
+
+When an agent with `memory.mode: workspace` completes its first run in a workspace and holds no grant on a space of that workspace, the platform sets the workspace up before it flushes the run:
+
+- It creates the workspace's default space, a `workspace` space named "Workspace memory". Each workspace has at most one.
+- It grants the agent definition `read-write` access to that space.
+- When no workspace, environment, or organization policy applies to the workspace, it creates a workspace policy with `activeRecallEnabled: true`.
+
+Each step keeps what an administrator set up. An agent that holds a `read` grant on a space of the workspace, or whose grant on the default space was revoked, gets no new grant. An archived default space is not replaced, and an existing policy is not changed.
+
+Flushes into a default space approve the memories they generate, as `auto-approve` does, unless the manifest sets `memory.reviewMode`. Set it to `manual` to review them. Memories in other workspace spaces wait for review unless the manifest sets `auto-approve`.
+
+[Preview runs](/docs/capabilities/previews) recall memory through their source deployment's grants but cannot save memories.
+
+## Review and governance
+
+Every memory passes a content inspection before it is stored:
+
+- Content with secret-like material, such as credentials or keys, is rejected.
+- Email addresses, phone numbers, social security numbers, street addresses, and dates of birth are redacted, and the memory waits for review.
+- Possible health information also waits for review.
+
+These memories also wait for review, even when the content is clean:
+
+- Memories with `workspace` or `organization` scope.
+- Memories imported through the API.
+- `agent`-scope memories and replacements that a flush generated.
+- A deterministic sample of 5% of imports and 10% of flush output.
+
+When `memory.reviewMode` is `auto-approve`, memories that a flush generates are approved without review. A flush into a workspace's [default space](#default-workspace-memory) does the same when the manifest does not set `memory.reviewMode`. Memories that wait for review are never recalled. An administrator resolves each review item with `approve`, `edit`, `reject`, `archive`, or `delete`.
+
+Search recalls a memory with possible health information only after an administrator approves its review item. The approval covers that exact content. A flush memory that `auto-approve` approved is never recalled while its content holds possible health information.
+
+### Personal data in flushes
+
+`memory.transcriptPrivacy` sets how a flush treats personal and health data. Secret-like material is always omitted from the transcript and rejected as memory, whatever the setting.
+
+| `transcriptPrivacy` | The flush model reads a message with personal or health data                                                                                 | The memories it produces                                                                                                                                                                                            |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `omit` (default)    | As `[omitted sensitive content]`.                                                                                                            | Inspected as above.                                                                                                                                                                                                 |
+| `redact`            | With email addresses, phone numbers, social security numbers, street addresses, and dates of birth redacted, and health information left in. | Inspected as above, so a memory with health information is not recalled until an administrator approves it.                                                                                                         |
+| `retain`            | As written.                                                                                                                                  | Stored verbatim and marked `retainsPersonalData`. Personal and health data are neither redacted nor held for review, and search recalls them. Scope, review mode, sampling, and the sensitivity policy still apply. |
+
+Use `retain` only when the agent's memory must hold contact or health details, and the people they belong to have agreed to that. Retained memories stay until their retention ends, they are deleted, or the end user's erasure removes the threads they came from.
+
+The policy's `sensitivityMode` controls which sensitivity levels search returns. Automatic recall puts every memory search returns into the model's context, so this is also what the model sees. A retained memory with contact or health details is `restricted`, so `strict` keeps it from the model:
+
+| `sensitivityMode`    | Searchable sensitivity levels                      |
+| -------------------- | -------------------------------------------------- |
+| `strict`             | `public`, `internal`                               |
+| `standard` (default) | `public`, `internal`, `restricted`                 |
+| `restricted`         | `public`, `internal`, `restricted`, `confidential` |
+
+## Lifecycle
+
+| From       | Action  | To         |
+| ---------- | ------- | ---------- |
+| `active`   | Archive | `archived` |
+| `archived` | Restore | `active`   |
+| `archived` | Delete  | `deleted`  |
+
+Deletion is permanent, and a deleted memory cannot be restored. Archive a memory before you delete it. Restoring fails while the memory's space is archived, or while a newer memory that replaced it is still active.
+
+## Search, feedback, and quality
+
+`searchMemories` takes a `query`, 1 to 20 memory spaces, up to 50 `searchKeys`, and `topK` (10 by default, at most 45). It returns only active, approved memories that the caller may read. The response lists one retrieval record, with its own ID, for each result. Record whether a result helped with retrieval feedback (`useful`, `neutral`, or `harmful`). `getMemoryQuality` summarizes that feedback for the environment.
+
+`strategySearchMemories` runs a named retrieval strategy (`hybrid-rrf-v1`, `hybrid-rerank-v1`, or a dense control strategy) so administrators can compare results before they change the policy.
+
+## Import and export
+
+An import adds 1 to 100 items to one space, at most 4 MiB of JSON. Each item can carry its own `idempotencyKey`. Otherwise the platform derives one per item from the request's `Idempotency-Key` header. The response lists the `imported`, `replayed`, and `rejected` items. Exports page through one space, up to 20 memories per page, in `json` format.
+
+## Authentication and permissions
+
+Memory routes take a JWT bearer token, not an API key. A platform access token, such as the one `deployments auth login` stores, works together with the tenant headers. A tenant JWT carries the organization, project, and environment in its claims. See [Authentication](/docs/getting-started/authentication).
+
+| Capability       | Allows                                                                                                                                                   |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory:read`    | Search, list and read spaces, list policies, read quality                                                                                                |
+| `memory:write`   | Imports and retrieval feedback                                                                                                                           |
+| `memory:admin`   | Everything in read and write, plus spaces, policies, grants, listing memories, exports, review, lifecycle changes, strategy search, and search readiness |
+| `memory:execute` | Active recall and flushes for one run. The token must be bound to that run.                                                                              |
+
+With a platform access token, every operation other than a read also needs the organization `owner` or `admin` role.
+
+## Use it
+
+A workspace-memory agent needs none of these steps; see [Default workspace memory](#default-workspace-memory). For other memory modes:
+
+1. Create a space for the agent:
+
+   ```sh
+   deployments memory-space create --name "Support preferences" --kind agent
+   ```
+
+2. Grant the agent definition read and write access:
+
+   ```sh
+   deployments memory-space-grant create --agent-definition-id $AGENT_DEFINITION_ID --memory-space-id $MEMORY_SPACE_ID --permission read-write
+   ```
+
+3. Turn on automatic recall for the environment:
+
+   ```sh
+   deployments memory-policy upsert --scope environment --active-recall-enabled
+   ```
+
+4. Set `memory.mode` in the agent manifest, then release and deploy the agent.
+
+5. Review memories that wait for approval:
+
+   ```sh
+   deployments memory-review list --status open
+   deployments memory-review resolve --memory $MEMORY_ID --review $REVIEW_ID --decision approve
+   ```
+
+6. Search the space:
+
+   ```sh
+   deployments memory search --space $MEMORY_SPACE_ID --query "preferred contact time"
+   ```
+
+The same search through the SDK:
+
+```ts
+import { createClient, createConfig, searchMemories } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_TENANT_JWT}` },
+  }),
+);
+
+const { data, error } = await searchMemories({
+  client,
+  body: {
+    query: "preferred contact time",
+    memorySpaceIds: [process.env.MEMORY_SPACE_ID!],
+    topK: 5,
+  },
+});
+```
+
+## Reference
+
+- API: [Memory operations](/docs/api/reference/memory/search-memories), including [Import memories](/docs/api/reference/memory/import-memories) and [Create a memory space grant](/docs/api/reference/memory/create-memory-space-grant)
+- CLI: [`deployments memory`](/docs/cli/reference/memory#memory-search), [`deployments memory-space`](/docs/cli/reference/memory-space#memory-space-create), [`deployments memory-space-grant`](/docs/cli/reference/memory-space-grant#memory-space-grant-create), [`deployments memory-policy`](/docs/cli/reference/memory-policy#memory-policy-upsert), [`deployments memory-review`](/docs/cli/reference/memory-review#memory-review-list)
+- SDK: [Memory functions](/docs/sdk/reference#memory)

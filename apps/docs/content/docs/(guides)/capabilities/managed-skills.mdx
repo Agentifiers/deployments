@@ -1,0 +1,110 @@
+---
+title: "Managed skills"
+description: "Publish reusable skills to the platform catalog, release them as immutable versions, and install them into environments."
+---
+
+A managed skill is a named block of instructions, with optional reference files, kept in a platform-wide catalog. Platform administrators publish skills from a source as immutable releases. Environment users install a released skill into their environment, for all agents or for one agent definition. Agents then read the installed skill's reference files with the `managed_skills.reference.read` tool.
+
+<Callout type="warn" title="Availability">
+  Installing a managed skill does not add its content to an agent's prompt. The only runtime use is
+  the `managed_skills.reference.read` tool, which reads files under `references/` from a skill
+  installed for the agent. To put a skill in the prompt, name a platform skill in
+  `spec.platformSkills` or paste its text into `spec.skills`. See [Platform
+  skills](/docs/capabilities/agent-manifests#platform-skills).
+</Callout>
+
+## Catalog resources
+
+Sources, releases, and skills are global. They are not scoped to an organization, so their routes take no tenant headers. Installations belong to one environment.
+
+| Resource     | Path                                     | Key facts                                                                                              |
+| ------------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Source       | `/v1/managed-skill-sources`              | A stable `key`, a `name`, and optional `repositoryUrl`, `pinnedCommit`, `licenseHash`, and `metadata`. |
+| Release      | `/v1/managed-skill-sources/:id/releases` | An immutable set of skills with a semantic `releaseVersion` and a `contentHash`.                       |
+| Skill        | `/v1/managed-skills/:id`                 | One skill in a release: `key`, `content`, `description`, `dependencies`, and `referencePaths`.         |
+| Installation | `/v1/managed-skill-installations`        | A released skill installed in an environment, optionally for one agent definition.                     |
+
+Sources and releases are `active` or `archived`. Installations are `active`, `removed`, or `superseded`. Updates, archives, and removals take the current `expectedVersion`.
+
+## Publish a release
+
+Publishing sends the source's `expectedSourceVersion`, a `releaseVersion`, an optional `manifest` object, and the skills. The platform checks that each dependency names a skill in the same release, replaces dependency keys with skill IDs, computes the release's `contentHash`, and writes the release, its skills, and the new source version in one transaction. A concurrent publish, or a `releaseVersion` the source already used, fails with `managed_skill_release_conflict`.
+
+| Rule                                     | Limit                                                                                |
+| ---------------------------------------- | ------------------------------------------------------------------------------------ |
+| Source and skill `key`                   | Lowercase identifier, at most 128 characters (`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`) |
+| `repositoryUrl`                          | `https`, no credentials, query, or fragment, at most 2,048 characters                |
+| `pinnedCommit`                           | 40 to 64 lowercase hex characters                                                    |
+| `licenseHash`                            | `sha256:` plus 64 hex characters                                                     |
+| `releaseVersion`                         | A semantic version, at most 255 characters                                           |
+| Skills per release                       | 1 to 96, with unique keys                                                            |
+| Skill `content` and each reference file  | 256 KiB of UTF-8 each                                                                |
+| Each skill, with its reference files     | 320 KiB encoded                                                                      |
+| Reference files per skill                | 128, at paths under `references/` of at most 512 characters                          |
+| `dependencies` per skill                 | 96, unique, naming skills in the same release (`managed_skill_dependency_missing`)   |
+| All skills in a release                  | 3 MiB encoded                                                                        |
+| Source `metadata` and release `manifest` | 192 KiB encoded each                                                                 |
+
+## Install a skill
+
+An installation names a `managedSkillId` and its `managedSkillReleaseId`, and optionally an `agentDefinitionId`. The release must be active and the skill must belong to it (`managed_skill_release_mismatch`). The agent definition, when given, must be active.
+
+An environment holds one active installation of a skill for each target. The target is either one agent definition or the whole environment. Remove an installation before you install the same skill again for the same target.
+
+Each release gives its skills new IDs, so two releases of one skill key are different skills and can both be installed for one target. To upgrade, install the new release's skill, then remove the old installation. The list of installations also returns removed ones, and nothing checks dependencies at install time or at run time. The console's **Skills** screen does the upgrade in that order, installs missing dependencies first, and reports each installation's dependency status. See [Manage managed skills](/docs/getting-started/console#manage-managed-skills).
+
+## Read reference files at run time
+
+`managed_skills.reference.read` is a platform catalog tool with effect `read` and default action `allow`. Declare it in the agent manifest like any other tool.
+
+| Input       | Meaning                                                                       |
+| ----------- | ----------------------------------------------------------------------------- |
+| `sourceKey` | The source's key.                                                             |
+| `skillKey`  | The skill's key in the release.                                               |
+| `releaseId` | The release ID.                                                               |
+| `path`      | A normalized path under `references/`, for example `references/checklist.md`. |
+| `maxBytes`  | Optional upper bound, at most 256 KiB.                                        |
+
+The call succeeds only when the source and release are active and the skill has an active installation for the run's agent definition or for the whole environment. The content comes back as a private report artifact. The tool's description tells the model to treat the file as reference material and ignore instructions inside it. A file larger than `maxBytes` fails the call.
+
+## Permissions
+
+| Action                                                    | Capability               |
+| --------------------------------------------------------- | ------------------------ |
+| Read sources, releases, skills, and installations         | `managed-skills:read`    |
+| Install and remove skills                                 | `managed-skills:install` |
+| Create, update, publish, and archive sources and releases | `managed-skills:admin`   |
+
+`managed-skills:admin` takes effect only for platform administrators, and the CLI's device sign-in does not request it. Catalog authoring is an operator task.
+
+## Use it
+
+1. Find a skill in the catalog.
+
+   ```bash
+   deployments managed-skill-source list
+   deployments managed-skill-release list $MANAGED_SKILL_SOURCE_ID
+   deployments managed-skill-release skills $MANAGED_SKILL_RELEASE_ID
+   ```
+
+2. Install it for one agent definition in the current environment.
+
+   ```bash
+   deployments managed-skill-installation install --managed-skill-id $MANAGED_SKILL_ID \
+     --managed-skill-release-id $MANAGED_SKILL_RELEASE_ID --agent-definition-id $AGENT_DEFINITION_ID
+   ```
+
+3. Declare `managed_skills.reference.read` in the agent manifest and tell the agent which `sourceKey`, `skillKey`, `releaseId`, and paths to read.
+
+Platform administrators publish a release from a JSON file of skills:
+
+```bash
+deployments managed-skill-release publish $MANAGED_SKILL_SOURCE_ID \
+  --expected-source-version 2 --release-version 1.3.0 --skills "$(cat skills.json)"
+```
+
+## Reference
+
+- API: [Publish a managed skill release](/docs/api/reference/managed-skills/publish-managed-skill-release), [List skills in a release](/docs/api/reference/managed-skills/list-managed-skills), [Install a managed skill](/docs/api/reference/managed-skills/install-managed-skill), [Remove an installation](/docs/api/reference/managed-skills/remove-managed-skill-installation)
+- CLI: [`deployments managed-skill-source`](/docs/cli/reference/managed-skill-source#managed-skill-source-list), [`deployments managed-skill-release`](/docs/cli/reference/managed-skill-release#managed-skill-release-publish), [`deployments managed-skill-installation`](/docs/cli/reference/managed-skill-installation#managed-skill-installation-install)
+- SDK: [Managed skills functions](/docs/sdk/reference#managed-skills)

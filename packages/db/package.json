@@ -1,0 +1,47 @@
+{
+  "name": "@deployments-ai/db",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./access-patterns": "./src/access-patterns.ts",
+    "./app-domain-testing": "./src/apps/domain-test-support.ts",
+    "./client": "./src/client.ts",
+    "./dynamo-testing": "./src/testing/dynamo-document-client.fixture.ts",
+    "./egress-allowlist-rules": "./src/organization-standing/egress-allowlist-rules.ts",
+    "./erasure-testing": "./src/thread-erasure/erasure-test-support.ts",
+    "./evaluation-testing": "./src/evaluations/memory-database.fixture.ts",
+    "./ids": "./src/ids.ts",
+    "./keys": "./src/keys.ts",
+    "./mail-erasure-testing": "./src/thread-erasure/mail-test-support.ts",
+    "./memory-testing": "./src/tenancy-test-support.ts",
+    "./observability-checkpoints": "./src/observability/checkpoints.ts",
+    "./observability-erasure-fence": "./src/observability/erasure-fence.ts",
+    "./observability-organization-presence": "./src/observability/organization-presence.ts",
+    "./operator-access-testing": "./src/operator-access/test-support.ts",
+    "./organization-role-matrix": "./src/organization-role-matrix.ts",
+    "./records": "./src/records/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1090.0",
+    "@aws-sdk/client-kms": "3.1090.0",
+    "@aws-sdk/lib-dynamodb": "3.1090.0",
+    "@aws-sdk/util-dynamodb": "3.996.7",
+    "@deployments-ai/agent-email": "workspace:*",
+    "@deployments-ai/agent-manifest": "workspace:*",
+    "@deployments-ai/brains": "workspace:*",
+    "@deployments-ai/identity": "workspace:*",
+    "@deployments-ai/model-gateway": "workspace:*",
+    "@deployments-ai/observability": "workspace:*",
+    "@deployments-ai/streaming": "workspace:*",
+    "@deployments-ai/tenant-limits": "workspace:*",
+    "effect": "4.0.0-beta.92",
+    "ulid": "3.0.2"
+  }
+}

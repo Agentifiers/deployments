@@ -1,0 +1,117 @@
+---
+title: "Channels"
+description: "Connect agent deployments to Slack, Microsoft Teams, Telegram, and RCS through bindings, credentials, and deliveries."
+---
+
+A channel binding connects one agent deployment to a messaging channel. Messages that arrive on the channel start or continue a thread on that deployment, and the agent's replies go back to the same conversation. Use channels when people should talk to an agent from Slack, Microsoft Teams, Telegram, or RCS instead of your own application.
+
+<Callout type="warn" title="Availability">
+  An installation from the customer root runs the channel runtime by default. The contract also
+  accepts the channel values `imessage` and `sms`, but no provider supports them, so you cannot
+  create a working binding for either. Verification checks the binding's configuration and
+  credential. It does not call the provider.
+</Callout>
+
+## Providers
+
+| Channel    | `provider`                              | Required binding fields                                                                  | Credential values                                                                                                               |
+| ---------- | --------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `slack`    | `slack_edge` or `slack_cloudflare_edge` | `externalWorkspaceId` (the Slack team ID), and `externalChannelId` for outbound delivery | `accessToken` or `botToken` to send, `signingSecret` to verify inbound requests                                                 |
+| `teams`    | `teams_bot_framework`                   | `externalWorkspaceId` (the Microsoft Entra tenant ID)                                    | `appId` and `appPassword` of the Bot Framework app, and `appTenantId` for a single-tenant app                                   |
+| `telegram` | `telegram`                              | `externalWorkspaceId`                                                                    | `botToken` to send, `webhookSecret` to verify inbound requests, and `botId` when the binding has no `externalChannelId`         |
+| `rcs`      | `aws_end_user_messaging_rcs`            | `externalChannelId` (the origination identity)                                           | `roleArn`, `externalId`, and `region` to send through AWS End User Messaging, `ingressSigningSecret` to verify inbound requests |
+
+A Slack binding can set `metadata.slackAgentIdentity` to post replies under a custom name and icon. Its credential must then grant the `chat:write` and `chat:write.customize` scopes.
+
+A Teams binding can set `metadata.teamsAgentIdentity` with a `displayName` to post replies under that name.
+
+## Binding lifecycle
+
+A binding pins an agent definition and a runnable deployment of it, and optionally a workspace.
+
+| Status     | Meaning                                                           |
+| ---------- | ----------------------------------------------------------------- |
+| `disabled` | New bindings start here. The binding accepts no traffic.          |
+| `active`   | Verified. Inbound messages start runs and deliveries can be sent. |
+| `archived` | Removed. An archived binding cannot change or verify.             |
+
+To activate a binding:
+
+1. Create the binding. It starts `disabled`.
+2. Attach the credential with `putChannelBindingCredential`. The request takes the binding's current `expectedVersion` and a `values` map, plus optional `scopes` and `expiresAt`. The platform stores the values encrypted and never returns them. Responses show only `credentialAttached`.
+3. Verify the binding. Verification checks provider and channel compatibility, the required fields, a runnable deployment, an active workspace if one is set, and an active, unexpired credential. On success the binding becomes `active` and records `lastVerifiedAt`.
+
+Attaching, rotating, or revoking the credential sets the binding back to `disabled`. So does changing the deployment, the connection, or any external ID, thread key, or Slack identity. Verify again after each of these changes. Archiving a binding keeps its credential until you revoke it.
+
+## Inbound messages
+
+Providers do not call the public API. The platform exposes one webhook endpoint per binding for the provider to call:
+
+```text
+POST /public/channels/{organizationId}/{environmentId}/{bindingId}/{provider}
+```
+
+The endpoint lives on the install's channel ingress origin, which the operator provides. Register it with the provider only after the binding is `active`, because the endpoint loads the binding's credential before it answers any request, including Slack's URL verification. The endpoint checks the provider signature (the Slack signing secret, the Telegram secret token header, or the RCS request signature) before it accepts a message, and answers `202` for accepted messages. Accepted messages start or continue a canonical thread on the bound deployment. See [Threads and runs](/docs/capabilities/threads-and-runs).
+
+### Attachments
+
+An agent sees the files people send in a channel only when its release sets `spec.runtime.ingressAttachments: "attach"` (see [Agent manifests](/docs/capabilities/agent-manifests)). The platform then downloads each file with the binding's credential and attaches it as a private input file owned by the binding:
+
+- **Slack.** Any file. The Slack app needs the `files:read` bot scope; without it the message reaches the agent as text.
+- **Teams.** Inline images only. Teams file uploads stay text.
+- **Telegram.** Photos and documents.
+- **RCS.** Media stays text.
+
+Each turn takes, in message order, at most four images and four documents of at most 10 MiB each. Images are JPEG, PNG, and WebP. Documents are PDF, DOCX, XLSX, CSV, TXT, Markdown, JSON, HTML, and ZIP, and the agent reads a document as its extracted text. The platform skips any other file type, legacy Office files (`.doc`, `.xls`, `.ppt`), files larger than 10 MiB, and files past the per-turn limits. It never downloads a skipped file.
+
+If a provider download fails, the platform leaves that file out and the agent still answers the message. A document the platform stored but cannot read, because it is corrupt, encrypted, or has no readable text, is also left out, and the agent is told the file's name and why. A scanned PDF has readable text only where the installation turns on [OCR](/docs/operate/features#ocr-for-scanned-pdf-pages) and OCR finds text. The agent is also told each skipped file's name and why the platform skipped it. A turn names at most eight files it left out and tells the agent how many more there were. On later messages in the same conversation, the agent sees a list of up to 12 documents shared earlier through the binding and can read them again. See [Context management](/docs/capabilities/context-management) for how long a document stays on that list. During a canary, the platform downloads files when either the primary or the candidate release sets `ingressAttachments`, then leaves them out of turns that run on a release without it. A deployment whose primary and candidate releases both lack the setting never downloads channel files.
+
+## Outbound delivery
+
+A run that a channel message started queues one delivery of its reply when it completes. You can also compose a delivery for any completed run of the binding's deployment. A composed delivery needs `content` (at most 40,000 characters), the `externalThreadKey`, the `runId` and `threadId`, and an `Idempotency-Key` header. Repeating the request with the same key returns the original delivery with `duplicate: true`. An RCS delivery cannot override the binding's origination identity.
+
+| Delivery status | Meaning                                                              |
+| --------------- | -------------------------------------------------------------------- |
+| `queued`        | Accepted and waiting for the delivery worker                         |
+| `sending`       | The worker is calling the provider                                   |
+| `sent`          | The provider accepted the message. `providerMessageId` holds its ID. |
+| `failed`        | Delivery stopped. `lastError` holds a bounded reason.                |
+
+The worker retries provider failures that are safe to repeat, up to a bounded number of attempts. When it cannot tell whether the provider accepted a message, it marks the delivery `failed` instead of sending it again, which avoids a duplicate reply.
+
+Reading bindings and deliveries needs `channels:read`. Every change needs `channels:write`, and a human caller also needs the organization `owner` or `admin` role.
+
+## Use it
+
+1. Create a Telegram binding for a deployment:
+
+   ```sh
+   deployments channel-binding create --channel telegram --provider telegram --agent-definition-id $AGENT_DEFINITION_ID --agent-deployment-id $AGENT_DEPLOYMENT_ID --external-workspace-id $TELEGRAM_BOT_ID --external-channel-id $TELEGRAM_BOT_ID
+   ```
+
+2. Attach the credential from a JSON file that holds `botToken` and `webhookSecret`:
+
+   ```sh
+   deployments channel-binding set-credential $BINDING_ID --expected-version 0 --values-file telegram-credential.json
+   ```
+
+3. Verify the binding:
+
+   ```sh
+   deployments channel-binding verify $BINDING_ID
+   ```
+
+4. Register the binding's ingress endpoint as the bot's webhook with the same `webhookSecret`.
+
+5. Send a message to the bot, then inspect the reply delivery:
+
+   ```sh
+   deployments channel-delivery list
+   ```
+
+## Reference
+
+- API: [Create a channel binding](/docs/api/reference/runtime/create-channel-binding), [Put a channel binding credential](/docs/api/reference/runtime/put-channel-binding-credential), [Verify a channel binding](/docs/api/reference/runtime/verify-channel-binding), [Compose a channel delivery](/docs/api/reference/runtime/compose-channel-delivery), [List channel deliveries](/docs/api/reference/runtime/list-channel-deliveries)
+- CLI: [`deployments channel-binding`](/docs/cli/reference/channel-binding#channel-binding-create), [`deployments channel-delivery`](/docs/cli/reference/channel-delivery#channel-delivery-list)
+- SDK: [Runtime functions](/docs/sdk/reference#runtime)
+- Related: [Credential vault](/docs/capabilities/credential-vault), [Webhooks](/docs/capabilities/webhooks) for `channel.*` events

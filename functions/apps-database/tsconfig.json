@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/functions/apps-database",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/functions/apps-database.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts", "scripts/**/*.ts"],
+  "references": [
+    {
+      "path": "../../packages/app-database"
+    }
+  ]
+}

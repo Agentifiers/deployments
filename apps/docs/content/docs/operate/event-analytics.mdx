@@ -1,0 +1,208 @@
+---
+title: "Event analytics"
+description: "Query every semantic event the platform publishes with Athena, from a script or an MCP server: what the log records, how it is delivered, what it costs, and how operators get access."
+---
+
+Event analytics keeps a queryable history of every semantic event the installation publishes, across all tenants, for the people who operate the platform. A projector Lambda copies each event from the platform's EventBridge bus into an Apache Iceberg table in S3 Tables, and operators query that table with Athena through `bun run events` or a local MCP server. The modules are `infrastructure/modules/event-analytics` and the table in `infrastructure/modules/platform-data`.
+
+<Callout type="warn" title="Operator-only data">
+  The event log holds every organization's events, with their payloads. It has no tenant boundary:
+  anyone who can query it sees all tenants. Grant access only to platform operators, and do not
+  expose the script or the MCP server to tenants or to agents that act for them.
+</Callout>
+
+<Callout type="info" title="Availability">
+  The customer root runs event analytics by default. The deploy tool builds and publishes the
+  projector with every release, so a default installation needs no input for it.
+</Callout>
+
+## What it records
+
+The log has one row per delivery of each event with the source `deployments-ai.platform`: resource changes such as an organization, project, agent, or run being created, updated, or deleted, and the channel and provider events. It also records the sources listed in `event_analytics_extra_sources` (see [Record other sources](#record-other-sources)). Each row carries the event's canonical fields and its payload as JSON:
+
+| Column                                                | What it holds                                                                     |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `event_id`                                            | The event's ULID. One event keeps one ID however often it is delivered.           |
+| `event_type`, `event_entity`, `event_action`          | The dotted type, such as `agent.created`, and its parts before and after the dot. |
+| `organization_id`, `project_id`, `environment_id`     | The tenant scope. Project and environment are empty when the event has none.      |
+| `aggregate_type`, `aggregate_id`, `aggregate_version` | The resource that changed and its version after the change.                       |
+| `actor_type`, `actor_id`                              | Who caused the change, when the platform knows.                                   |
+| `trace_id`                                            | The trace of the request that caused it.                                          |
+| `occurred_at`, `ingested_at`                          | ISO 8601 strings: when the change happened and when EventBridge accepted it.      |
+| `eventbridge_event_id`, `eventbridge_detail_type`     | The EventBridge delivery, which differs for each redelivery.                      |
+| `event_source`, `aws_account_id`, `aws_region`        | Where the event came from.                                                        |
+| `payload_json`                                        | The event payload.                                                                |
+
+`bun run events -- schema` prints the same list. The table is not partitioned, so every query scans it whole; filters reduce the rows returned, not the bytes scanned.
+
+## How it differs from observability and webhooks
+
+| Surface                                           | Holds                                                                             | Who reads it                            |
+| ------------------------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------- |
+| Event analytics                                   | Every semantic event of every tenant                                              | Platform operators, with Athena SQL     |
+| [Observability](/docs/capabilities/observability) | Execution facts: traces, spans, usage, and metrics                                | Each tenant through the API and console |
+| [Webhooks](/docs/capabilities/webhooks)           | The same semantic events, pushed to an environment's subscriptions as they happen | Each tenant's own HTTPS endpoints       |
+
+Use event analytics to answer questions about the platform as a whole, such as which event types are busiest or what happened to one resource over time. Tenants never reach it.
+
+## Components
+
+| Component        | What it is                                                                                                                                                                                            |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rule             | The EventBridge rule `event-analytics-projector` on the platform bus. It retries for 24 hours, then sends the event to the queue `event-analytics-projector-dlq`.                                     |
+| Projector        | The Lambda function `event-analytics-projector`, Node.js 26 on ARM64. It validates each event against the canonical schema and writes one row to Firehose.                                            |
+| Firehose stream  | `semantic-events`, which commits rows to the Iceberg table every 60 seconds or 5 MiB. Rows it cannot write land in the bucket `event-analytics-backup-<account-id>`.                                  |
+| Iceberg table    | `semantic_events.events` in the S3 Tables bucket `semantic-events`. `platform-data` creates it with every installation and protects it from deletion under `operations.deletion_protection`.          |
+| Athena workgroup | `semantic-events`. It enforces its result location, the bucket `event-analytics-athena-<account-id>`, and stops any query that scans more than 10 GiB. It holds two saved queries.                    |
+| Operator policy  | The managed IAM policy `event-analytics-operator-query`, which grants the read-only access below.                                                                                                     |
+| Alarms           | Six CloudWatch alarms on projector errors, the dead-letter queue, dead-letter delivery failures, Firehose freshness, and rejected rows. They notify the [ops alerts](/docs/operate/ops-alerts) topic. |
+
+The root outputs `event_analytics_athena` (region, workgroup, catalog, database, table, and result location) and `event_analytics_operator_query_policy_arn`.
+
+## Delivery and duplicates
+
+Delivery is at least once. EventBridge and the projector retry failures, and the event dispatcher can publish an event again, so one `event_id` can appear on more than one row. Every row of one event carries the same fields except `eventbridge_event_id` and `ingested_at`.
+
+Count or list each event once:
+
+- Count with `count(DISTINCT event_id)`.
+- To keep whole rows, rank each event's rows and keep the first:
+
+```sql
+WITH ranked AS (
+  SELECT *, row_number() OVER (
+    PARTITION BY event_id
+    ORDER BY ingested_at DESC, eventbridge_event_id DESC
+  ) AS delivery_rank
+  FROM events
+)
+SELECT * FROM ranked WHERE delivery_rank = 1
+```
+
+`recent`, `counts`, and their MCP tools apply this already; your own SQL must do it. A new event is queryable about one to two minutes after it happens, once Firehose commits its buffer.
+
+## Lifecycle
+
+`event_analytics_lifecycle` in `infrastructure/environments/customer` controls the stack. The Iceberg table and its history do not depend on it.
+
+| Value             | Effect                                                                                        |
+| ----------------- | --------------------------------------------------------------------------------------------- |
+| `running`         | The default. The rule sends every new event to the projector.                                 |
+| `stopped`         | Records events exactly as `running` does.                                                     |
+| `absent`          | No stack. Valid only before the stack has ever been created.                                  |
+| `decommissioning` | Disables the rule and prepares the failure and result buckets and the workgroup for deletion. |
+| `destroyed`       | Deletes the stack after a successful `decommissioning` apply. It is final.                    |
+
+## Record other sources
+
+A product built on the installation can keep its own events in the same log. List its EventBridge sources in `event_analytics_extra_sources` in `infrastructure/environments/customer`, for example `["acme.orders"]`. The rule then matches those sources as well as `deployments-ai.platform`, and `event_source` tells them apart in queries.
+
+The publisher puts its events on the bus named by the root output `semantic_event_bus_name`, which needs `events:PutEvents` on that bus. Each event must look like a platform event:
+
+- `detail` is a canonical semantic event: ULID `eventId`, `organizationId`, and `aggregateId`, `aggregateType`, a positive `aggregateVersion`, `eventType`, an RFC 3339 `occurredAt`, and an object `payload`, with optional `projectId`, `environmentId`, `actor`, and `traceId`.
+- `detail-type` equals `detail.eventType`.
+
+The projector rejects any other event; after retries it lands in the dead-letter queue and raises the DLQ alarm. Only event analytics matches the extra sources. Webhooks, workflows, and the other platform consumers still match `deployments-ai.platform` alone.
+
+Athena, through `bun run events` or the MCP server, is the only query path. Tenants read their own execution data through [observability](/docs/capabilities/observability), not this log.
+
+## Cost
+
+Idle, event analytics costs about $0.60 a month: its six CloudWatch alarms at $0.10 each. Everything else bills by use:
+
+| Part                  | Billed by                                                                                          |
+| --------------------- | -------------------------------------------------------------------------------------------------- |
+| Projector             | Lambda requests and duration, one invocation per event.                                            |
+| Firehose              | Data ingested into the Iceberg table.                                                              |
+| Iceberg table         | S3 Tables storage, requests, and automatic compaction. The table exists with or without the stack. |
+| Queries               | Athena data scanned, at least 10 MB per query and at most 10 GiB, plus result objects in S3.       |
+| Logs, queue, and Glue | CloudWatch Logs ingestion, SQS requests, and Glue Data Catalog requests.                           |
+
+Publishing to the EventBridge bus is already paid by the event dispatcher; the extra rule adds no charge. Check current prices on the AWS pricing pages.
+
+## Operator access
+
+Operators query with their own AWS credentials. Attach the policy named by `event_analytics_operator_query_policy_arn` to an operator role or permission set. It grants:
+
+| Access           | Actions                                                                                                                           | Resource                                         |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| Run queries      | `athena:StartQueryExecution`, `GetQueryExecution`, `GetQueryResults`, `StopQueryExecution`, `GetWorkGroup`                        | The `semantic-events` workgroup                  |
+| Read the catalog | `glue:GetCatalog`, `GetCatalogs`, `GetDatabase`, `GetDatabases`, `GetTable`, `GetTables`                                          | The Glue Data Catalog                            |
+| Read the table   | `s3tables:GetTableBucket`, `GetNamespace`, `ListNamespaces`, `ListTables`, `GetTable`, `GetTableData`, `GetTableMetadataLocation` | The `semantic-events` table bucket and its table |
+| Write results    | `s3:GetBucketLocation`, `ListBucket`, `GetObject`, `PutObject`, `ListMultipartUploadParts`, `AbortMultipartUpload`                | The `event-analytics-athena-<account-id>` bucket |
+
+The S3 Tables catalog grants `IAM_ALLOWED_PRINCIPALS`, so IAM alone controls access and no Lake Formation grant is needed. Reading the root's outputs with `--root` also needs read access to its OpenTofu state.
+
+## Query from the command line
+
+Run the script from a checkout of this repository with operator credentials in the environment:
+
+```bash
+export AWS_PROFILE=platform-operator AWS_REGION=us-east-2
+bun run events -- recent
+bun run events -- recent --organization <organization-id> --type 'agent.*' --since 7d --limit 20
+bun run events -- counts --since 24h
+bun run events -- sql "SELECT event_action, count(DISTINCT event_id) AS events FROM events GROUP BY 1"
+bun run events -- sql --file query.sql --max-rows 500 --json
+bun run events -- schema
+```
+
+| Command       | What it does                                                                              |
+| ------------- | ----------------------------------------------------------------------------------------- |
+| `recent`      | The newest events, one row per `event_id`. `--payload` adds `payload_json`.               |
+| `counts`      | Distinct events per event type, busiest first.                                            |
+| `sql <query>` | One read-only statement. The table is `events`; `--file` reads the statement from a file. |
+| `schema`      | The columns and how to query them. Runs no query.                                         |
+
+`recent` and `counts` filter with `--organization`, `--type` (end it with `*` to match a prefix), `--since` and `--until` (`30m`, `24h`, `7d`, or an ISO 8601 date or time; the window defaults to the last 24 hours), and `--limit`. Output is a table; `--json` prints the rows, the SQL that ran, the bytes scanned, and the query ID. Every command returns at most 1,000 rows and says when it cut rows off.
+
+The script finds the table in this order: flags, then `DEPLOYMENTS_AI_EVENT_ANALYTICS_<NAME>` environment variables, then the `event_analytics_athena` output of the root that `--root` names, then the names every installation uses. `--region` and `DEPLOYMENTS_AI_EVENT_ANALYTICS_REGION` set the region; without them the AWS SDK's usual resolution, such as `AWS_REGION`, applies. `--root` needs a root you have run `tofu init` in.
+
+### Read-only SQL
+
+`sql` and the `run_query` tool accept one `SELECT` or `WITH` statement. They reject before calling Athena:
+
+- Writes, DDL, and other statements: `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE`, `DROP`, `ALTER`, `UNLOAD`, `MSCK`, `EXPLAIN`, `SHOW`, and the rest, wherever they appear outside a string or quoted identifier.
+- External functions (`USING EXTERNAL FUNCTION`), which would call a Lambda function.
+- More than one statement, comments, backtick identifiers, and unbalanced quotes or parentheses.
+
+The statement keeps a final `LIMIT` up to the row cap; a larger one, `LIMIT ALL`, or none is replaced with the cap. Queries run in the `semantic-events` workgroup, whose result location and 10 GiB scan cutoff the client cannot override.
+
+## Query from an MCP client
+
+`bun run events:mcp` starts an MCP server on standard input and output with the same capabilities as the script. It takes the same flags and environment variables and runs with the credentials of the process that starts it.
+
+| Tool                | What it does                                                                                   |
+| ------------------- | ---------------------------------------------------------------------------------------------- |
+| `describe_schema`   | The columns, the table's location, and the query rules. Runs no query.                         |
+| `recent_events`     | `organization_id`, `event_type`, `since`, `until`, `limit` up to 1,000, and `include_payload`. |
+| `event_type_counts` | `organization_id`, `event_type`, `since`, `until`, and `limit` up to 1,000.                    |
+| `run_query`         | `sql`, one read-only statement, and `max_rows` up to 1,000, default 100.                       |
+
+Every tool is read-only. Results are JSON, and string cells longer than 2,000 characters are cut. Refused SQL, invalid arguments, and Athena failures return a tool error the model can read.
+
+Register the server in any MCP client that launches local servers. Use absolute paths, because the client starts the server from its own working directory:
+
+```json
+{
+  "mcpServers": {
+    "platform-events": {
+      "command": "bun",
+      "args": [
+        "/path/to/deployments/packages/event-analytics-operator/src/mcp-server.ts",
+        "--region",
+        "us-east-2"
+      ],
+      "env": { "AWS_PROFILE": "platform-operator" }
+    }
+  }
+}
+```
+
+In Claude Code:
+
+```bash
+claude mcp add --transport stdio --env AWS_PROFILE=platform-operator platform-events -- bun /path/to/deployments/packages/event-analytics-operator/src/mcp-server.ts --region us-east-2
+```
+
+Add `--root /path/to/an/initialized/root` to read the table's location from a root instead of using the defaults. Keep the server in your own, user-scoped client configuration; do not commit it to a project that tenants or their agents use.

@@ -1,0 +1,15 @@
+{
+  "title": "SDK",
+  "description": "TypeScript client",
+  "root": true,
+  "pages": [
+    "index",
+    "authentication",
+    "making-requests",
+    "errors",
+    "streaming",
+    "webhook-verification",
+    "---Reference---",
+    "reference"
+  ]
+}

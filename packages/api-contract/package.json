@@ -1,0 +1,43 @@
+{
+  "name": "@deployments-ai/api-contract",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./agent-email": "./src/agent-email.ts",
+    "./agents": "./src/agents.ts",
+    "./brains": "./src/brains.ts",
+    "./credential-references": "./src/credential-references.ts",
+    "./email": "./src/email.ts",
+    "./governance": "./src/governance.ts",
+    "./memory": "./src/memory.ts",
+    "./models": "./src/models.ts",
+    "./monitors": "./src/monitors.ts",
+    "./observability": "./src/observability.ts",
+    "./openapi": "./src/openapi.ts",
+    "./plan-features": "./src/plan-features.ts",
+    "./primitives": "./src/primitives.ts",
+    "./providers": "./src/providers.ts",
+    "./product": "./src/product.ts",
+    "./route-contract": "./src/route-contract.ts",
+    "./routes": "./src/routes.ts",
+    "./runtime": "./src/runtime.ts",
+    "./system": "./src/system.ts",
+    "./tool-catalog": "./src/tool-catalog.ts",
+    "./tooling": "./src/tooling.ts",
+    "./tenancy": "./src/tenancy.ts",
+    "./validation": "./src/validation.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@deployments-ai/agent-manifest": "workspace:*",
+    "@deployments-ai/observability": "workspace:*",
+    "@deployments-ai/tenant-limits": "workspace:*",
+    "effect": "4.0.0-beta.92"
+  }
+}

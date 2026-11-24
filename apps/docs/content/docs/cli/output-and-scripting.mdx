@@ -1,0 +1,145 @@
+---
+title: "Output, scripting, and exit codes"
+description: "JSON output, secret redaction, confirmations, idempotency keys, pagination, and exit codes for scripts and CI."
+---
+
+The CLI prints tables for people and JSON for programs. This page covers what a script can rely on: the shape of the output, which values the CLI hides, how destructive and repeated commands behave, and what each exit code means.
+
+## Read the output
+
+Without flags, the CLI prints human-readable text to stdout:
+
+- A list prints a table. The columns are `ID`, `NAME`, `STATUS`, and `UPDATEDAT` when the items have those fields, unless the command defines its own columns. An empty list prints `No resources found.` When more pages exist, a `Next cursor:` line follows the table.
+- A single resource prints a two-column table of field names and values.
+- A `request` line with the API request ID follows the result.
+- In mock mode, a `MOCK` banner comes first.
+
+Before it prints text from the API, the CLI removes terminal escape sequences, control characters, and bidirectional override characters. A value from the API cannot change your terminal or disguise itself.
+
+`--no-color`, or the `NO_COLOR` environment variable, turns off ANSI color.
+
+### JSON for scripts
+
+Add `--json` and the CLI writes only JSON to stdout, indented by two spaces. Commands that stream, such as `deployments run tail`, write one JSON object per line instead.
+
+Errors never go to stdout. The CLI writes them to stderr as one line of text that starts with `Error:`, even with `--json`. For an API error, the line holds the problem title and the request ID in the form `Error: <title> (request <request-id>)`. In a script, check the exit code, and read stderr if you need details.
+
+`--quiet` prints nothing on success, not even JSON. Errors still go to stderr. Use it for commands you run only for their effect.
+
+## Secrets stay hidden unless you ask
+
+The CLI replaces secret values with `[REDACTED]` in every output format, JSON included. It hides a field when its name marks it as a secret, for example `apiKey`, `secret`, `signingSecret`, `token`, `accessToken`, `refreshToken`, `password`, `clientSecret`, `privateKey`, `credential`, or `authorization`. It also hides fields named `url` or `urls` and fields that hold signed, upload, download, or access URLs, because those URLs work as bearer credentials. Some commands mark more fields as sensitive. The [command reference](/docs/cli/reference) notes each command whose output contains secrets.
+
+Counts stay visible. Token usage fields such as `inputTokens` and `totalTokens`, and fields that end in `Count`, `Suffix`, `Usage`, or `VisibleOnce`, are not redacted. Authorization, callback, and redirect URLs stay visible too, because you need to open them.
+
+Pass `--reveal` to print secrets. You need it for values the API returns only once, such as a new API key or a webhook signing secret. Pipe the output straight to its destination instead of printing it:
+
+```bash
+deployments api-key create --name ci --service-account "$SERVICE_ACCOUNT_ID" --reveal --json \
+  | jq -r .secret > ./ci-api-key
+```
+
+## Confirm destructive commands
+
+Most commands that archive, revoke, remove, or stop a resource are destructive, and so are some others, such as `run cancel` and `api-key rotate`. The [command reference](/docs/cli/reference) marks each destructive command.
+
+In an interactive terminal, a live destructive command asks `Continue with this destructive live operation?`. If you decline, it exits with code `130`. Outside a terminal, or with `--json`, it does not ask. It fails with exit code `2` unless you pass `--yes` or `-y`:
+
+```bash
+deployments api-key revoke "$API_KEY_ID" --yes --json
+```
+
+Mock mode skips the confirmation.
+
+## Make retries safe with idempotency keys
+
+Commands that create a resource or cause a side effect send an `idempotency-key` header. By default, the CLI generates a new random UUID on every run, so running the command twice does the work twice.
+
+To retry safely, choose the key once and pass the same `--idempotency-key` on every attempt. If the API already completed a request with that key and the same input, it returns the stored result instead of repeating the work:
+
+```bash
+key="$(uuidgen)"
+deployments chat --agent "$AGENT_DEPLOYMENT_ID" --message "Summarize the latest release notes" --idempotency-key "$key" --json
+```
+
+If the first attempt timed out, run the same line again with the same key. The API returns the original run, with `created` set to `false`, instead of starting a second one. Reusing a key with different input fails with exit code `6`. [Idempotency](/docs/api/idempotency) explains the API side, including key length limits.
+
+`deployments chat --file` uploads the files again on every attempt, and each upload gets a new artifact ID. A retry after a submission that went through is different input, so it fails with exit code `6`.
+
+Three commands handle delivery of an externally published message in phases and require an explicit key: `deployments run reserve-message-publication`, `deployments run publish-message`, and `deployments run release-message-publication`. Without `--idempotency-key`, they fail with exit code `7`.
+
+## Page through lists
+
+List commands accept `--page-size` and `--cursor`. `--page-size` must be a whole number from 1 to the command's maximum, which is 100 for tenancy lists. The CLI rejects any other value before it calls the API. With `--json`, each page includes `nextCursor` while more pages exist.
+
+This loop prints every agent definition as one JSON line:
+
+```bash
+cursor=""
+while :; do
+  page=$(deployments agent list --json --page-size 100 ${cursor:+--cursor "$cursor"})
+  echo "$page" | jq -c '.items[]'
+  cursor=$(echo "$page" | jq -r '.nextCursor // empty')
+  [ -z "$cursor" ] && break
+done
+```
+
+The array field differs between commands, for example `items` for agent definitions and `runs` for runs. Check the command's API operation, linked from the [command reference](/docs/cli/reference), for the field name. [Pagination](/docs/api/pagination) explains cursors.
+
+## Follow a run
+
+`deployments run tail` prints the events of one run from its thread's stream. It first checks that the run exists in that thread, then opens a stream session:
+
+```bash
+deployments run tail "$RUN_ID" --thread "$THREAD_ID" --follow --json
+```
+
+Without `--follow`, the command prints the events the stream already holds and exits when it catches up. With `--follow`, it keeps the connection open and prints events as they arrive. Either way, it stops after `run.completed`, `run.failed`, or `run.canceled`. Human-readable output prints each event's timestamp, its type, and its other fields on one line. `--offset` and `--cursor` start from a saved stream position instead of the beginning.
+
+[Streaming](/docs/capabilities/streaming) describes the event types.
+
+## Exit codes
+
+The CLI exits with one of these codes. For API errors, the code comes from the HTTP status of the response, not from the `status` field in the error body.
+
+| Code  | Meaning                       | Typical causes                                                                                                                                                 |
+| ----- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`   | Success                       | The command finished.                                                                                                                                          |
+| `1`   | Unexpected failure            | An error with no more specific code, including API statuses not listed below, such as `429`. A failed run in `deployments dev`.                                |
+| `2`   | Usage error                   | An unknown command or option, a missing option value, too many arguments, `--mock` with `--live`, or a destructive command without `--yes` outside a terminal. |
+| `3`   | Authentication failure        | HTTP `401`, or a browser sign-in that expired or can no longer renew.                                                                                          |
+| `4`   | Authorization failure         | HTTP `403`.                                                                                                                                                    |
+| `5`   | Not found                     | HTTP `404`.                                                                                                                                                    |
+| `6`   | Conflict                      | HTTP `409`, including an idempotency key reused with different input.                                                                                          |
+| `7`   | Validation or missing context | HTTP `400` or `422`, a command that needs a scope you did not set, an invalid flag value, or an unreadable input file.                                         |
+| `8`   | Service unavailable           | HTTP `5xx`, a network or transport failure, a timed-out config lock, or a device sign-in without a terminal.                                                   |
+| `130` | Canceled                      | You declined a confirmation or canceled a prompt.                                                                                                              |
+
+When the API gateway throttles a request, the CLI resends it up to five times over about 8 seconds. It exits with code `1` only if the gateway still throttles the last attempt.
+
+The CLI checks options before it reads your profile or contacts the API. A misspelled flag, such as `--yse` for `--yes`, fails with code `2` and does nothing else.
+
+### Example CI step
+
+This step deploys a release and handles the codes a pipeline cares about:
+
+```bash
+set -u
+export DEPLOYMENTS_API_URL=https://api.example.com
+export DEPLOYMENTS_API_KEY="$CI_DEPLOYMENTS_API_KEY"
+
+deployments agent deploy --release "$AGENT_RELEASE_ID" --env "$ENV_ID" --json > deployment.json
+status=$?
+case "$status" in
+  0) jq -r .id deployment.json ;;
+  3|4) echo "Check the CI credential and its scopes." >&2; exit "$status" ;;
+  8) echo "The API is unavailable. Retry later." >&2; exit "$status" ;;
+  *) exit "$status" ;;
+esac
+```
+
+## Reference
+
+- [Global flags](/docs/cli/reference#global-flags)
+- [`deployments run tail`](/docs/cli/reference/run#run-tail)
+- [Errors](/docs/api/errors), [Idempotency](/docs/api/idempotency), and [Pagination](/docs/api/pagination) in the API guide

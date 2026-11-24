@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "lib": ["ES2024"],
+    "noEmit": false,
+    "outDir": "../../dist/packages/brains",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/tsbuildinfo/brains.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../agent-manifest" }]
+}

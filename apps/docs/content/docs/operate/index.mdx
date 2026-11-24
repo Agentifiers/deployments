@@ -1,0 +1,153 @@
+---
+title: "Architecture"
+description: "The AWS components of a platform installation, how API requests and agent runs move through them, and where state lives."
+---
+
+A platform installation runs in one AWS account and one region. An OpenTofu root calls the reusable platform stack, and the stack creates every component on this page. Read this page to learn what you deploy, which parts are optional, and how a request reaches the agent worker and comes back.
+
+## One stack, many roots
+
+Every OpenTofu root calls `infrastructure/modules/platform` as `module "platform"`, so every installation has the same resource addresses. A root gives the stack three kinds of input:
+
+- The AWS account ID and region. The deploy tool passes them from your deployment target.
+- A required `operations` object that sets the operational posture: deletion protection, availability, sizing, Fargate capacity, the web application firewall, search domain layout, public load balancers, operator shell access, test fixtures, retention periods, ops alert routing, the public API stage throttle (`public_api_throttle`), and per-organization limit defaults (`tenant_limit_defaults`). [Deploying the platform](/docs/operate/deployment#set-the-operational-posture) lists every field.
+- Enable flags that turn whole components on or off.
+
+A root also configures a second AWS provider with the alias `aws.us_east_1`. CloudFront accepts certificates only from us-east-1. The console distribution needs one, and so does the stream gateway distribution when the stream gateway has no dedicated load balancer.
+
+### Turn components on
+
+The stack's own enable flags mostly default to `false`, so a root sets each one. The customer root in `infrastructure/environments/customer` sets its own defaults, which turn on every component that needs no input only you can supply. The data layer has no flag. The stack always creates its DynamoDB tables, S3 buckets, and KMS keys. [Features](/docs/operate/features) lists what each component needs.
+
+| Component                                                         | Created when                                                                | Stack default | Customer root default |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------- | ------------- | --------------------- |
+| Model runtime                                                     | `model_runtime_enabled`                                                     | `true`        | always on             |
+| Durable Streams                                                   | `durable_streams_enabled`                                                   | `true`        | always on             |
+| Public API                                                        | `platform_api_enabled`                                                      | `false`       | `true`                |
+| Identity service                                                  | `platform_identity_enabled`                                                 | `false`       | `true`                |
+| Management console                                                | `console_enabled`, which also needs the public API and the identity service | `false`       | `true`                |
+| Agent runtime and stream gateway                                  | `agent_runtime_enabled`                                                     | `false`       | `true`                |
+| Brains                                                            | both `platform_api_enabled` and `agent_runtime_enabled`                     | derived       | on                    |
+| Memory                                                            | `memory_runtime_enabled`                                                    | `false`       | `true`                |
+| Channels and providers                                            | `channel_provider_runtime_enabled`                                          | `false`       | `true`                |
+| Inbound channel runtime                                           | both `agent_runtime_enabled` and `channel_provider_runtime_enabled`         | derived       | on                    |
+| Semantic event bus                                                | `enable_platform_events`                                                    | `false`       | `true`                |
+| Agent email runtime                                               | `agent_email_enable_runtime`                                                | `false`       | `true`                |
+| [Event analytics](/docs/operate/event-analytics)                  | `event_analytics_lifecycle` is `running`, `stopped`, or `decommissioning`   | `absent`      | `running`             |
+| Web tools                                                         | `web_tools_runtime_enabled`                                                 | `false`       | `true`                |
+| Code sandbox                                                      | `sandbox_lambda_microvm_enabled`                                            | `false`       | `true`                |
+| Agent-built apps                                                  | `apps_enabled`                                                              | `false`       | `false`               |
+| Observability history                                             | `agent_observability_history_enabled`                                       | `false`       | `true`                |
+| [Observability hot plane](/docs/operate/observability-clickhouse) | `agent_observability_hot_enabled`                                           | `false`       | `true`                |
+
+## Components
+
+The tables below group the components by job. The source column names the repository path that holds the application code or the OpenTofu module.
+
+### Edge and API
+
+| Component          | Runs on                                                                                                                                                                                                                                                   | Source                                                      |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Public API         | An API Gateway HTTP API on a custom domain. The default `execute-api` endpoint is turned off.                                                                                                                                                             | `infrastructure/modules/platform-api`                       |
+| Platform API       | Eight ARM64 Lambda functions. `api` serves tenancy, agent lifecycle, and every route no other integration claims. The other seven each own one route family: observability, governance, Brains, evaluations, system operator, budgets, and administration | `functions/api`                                             |
+| Runtime API        | A Lambda function for threads, runs, approvals, artifacts, schedules, heartbeats, and stream sessions                                                                                                                                                     | `functions/runtime-api`                                     |
+| Memory API         | A Lambda function for memory spaces, memories, search, and recall                                                                                                                                                                                         | `functions/memory-runtime`                                  |
+| Agent email API    | A Lambda function for email domains, inboxes, and messages                                                                                                                                                                                                | `functions/agent-email-runtime`                             |
+| Identity service   | An API Gateway REST API on its own custom domain, Lambda functions, KMS signing keys, and Amazon SES for email                                                                                                                                            | `functions/identity-api`, `functions/identity-email-worker` |
+| Management console | A server Lambda behind a regional HTTP API, a private S3 bucket for static assets, and a CloudFront distribution                                                                                                                                          | `apps/console`                                              |
+| Stream gateway     | An ECS Fargate service. It sits behind its own internet-facing load balancer, or behind CloudFront and the shared internal load balancer.                                                                                                                 | `apps/stream-gateway`                                       |
+
+The identity service runs the platform's own OAuth 2.0 and OpenID Connect server, including the device authorization flow the CLI uses. When `operations.web_application_firewall` is `true`, an AWS WAF web ACL with AWS managed common rules and a per-IP rate limit protects its API stage.
+
+### Agent runtime
+
+| Component        | Runs on                                                                                                 | Source                                     |
+| ---------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| Run queue        | An SQS FIFO queue with a dead-letter queue                                                              | `infrastructure/modules/agent-runtime`     |
+| Agent worker     | An ARM64 ECS Fargate service that polls the run queue and executes runs                                 | `functions/worker`                         |
+| Workflow runtime | An SQS FIFO queue and Lambda functions that advance workflow executions                                 | `functions/workflow-runtime`               |
+| Automations      | An EventBridge Scheduler schedule group and Lambda functions that fire schedules and heartbeats         | `infrastructure/modules/agent-runtime`     |
+| Model runtime    | A private ECS service that runs the model gateway in front of Bifrost, behind an internal load balancer | `apps/model-gateway`                       |
+| Durable Streams  | A private ECS service with Amazon EFS storage behind an internal load balancer                          | `apps/durable-streams`                     |
+| Code sandbox     | Lambda MicroVM images                                                                                   | `apps/sandbox-microvm`                     |
+| Web tools        | Private ECS services for a self-hosted Firecrawl and a Chromium fallback renderer                       | `infrastructure/modules/web-tools-runtime` |
+
+The model gateway forwards model calls to Amazon Bedrock, OpenAI, or OpenRouter. [Model gateway](/docs/operate/model-gateway) covers tokens, provider keys, and model grants. [Sandbox runtime](/docs/operate/sandbox-runtime) covers the Lambda MicroVM sandbox provider.
+
+### Knowledge, channels, and email
+
+| Component                | Runs on                                                                                                         | Source                                   |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| Search                   | Amazon OpenSearch Service domains inside the VPC                                                                | `infrastructure/modules/search-domain`   |
+| Memory workers           | Lambda functions and SQS queues that index, flush, and reconcile memory                                         | `functions/memory-runtime`               |
+| Brain workers            | Lambda functions and SQS queues that index and synchronize brains                                               | `infrastructure/modules/brain-runtime`   |
+| Channel provider runtime | An HTTP API for signed channel ingress and OAuth callbacks, plus Lambda workers for delivery and provider tools | `functions/channel-provider-runtime`     |
+| Inbound runtime          | Lambda functions that turn queued channel messages into conversations and runs                                  | `infrastructure/modules/inbound-runtime` |
+| Agent email              | Amazon SES receipt rules, S3 storage, SNS topics, SQS queues, and Lambda workers                                | `functions/agent-email-runtime`          |
+
+When `operations.shared_search_domain` is `true`, one OpenSearch domain serves both memory and brains. When it is `false`, each gets its own domain.
+
+### Events and observability
+
+| Component               | Runs on                                                                                                    | Source                                       |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| Event dispatcher        | A Lambda function that reads the `events` table stream and publishes to an EventBridge bus with an archive | `functions/event-dispatcher`                 |
+| Event analytics         | A projector Lambda, an Amazon Data Firehose stream into an Iceberg table, and Athena                       | `functions/event-analytics-projector`        |
+| Observability history   | A Kinesis stream, Firehose, Iceberg tables in S3 Tables, and an Athena workgroup                           | `infrastructure/modules/agent-observability` |
+| Observability hot plane | ClickHouse on EC2 and an ECS service that writes execution facts into ClickHouse and serves queries        | `apps/observability-hot-plane`               |
+
+### Network
+
+The stack creates a VPC with public and private subnets, NAT egress for the private subnets, and gateway endpoints for S3 and DynamoDB on the private route tables.
+
+## How an API request moves
+
+1. A client sends an HTTPS request to the API custom domain.
+2. The HTTP API matches the route. Exact routes send runtime, memory, and agent email operations to their Lambda functions. The `$default` route sends every other operation to the lifecycle API. Each integration has a 29-second timeout.
+3. The Lambda function authorizes every request. It authenticates the bearer credential and checks scopes, roles, and the tenant scope headers. The HTTP API itself has no authorizer.
+4. The function reads and writes DynamoDB and returns the response.
+
+The identity service is a separate API on its own domain. It issues the tokens that clients then send to the public API. [Authentication](/docs/getting-started/authentication) describes the credential types.
+
+## How an agent run moves
+
+1. A run starts from the runtime API, a schedule or heartbeat that EventBridge Scheduler fires, a signed channel message that the inbound runtime picks up, an inbound email, or an evaluation. Each path records the run in DynamoDB and sends it to the FIFO run queue.
+2. An agent worker task takes the run from the queue. It loads the deployment and its immutable release, the conversation history, and any memory the agent may recall.
+3. The worker calls the model through the model gateway on the internal load balancer. The gateway checks a short-lived run token and forwards the call through Bifrost to the provider.
+4. When the model selects a tool, the worker checks the call against the tool catalog and the tool's policy, then runs it. Provider and MCP tools also need an active connection. Sensitive tools can pause the run for approval. Code execution runs in a sandbox lease.
+5. While the model generates, the worker writes token chunks to Durable Streams.
+6. When the run finishes, the worker writes the assistant message, the run state, semantic events, and usage records to DynamoDB.
+
+Clients read live output from the stream gateway. The runtime API issues a stream session, and the stream gateway checks it and proxies the read to Durable Streams over server-sent events or long polling. [Streaming](/docs/capabilities/streaming) describes the client side.
+
+## Where state lives
+
+The platform keeps its canonical state in DynamoDB. The data module creates six on-demand tables with point-in-time recovery.
+
+| Table                   | Holds                                                                                                                                  | Stream |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| `control`               | Tenancy, principals, agent definitions, releases, deployments, brains, credentials, governance operations, and the installation record | no     |
+| `execution`             | Threads, messages, runs, approvals, artifacts, sandbox leases, workflow executions, and inbox messages                                 | yes    |
+| `events`                | Semantic events, audit events, idempotency records, and webhook deliveries                                                             | yes    |
+| `usage`                 | Meter events, usage and cost counters, budgets, and rate-limit counters                                                                | yes    |
+| `identity`              | Identity service records                                                                                                               | no     |
+| `identity-email-outbox` | Pending identity emails                                                                                                                | yes    |
+
+Other stores hold data that does not fit a table row:
+
+| Store                                           | Holds                                                                               |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------- |
+| A versioned S3 artifact bucket                  | Run artifacts, screenshots, and the Lambda release archives the deploy tool uploads |
+| An S3 governance bucket with Object Lock        | Tenant exports and immutable audit exports                                          |
+| Iceberg tables in S3 Tables                     | The semantic event history and, when enabled, observability history                 |
+| OpenSearch                                      | Memory and brain search indexes                                                     |
+| Amazon EFS                                      | Durable Streams data                                                                |
+| Secrets Manager and SSM SecureString parameters | Service secrets and model provider keys                                             |
+
+One customer managed KMS key, the platform data key, encrypts artifact and governance objects and the application's envelope encryption, including the credential vault. Separate KMS keys sign model gateway tokens, identity tokens, and audit export manifests.
+
+## How events and usage stay consistent
+
+A service writes a state change and its semantic event in one DynamoDB transaction. The event dispatcher reads the `events` table stream and publishes each event to the semantic EventBridge bus, so it can retry delivery without repeating the state change. Usage follows the same pattern. The worker writes meter events to the `usage` table, and a materializer reads the table stream and updates sharded counters. Meter records carry stable identities, so a replayed record does not count twice.
+
+[Security model](/docs/operate/security) explains how the components authenticate to each other and isolate tenants. [Deploying the platform](/docs/operate/deployment) explains how to install all of this into your account.

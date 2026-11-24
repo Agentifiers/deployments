@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/channel-adapters",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/channel-adapters.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../net-security" }]
+}

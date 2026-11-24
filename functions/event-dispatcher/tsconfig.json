@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/functions/event-dispatcher",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/functions/event-dispatcher.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    {
+      "path": "../../packages/events"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@deployments-ai/observability",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./evaluator-config": "./src/evaluators/config.ts",
+    "./evaluators": "./src/evaluators/index.ts",
+    "./identifier-codecs": "./src/identifier-codecs.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "effect": "4.0.0-beta.92",
+    "re2js": "2.8.6"
+  }
+}

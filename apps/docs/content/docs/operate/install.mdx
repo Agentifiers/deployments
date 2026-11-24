@@ -1,0 +1,211 @@
+---
+title: "Install in your AWS account"
+description: "Get the source, prepare a dedicated AWS account, apply the account bootstrap, write the var file and deployment target, deploy, and create the first administrator."
+---
+
+This page takes a new AWS account to a running installation. It uses three parts of the repository: the account bootstrap in `infrastructure/bootstrap/customer`, the installation root in `infrastructure/environments/customer`, and the deploy tool with the `platform-customer` profile. [Deploying the platform](/docs/operate/deployment) describes the deploy tool in full.
+
+<Callout type="warn" title="Availability">
+  The bootstrap and the installation root pass `tofu validate` and `tofu test` with mock providers.
+  A mock plan skips AWS-side checks such as service quotas, SES identity verification, Bedrock model
+  access, and certificate validation, so plan for those on a first install. The `platform-customer`
+  profile publishes a Lambda MicroVM image on every deploy. In a region without Lambda MicroVMs, set
+  `"lambdaMicrovm": false` in the deployment target, which also turns the sandbox off; see [Regions
+  and quotas](/docs/operate/regions-and-quotas).
+</Callout>
+
+## Get the source
+
+The platform's source is in the [Agentifiers/deployments](https://github.com/Agentifiers/deployments) repository on GitHub. Install these tools on the machine you deploy from:
+
+- [Bun](https://bun.sh/) 1.4.4
+- [Node.js](https://nodejs.org/) at the version in the repository's `.node-version` file
+- [OpenTofu](https://opentofu.org/) 1.13.2, run as `tofu`
+- Docker, which builds the release images
+- The [AWS CLI](https://aws.amazon.com/cli/), to assume the deploy role
+
+Clone the repository, check out the commit you install, and install the dependencies:
+
+```bash
+git clone https://github.com/Agentifiers/deployments.git
+cd deployments
+git checkout <commit>
+bun install --frozen-lockfile
+```
+
+Run every command on this page from the repository root unless a step changes directory. The repository's `README.md` describes its layout and the commands that build and test it.
+
+## Prepare the account
+
+- **A dedicated AWS account.** The installation owns account-wide singletons: the OpenSearch service-linked role, the active SES receipt rule set, SES account suppression, and the Cost Anomaly monitor. Alarm names carry no environment, so the operator routes list every alarm in the account and region. Keep other workloads out of the account, and do not use an organization's management or delegated administrator account. The deploy role holds `PowerUserAccess` there, and its IAM writes reach every role, policy, and instance profile whose name starts with one of the platform's prefixes. Create none of your own under those names.
+- **A supported region.** The default features use Lambda MicroVMs, SES email receiving, and Bedrock global cross-Region inference. [Regions and quotas](/docs/operate/regions-and-quotas) lists the regions that offer all of them.
+- **DNS.** A public Route 53 hosted zone in the account for the installation's domain, or a subdomain delegated to it. The console, identity, API, and stream gateway hosts, the private web tools host, and the agent email domain live under it.
+- **Certificates.** An ACM certificate for the API host in the installation region, passed as `platform_api_certificate_arn`. OpenTofu issues the identity, stream gateway, and web tools certificates in their Route 53 zones. The console certificate lives in `us-east-1` because CloudFront serves it; OpenTofu issues it when `console_route53_zone_id` is set, or you pass an existing one as `console_certificate_arn`.
+- **SES production access** in the installation region for the domains of `platform_identity_email_sender` and `agent_email_domain`. Sign-in and agent email stay in the SES sandbox until AWS grants it.
+- **Lambda concurrency quota.** A new account can start with a quota as low as 10 concurrent executions. Request at least 1,000 before the first deploy.
+- **Amazon Bedrock model access** in the installation region for the two models the default installation calls: `global.anthropic.claude-haiku-4-5-20251001-v1:0` for chat and `global.cohere.embed-v4:0` for embeddings. OpenTofu grants the model gateway permission to call Bedrock; it cannot enable model access. AWS bills Cohere Embed v4 through AWS Marketplace.
+- **Provider API keys** only when you add `openai` or `openrouter` to `model_runtime_hosted_providers`. See [Model gateway](/docs/operate/model-gateway).
+
+## Apply the account bootstrap
+
+Run the bootstrap once with an administrator session in the account. It keeps local state, so store its `terraform.tfstate` with your installation records. The state holds the trust policies, including any external ID, so keep the file private.
+
+| Variable                 | Required                               | Meaning                                                                                                                                   |
+| ------------------------ | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `aws_account_id`         | Yes                                    | The installation's 12-digit account ID. The AWS provider refuses to act in any other account.                                             |
+| `aws_region`             | Yes                                    | The installation region. The state bucket lives here.                                                                                     |
+| `environment_name`       | Yes                                    | The `environment_name` of your var file. It scopes the deploy role's IAM name prefixes.                                                   |
+| `deploy_principal_arn`   | Yes                                    | The IAM role or user that assumes the deploy role to run deploys.                                                                         |
+| `observer_principal_arn` | No                                     | The IAM role or user that assumes the observer role to read the observer routes. The default, null, creates no observer role.             |
+| `external_id`            | When a principal is in another account | The value every principal presents as `sts:ExternalId` when it assumes a bootstrap role. The default, null, adds no ExternalId condition. |
+
+### Choose the principals
+
+- Each principal must be an existing IAM role ARN, `arn:<partition>:iam::<account-id>:role/<name>`, or IAM user ARN, `arn:<partition>:iam::<account-id>:user/<name>`, where `<partition>` is `aws` in commercial regions. A path before the name is allowed. AWS rejects a trust policy that names a principal that does not exist.
+- The bootstrap rejects an account root ARN (`:root`), an assumed-role session ARN, and anything else, so each bootstrap role trusts exactly one identity.
+- Prefer a role over a user: a CI role that GitHub Actions assumes through OIDC, or the role IAM Identity Center creates for an administrator permission set. A user needs long-lived access keys.
+- When the principal is a role, assuming the deploy role is role chaining, and AWS limits a chained session to one hour. The deploy role's 12-hour maximum session applies when an IAM user assumes it.
+- IAM binds a trust policy to the principal's unique ID. If you delete and recreate a principal, apply the bootstrap again.
+
+### Set the external ID
+
+An external ID protects a role from the confused-deputy problem when a principal in another account assumes it. The bootstrap requires `external_id` when `deploy_principal_arn` or `observer_principal_arn` is in an account other than `aws_account_id`, and the plan fails without it. When it is set, both trust policies require it, also for a principal in the installation's account. When every principal is in the installation's account, you can leave it null.
+
+The value must be 16 to 1,224 characters of letters, digits, or `+=,.@:/-`. Generate one and pass it through the environment, so it stays out of your shell history:
+
+```bash
+export TF_VAR_external_id="$(openssl rand -hex 32)"
+```
+
+The principal passes the value as `ExternalId` on `sts:AssumeRole`, for example through the `external_id` setting of an AWS CLI profile.
+
+### Self-host from your own account
+
+The deploying principal is a role in the installation's account, so no external ID is needed. With no `observer_principal_arn`, the bootstrap creates no observer role.
+
+```bash
+cd infrastructure/bootstrap/customer
+tofu init
+tofu apply \
+  -var aws_account_id=<account-id> \
+  -var aws_region=us-east-2 \
+  -var environment_name=acme \
+  -var deploy_principal_arn='<ci-deploy role ARN in the installation account>'
+```
+
+Set `system_observer_role_arns` to `[]` in your var file. The observer routes then answer every request with `403`.
+
+### Let another account operate the installation
+
+When a vendor or a central operations account deploys and observes the installation from its own account, both principals are cross-account, so `external_id` is required. Use the value the operating account gives you, or generate one and share it over a secure channel.
+
+```bash
+export TF_VAR_external_id='<external ID>'
+cd infrastructure/bootstrap/customer
+tofu init
+tofu apply \
+  -var aws_account_id=<account-id> \
+  -var aws_region=us-east-2 \
+  -var environment_name=acme \
+  -var deploy_principal_arn='<install-deployer role ARN in the operating account>' \
+  -var observer_principal_arn='<install-observer role ARN in the operating account>'
+```
+
+List the `observer_role_arn` output in your var file's `system_observer_role_arns`.
+
+### Outputs
+
+| Output                     | Use it as                                                                                                                       |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `state_bucket_name`        | The target's `terraform.stateBucket`.                                                                                           |
+| `deploy_role_arn`          | The role `deploy_principal_arn` assumes to deploy. Its name is the var file's `deploying_role_name`.                            |
+| `permissions_boundary_arn` | The var file's `iam_permissions_boundary_arn`.                                                                                  |
+| `observer_role_arn`        | An entry in the var file's `system_observer_role_arns`. Null when `observer_principal_arn` is null; use `[]` for the list then. |
+
+The bootstrap creates an encrypted, versioned, TLS-only state bucket; the deploy role; the observer role when `observer_principal_arn` is set, which may only call `GET /v1/system/observer/*` on the installation's API; and the permissions boundary that every platform role must carry. The deploy role's IAM writes are limited to the platform's role, policy, and instance profile names and require that boundary. `deploy_role_name`, `observer_role_name`, `permissions_boundary_name`, and `deploy_managed_policy_names` change the defaults.
+
+## Write the var file
+
+Start from `infrastructure/environments/customer/tests/terraform.tfvars.json`, the sample the root's tests plan. It sets only the variables below, and the root's tests check that it plans every default feature. These variables have no default:
+
+| Variable                               | Example                                                                                                           |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `environment_name`                     | `acme`. Lowercase, at most 16 characters.                                                                         |
+| `operations`                           | The operational posture. See [Set the operational posture](/docs/operate/deployment#set-the-operational-posture). |
+| `billing_alert_email`                  | `billing@acme.example`                                                                                            |
+| `platform_identity_application_origin` | `https://app.acme.example`, the console origin                                                                    |
+| `platform_identity_domain_name`        | `auth.acme.example`                                                                                               |
+| `platform_identity_email_sender`       | `auth@acme.example`                                                                                               |
+| `platform_api_domain_name`             | `api.acme.example`                                                                                                |
+| `agent_email_domain`                   | `agents.acme.example`                                                                                             |
+| `model_runtime_availability_zones`     | `["us-east-2a", "us-east-2b"]`                                                                                    |
+| `network_cidr_block`                   | `10.64.0.0/16`                                                                                                    |
+| `deploying_role_name`                  | `platform-deploy`, the bootstrap's deploy role name                                                               |
+| `iam_permissions_boundary_arn`         | The bootstrap's `permissions_boundary_arn` output                                                                 |
+| `system_observer_role_arns`            | The bootstrap's `observer_role_arn` output in a list, or `[]`                                                     |
+
+The features that are on by default also need these values. Without one, the plan fails, or for the identity zone, the deploy fails when it publishes the identity domain, with an error that names what is missing.
+
+| Variable                            | Example                                   | Needed by                                                                          |
+| ----------------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------- |
+| `platform_api_certificate_arn`      | An ACM certificate for `api.acme.example` | The public API                                                                     |
+| `platform_api_route53_zone_id`      | `Z0ACME0EXAMPLE0ZONE`                     | The public API and the stream gateway. The web tools host defaults to this zone.   |
+| `platform_identity_route53_zone_id` | `Z0ACME0EXAMPLE0ZONE`                     | The identity service certificate and DNS                                           |
+| `console_route53_zone_id`           | `Z0ACME0EXAMPLE0ZONE`                     | The console, or set `console_certificate_arn` to a `us-east-1` certificate instead |
+| `stream_gateway_domain_name`        | `streams.acme.example`                    | The agent runtime                                                                  |
+| `agent_email_route53_zone_id`       | The zone that holds `agents.acme.example` | Agent email DNS records, or set `agent_email_manage_dns` to `false`                |
+
+These hostnames are the origins your users configure; see [Hosts and environments](/docs/getting-started/hosts-and-environments). To sign people in through your own identity provider, see [Identity federation](/docs/operate/identity-federation).
+
+With only these values, the installation runs the public API, the console, the identity service, the agent runtime and stream gateway, channels, memory, Brains, agent email, the Lambda MicroVM sandbox, self-hosted web tools, observability history with its ClickHouse hot plane, and [event analytics](/docs/operate/event-analytics) for operators, and it hosts Amazon Bedrock as its only model provider. Agent-built apps stay off until you supply their inputs. [Features](/docs/operate/features) lists every feature, its variable, its default, and what it needs, and [Costs](/docs/operate/costs) lists what the defaults cost and how to turn features off.
+
+Leave out the variables the deploy tool writes: `aws_account_id`, `aws_region`, image URIs, the Firecrawl table definition `web_tools_firecrawl_table`, the Lambda MicroVM image `lambda_microvm_image_identifier` and `lambda_microvm_image_version`, Lambda artifact locations, `platform_identity_enabled`, which the tool always sets to `true`, and `platform_identity_publish_domain`.
+
+## Write the deployment target
+
+```json
+{
+  "version": 1,
+  "name": "acme",
+  "profile": "platform-customer",
+  "aws": { "accountId": "<account-id>", "region": "us-east-2" },
+  "terraform": {
+    "stateBucket": "<state_bucket_name output>",
+    "varFiles": ["acme.tfvars.json"]
+  }
+}
+```
+
+The `platform-customer` profile deploys `infrastructure/environments/customer`. Set `terraform.root` to deploy a root you keep elsewhere. See [Write a deployment target](/docs/operate/deployment#write-a-deployment-target).
+
+## Build and deploy
+
+Assume the deploy role, export provider keys only for a hosted `openai` or `openrouter`, and run from a clean checkout of the commit you install:
+
+```bash
+bun install
+bun run deploy -- release build
+bun run deploy -- deploy --target acme.target.json
+```
+
+The first deploy needs no extra step. It applies the Lambda MicroVM prerequisites, publishes the MicroVM image, applies the full root, and then starts a test MicroVM to verify the sandbox. The installation root's tests plan the sample var file with every resource attribute unknown, as in an empty account, and fail when a `count` or `for_each` would wait on an apply. To deploy from GitHub Actions, see [Deploy from GitHub Actions](/docs/operate/deployment#deploy-from-github-actions).
+
+## Create the first administrator
+
+```bash
+bun run deploy -- admin bootstrap --target acme.target.json --email <admin email>
+```
+
+The command creates a platform administrator for the address, or promotes an existing account, and prints the sign-in URL. The administrator opens it, chooses **Forgot password?**, and sets a password from the reset email. [Users and sign-in](/docs/operate/users) covers adding more people, and [System operator](/docs/operate/system-operator) describes what a platform administrator can do.
+
+## Register the observer role
+
+If you set `observer_principal_arn`, keep the bootstrap's `observer_role_arn` in `system_observer_role_arns`. If it was not set for the first deploy, add it and deploy again. Without an observer role, keep the list `[]`; the observer routes then answer every request with `403`.
+
+## Next steps
+
+- [Add users and administrators](/docs/operate/users).
+- [Run your first agent](/docs/getting-started/quickstart). The default installation runs it on Amazon Bedrock with no model policy and no provider key.
+- [Review the features](/docs/operate/features). Memory and Brain search activate for each organization on their own.
+- [Troubleshoot an installation](/docs/operate/troubleshooting) when a deploy or a first run fails.
+- [Tear down an installation](/docs/operate/teardown) when you no longer need it.

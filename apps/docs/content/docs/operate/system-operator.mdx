@@ -1,0 +1,320 @@
+---
+title: "System operator"
+description: "Installation status for platform administrators: the deployed release, deployment history, component health, alarms, model provider keys, organizations, and per-organization limits."
+---
+
+The system operator API gives platform administrators a view of the whole installation. It reports the release the deploy tool recorded, the deployment history, ECS and Lambda health, CloudWatch alarms, model provider key metadata, and every organization. It is also where an administrator raises or lowers one organization's limits and holds or grants an organization, as [Organization standing](/docs/operate/organization-standing) describes, and opens [operator access](#operator-access) to an organization's data. The routes live under `/v1/system/`. The `deployments system` commands and the console's **System** page use them.
+
+<Callout type="warn" title="Availability">
+  Only a human platform administrator signed in through platform identity can call these routes. API
+  keys never qualify, whatever scopes they carry. No public API route grants the platform
+  administrator role. The read-only [observer routes](#observer-routes) and the [organization
+  standing](/docs/operate/organization-standing) service routes are the exceptions. They admit IAM
+  roles that the installation lists.
+</Callout>
+
+## Who can call the routes
+
+The lifecycle API admits a request to a `/v1/system/` route outside `/v1/system/observer/` only when all of these are true:
+
+- The request authenticates with a platform identity access token, the `tenant-jwt` scheme. An API key gets `403` even with every scope.
+- The principal record has `platformRole: "administrator"`, or the token carries the `platform:admin` or `platform:*` scope.
+- The session is not limited to reading an erasure receipt.
+
+The API reads `platformRole` from the human principal record in the `control` table on every request. The role is not an organization role, so it needs no membership, and the routes take no tenant scope headers. The role alone does not open an organization's data: that takes [operator access](#operator-access). Assigning the role happens outside the public API, with the deploy tool's `admin bootstrap` command. See [Users and sign-in](/docs/operate/users#create-the-first-administrator).
+
+## Routes
+
+These routes are `GET`s with no request body and no idempotency key. An organization's limits are set through its standing, as [Organization limits](#organization-limits) describes.
+
+| Route                        | SDK function               | CLI command                          | Returns                                                          |
+| ---------------------------- | -------------------------- | ------------------------------------ | ---------------------------------------------------------------- |
+| `/v1/system/installation`    | `getSystemInstallation`    | `deployments system installation`    | The current installation record and observability data locations |
+| `/v1/system/deployments`     | `listSystemDeployments`    | `deployments system deployments`     | Recorded deployments, newest first                               |
+| `/v1/system/components`      | `getSystemComponents`      | `deployments system components`      | Health of each ECS service and released Lambda function          |
+| `/v1/system/alarms`          | `listSystemAlarms`         | `deployments system alarms`          | CloudWatch alarms, optionally filtered by state                  |
+| `/v1/system/model-providers` | `listSystemModelProviders` | `deployments system model-providers` | Hosted model providers and their key metadata                    |
+| `/v1/system/organizations`   | `listSystemOrganizations`  | `deployments system organizations`   | Every organization in the installation                           |
+
+The deployments, alarms, and organizations routes take a `cursor` of 1 to 4,096 characters and a `limit` from 1 through 100. Deployments and organizations return 50 items by default. Alarms return up to 100 by default. Each of these list responses has `items` and a `nextCursor` that is `null` on the last page.
+
+### Installation and deployment history
+
+The deploy tool writes the installation record after every verified deployment. [Deploying the platform](/docs/operate/deployment#the-installation-record) describes when. Each record has these fields:
+
+- `targetName`, `profile`, `awsAccountId`, and `awsRegion` from the deployment target.
+- `sourceCommit` and `releaseManifestSha256`, which pin the release bundle.
+- `lambdaArtifacts`, with each archive's SHA-256 and its `functions`. Each function entry has the function `name` and the `codeSha256` of the code the deploy released to it.
+- `images`, with each image's digest-pinned URI and image ID.
+- `endpoints`, the public URLs of the API, identity issuer, stream gateway, console, and other services the root runs.
+- `deployedAt` and `deployedBy`, the caller ARN that ran the deploy.
+
+`/v1/system/installation` adds `deploymentId`, `version`, `updatedAt`, and an `observability` object. That object names the Athena workgroup, the history retention in days, and the S3 Tables bucket and namespace, each `null` when observability history is off. It also reports the hot plane's span and trace retention. Until the first verified deployment, the route returns `404` with `installation_not_recorded`.
+
+### Component health
+
+`/v1/system/components` reads ECS and Lambda metadata live and reports `checkedAt`. It covers the ECS services of the components your root turns on: the model runtime, Durable Streams, the observability hot plane, both web tools services, the stream gateway, and the agent worker. Its Lambda list is the functions the installation record says the last deploy released.
+
+| Kind            | `healthy`                                                                                                                     | `degraded`               | `unavailable`                          |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------ | -------------------------------------- |
+| ECS service     | `ACTIVE`, running count equals desired count, no pending tasks, and the rollout is absent or `COMPLETED`                      | `ACTIVE` but not settled | The service is missing or not `ACTIVE` |
+| Lambda function | State `Active`, last update absent or `Successful`, and the deployed code hash does not differ from the recorded `codeSha256` | Any other state          | The function does not exist            |
+
+Each Lambda entry also has `codeMatchesRelease`. It is `true` or `false` when the function reports a code hash to compare with the `codeSha256` that the installation record holds for it, and `null` when it does not.
+
+### Alarms
+
+`/v1/system/alarms` lists CloudWatch alarms whose names start with the root's `system_alarm_name_prefix`. The prefix defaults to empty, which lists every alarm in the installation's account and region. Pass `state` as `ALARM`, `INSUFFICIENT_DATA`, or `OK` to filter. Each alarm has `name`, `state`, `reason`, `metricName`, `namespace`, and `updatedAt`.
+
+### Model providers
+
+`/v1/system/model-providers` reports each hosted provider the installation wires and leaves out the others. `openai` and `openrouter` report their API key. `bedrock` has no key. It appears when the root hosts it, with `credentialStore` `task-role`, `configured` `true`, and `null` `version` and `lastModifiedAt`, because OpenTofu grants the model runtime task role Bedrock access in the same apply. It does not report whether the account has enabled Bedrock model access.
+
+| Field             | Meaning                                                                                                                                                                                                                             |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credentialStore` | `ssm-parameter`, `secrets-manager`, or `task-role` for Bedrock                                                                                                                                                                      |
+| `configured`      | For a parameter, `true` once its version is above 1. OpenTofu creates each parameter with a placeholder as version 1, and only the deploy tool's secret sync writes a real key. For a secret, `true` when a current version exists. |
+| `version`         | The parameter version or the secret's current version ID                                                                                                                                                                            |
+| `lastModifiedAt`  | When the key last changed                                                                                                                                                                                                           |
+
+The route reads metadata only. The IAM policy the stack attaches for the system routes allows ECS, Lambda configuration, alarm, parameter, and secret metadata reads. It grants no permission to read parameter or secret values or to download Lambda code. To change a key, run `secrets sync model-runtime` with the deploy tool, as [Deploying the platform](/docs/operate/deployment#commands) shows.
+
+### Organizations
+
+`/v1/system/organizations` lists every organization in the installation, ordered by status and last update. Each item has `id`, `name`, `slug`, `status`, `activeMemberCount`, `createdAt`, and `updatedAt`. The `status` is `active`, `archived`, or `disabled`.
+
+This is the only install-wide organization list. `GET /v1/organizations` and `deployments org list` return only the organizations the caller is an active member of, for a platform administrator too, and operator access does not add an organization to them.
+
+### Organization limits
+
+Every organization runs under four limits: `apiRequestsPerSecond`, `apiRequestBurst`, `concurrentRuns`, and `activeSandboxes`. [Versioning and limits](/docs/api/versioning-and-limits#organization-limits) describes what each one does. OpenTofu sets a default for each limit per environment. [Tenant limits](/docs/operate/tenant-limits) covers how the defaults are configured and enforced.
+
+An entitlement grant on the organization's [standing](/docs/operate/organization-standing) replaces a default for one organization. The operator grant wins over a machine service's grant, field by field, as [How grants merge](/docs/operate/organization-standing#how-grants-merge) describes.
+
+| Method   | Route                                                    | SDK function                            | CLI command                                                                    |
+| -------- | -------------------------------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------ |
+| `GET`    | `/v1/system/organizations/{organizationId}/standing`     | `getSystemOrganizationStanding`         | `deployments system standing <organization-id>`                                |
+| `PUT`    | `/v1/system/organizations/{organizationId}/entitlements` | `replaceSystemOrganizationEntitlements` | `deployments system set-entitlements <organization-id> --tenant-limits <json>` |
+| `DELETE` | `/v1/system/organizations/{organizationId}/entitlements` | `clearSystemOrganizationEntitlements`   | `deployments system clear-entitlements <organization-id>`                      |
+
+Each limit in a grant's `tenantLimits` must be a whole number in its range:
+
+| Limit                  | Range     |
+| ---------------------- | --------- |
+| `apiRequestsPerSecond` | 1 to 500  |
+| `apiRequestBurst`      | 1 to 1000 |
+| `concurrentRuns`       | 1 to 256  |
+| `activeSandboxes`      | 0 to 256  |
+
+The standing response reports the install `defaults`, each source's grant, and the `effective` limits the platform enforces. [Organization standing](/docs/operate/organization-standing#routes) covers the bodies, the change history, and the errors.
+
+API hosts apply a grant change within 5 seconds, and the agent worker within 30 seconds. A lower limit does not stop work already running. The organization starts nothing new until its usage drops below the new limit.
+
+Organization members read their own effective limits with `GET /v1/organizations/{id}/limits` or `deployments org limits`. Each limit's `source` is `override` when a grant sets it and `default` otherwise.
+
+The `GET`, `PUT`, and `DELETE` routes on `/v1/system/organizations/{organizationId}/limits` and the `deployments system limits`, `set-limits`, and `clear-limits` commands are gone. The first deploy without them folds each organization's override into its operator grant once and deletes the override, as [Pipeline steps](/docs/operate/deployment#pipeline-steps) describes. A field the operator grant already sets keeps its value, and later changes to the grant stay.
+
+## Operator access
+
+A platform administrator must open operator access to an organization before reading or changing its data. Without it, every route that selects the organization, in the platform API, the runtime API, and the memory and channel APIs, returns `403` with `operator_access_required`. The organization sees each open, renewal, and close in its own [audit log](/docs/capabilities/governance#audit-events), and every change the administrator makes there names the access it was made under.
+
+The system routes above, organization standing, and spend need no operator access. They read the install, not the organization's data. A platform administrator who is also an active member of the organization acts as that member and needs no operator access; the membership's role applies, not the platform role.
+
+Operator access never becomes a membership. Under operator access an administrator cannot add themselves as a member or invite their own address, and cannot accept an invitation they sent themselves. Each returns `403` with `operator_access_self_membership`. To join an organization, ask one of its owners to invite you.
+
+| Method   | Route                                                       | SDK function                    | CLI command                                                        |
+| -------- | ----------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------ |
+| `GET`    | `/v1/system/organizations/{organizationId}/operator-access` | `getSystemOrganizationAccess`   | `deployments system access-show <organization-id>`                 |
+| `PUT`    | `/v1/system/organizations/{organizationId}/operator-access` | `openSystemOrganizationAccess`  | `deployments system access-open <organization-id> --reason <text>` |
+| `DELETE` | `/v1/system/organizations/{organizationId}/operator-access` | `closeSystemOrganizationAccess` | `deployments system access-close <organization-id>`                |
+| `GET`    | `/v1/system/operator-access`                                | `listSystemOperatorAccess`      | `deployments system access-list [--organization-id <id>]`          |
+
+Each route acts on the caller's own access. A machine service or observer cannot call them.
+
+- **Open.** The body has a required `reason` of at most 500 characters, an optional `ticket` of at most 200, and an optional `durationMinutes` from 1 to 480. Access lasts 60 minutes by default and at most 8 hours. Opening while access is already open renews it: it keeps its `grantId`, sets a new `expiresAt`, and returns `renewed: true`. A retried open converges on the same access. Opening after a close or an expiry starts new access with a new `grantId`.
+- **Close.** Ends the access at once. When none is open, it changes nothing and returns `changed: false`.
+- **Show.** Returns the organization's `id`, `name`, `slug`, and `status`, and the caller's latest `access` or `null`. Its `status` is `open`, `expired`, or `closed`. Only `open` admits the caller.
+- **List.** Returns every open, unexpired access in the installation, or in one organization with `organizationId`. It takes `cursor` and `limit` like the other lists. Closed and expired access is not listed; each organization's audit log holds that history.
+
+Operator access can be opened for an `active` or `disabled` organization, because support often happens while an organization is held. An `archived` organization returns `409` with `organization_archived`, and an unknown one `404` with `organization_not_found`.
+
+The organization's audit log gets `organization.operator-access-opened`, `organization.operator-access-renewed`, and `organization.operator-access-closed`, each with the administrator as the actor and the `grantId`, `reason`, `ticket`, and `expiresAt` in `changes`. Expiry writes no event; `expiresAt` already records when access ended. Organization audit events written while the administrator acts under the access carry the access's `grantId` in `actor.operatorAccessGrantId`.
+
+## Observer routes
+
+The observer routes let a machine reader in AWS, such as an operations account's monitoring, read the installation's status without a platform identity account. Each one is a `GET` that takes the same query parameters and returns the same body as the matching route in [Routes](#routes). They are not in the public OpenAPI document, the SDK, or the CLI.
+
+| Observer route                        | Same body as                 |
+| ------------------------------------- | ---------------------------- |
+| `/v1/system/observer/installation`    | `/v1/system/installation`    |
+| `/v1/system/observer/deployments`     | `/v1/system/deployments`     |
+| `/v1/system/observer/components`      | `/v1/system/components`      |
+| `/v1/system/observer/alarms`          | `/v1/system/alarms`          |
+| `/v1/system/observer/model-providers` | `/v1/system/model-providers` |
+
+No observer route lists organizations, because organization names are customer data.
+
+The lifecycle API admits an observer request only when all of these are true:
+
+- The request carries an AWS Signature Version 4 signature for the `execute-api` service in the installation's region. API Gateway checks it, because the observer routes use `AWS_IAM` authorization. API Gateway answers a `GET` to an observer route that has no valid signature with its own `403`, so the request never reaches the platform. That includes a request that carries only a platform administrator's access token.
+- The caller is an assumed-role session, `arn:<partition>:sts::<account>:assumed-role/<role-name>/<session>`. IAM users and the account root user never qualify.
+- The session's account is the installation's own account.
+- A role in the root's `system_observer_role_arns` list has the name `<role-name>`. The path in the listed ARN does not matter, so `arn:<partition>:iam::<account>:role/ops/platform-observer` admits sessions of `platform-observer`.
+
+The platform answers every other request under `/v1/system/observer/` that reaches it, such as a `POST` or a session of an unlisted role, with `403` and `system_observer_required`. An admitted session gets `404` with `route_not_found` for any other path or method. A request that API Gateway authorized with IAM reaches the other `/v1/system/` routes only through the service routes in [Organization standing](/docs/operate/organization-standing#routes), and only for a role in `system_service_principals`.
+
+`system_observer_role_arns` is empty by default. The observer routes still exist, and every request to them gets `403`. OpenTofu rejects an entry that is not an IAM role ARN in the installation's account. HTTP APIs have no resource policies, so a caller in another account first assumes a role in the installation's account. The customer bootstrap creates that role, `platform-observer` by default, when you set `observer_principal_arn`. Its trust policy admits only that principal, requires `sts:ExternalId` when the bootstrap's `external_id` is set, and the role may call only `GET /v1/system/observer/*`.
+
+With credentials for an assumed `platform-observer` session in the environment, curl signs an observer request like this:
+
+```bash
+curl --aws-sigv4 "aws:amz:$AWS_REGION:execute-api" \
+  --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
+  -H "x-amz-security-token: $AWS_SESSION_TOKEN" \
+  "$DEPLOYMENTS_API_URL/v1/system/observer/alarms?state=ALARM"
+```
+
+## Configuration from OpenTofu
+
+The components, alarms, and model providers routes need operator configuration. OpenTofu writes it as JSON to an SSM SecureString parameter and gives the lifecycle API function the parameter's ARN. The configuration lists the ECS services, the alarm name prefix, the provider key references, and the observability locations. The installation, deployments, organizations, and organization standing routes work without it.
+
+The function reads the parameter on the first operator request of each cold start. When no parameter is configured, those three routes return `503` with `system_operator_unconfigured`. When the document does not decode, they return `503` with `system_operator_misconfigured` until the next cold start. When the read fails, they return the same code and read the parameter again on the next request. A configuration problem never affects the other API routes.
+
+## People
+
+Platform administrators find a person and act on their sign-in through these routes. A person belongs to the installation, not to one organization, so the routes need no organization scope. Machine services under `/v1/system/services` and observer sessions cannot call them.
+
+| Method | Route                                                    | SDK function                        | CLI command                                                                                    |
+| ------ | -------------------------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `GET`  | `/v1/system/principals?email=`                           | `findSystemPrincipal`               | `deployments system people find --email <email>`                                               |
+| `GET`  | `/v1/system/principals/{principalId}`                    | `getSystemPrincipal`                | `deployments system people show <principal-id>`                                                |
+| `GET`  | `/v1/system/principals/{principalId}/security-events`    | `listSystemPrincipalSecurityEvents` | `deployments system people events <principal-id>`                                              |
+| `POST` | `/v1/system/principals/{principalId}/sessions/revoke`    | `revokeSystemPrincipalSessions`     | `deployments system people revoke-sessions <principal-id> --reason <text>`                     |
+| `POST` | `/v1/system/principals/{principalId}/verification-email` | `resendSystemPrincipalVerification` | `deployments system people resend-verification <principal-id> --email <email> --reason <text>` |
+
+**Find.** `email` must match the person's whole primary address. Case does not matter, and there is no prefix search. The response is `{ "kind": "person", "person": {...} }` for an account, or `{ "kind": "sign-up", "signUp": {...} }` for a sign-up that still waits for its email to be verified. A sign-up has the principal ID the account gets on verification, its email, when it was created, when the last verification email went out, and when it expires. When nobody holds the address, the route answers `404 principal_not_found`.
+
+**Show.** The response has the person's `id`, `kind`, `status`, `platformRole`, `primaryEmail`, `displayName`, `createdAt`, and `updatedAt`, plus:
+
+- `organizations`: the person's memberships, with each organization's `name`, `slug`, and status, the person's `role`, the membership `status`, and `joinedAt`. It lists at most 100 memberships. `capped` is `true` when the person has more.
+- `signIn`: `emailVerifiedAt`, the multi-factor state (`none`, `pending`, `active` with `recoveryCodesRemaining`, or `disabled`), and the number of `browser` sessions and `refreshTokenFamilies` that are still valid. Each count reads at most 100. `capped` is `true` when either count reached it. No secret, code, or token is returned. `signIn` is `null` in an installation without platform identity.
+
+**Security events.** Events come newest first, with a `cursor` and a `limit` from 1 through 100 (50 by default). Each event has `id`, `eventType`, `occurredAt`, an `actor` (`null` for the platform itself), and `details`. `details` holds only these payload fields: `clientId`, `generation`, `platformRole`, `reason`, `retriedGeneration`, and `status`. `withheldFields` names every other payload field, and their values are never returned. Withheld fields include token and code hashes, hashed address prefixes, and federation issuers and subjects, which could identify an account elsewhere.
+
+**End sessions.** The body is `{ "reason": "..." }`, 1 to 500 characters. Platform identity advances the person's session epoch. Their refresh tokens, device grants, browser and console sessions, and app sessions end at once. An access token already issued to them keeps working until it expires, within 10 minutes, because the API does not check the session epoch on each request. The person stays active and can sign in again. Each call records `identity.sessions-invalidated` with the administrator as the actor and the reason. A repeat call is safe: it advances the epoch again and records another event, so the response has no `changed` field. It returns `principalId` and `sessionsEndedAt`. An administrator may end their own sessions, which signs them out.
+
+**Resend verification.** Platform identity creates an account only when its email is verified, so this route applies to a pending sign-up. Pass the sign-up's principal ID from **Find**, and put its `email` and a `reason` in the body. The new email goes through the identity email outbox like every other identity email. It extends the sign-up, and its link replaces the earlier ones. The self-service limits apply: one email a minute, and three sign-up emails an hour for the address, counted together with the person's own sign-up attempts. A resend that exceeds either limit gets `429 verification_email_rate_limited`. Each resend records `identity.verification-email-reissued` with the actor and reason.
+
+Platform identity performs every read and write of sign-in state for these routes. The API does not read or write the identity table. It invokes the same principal function that changes a person's status, as [Remove access](/docs/operate/users#remove-access) describes. In an installation without platform identity, the sign-in actions answer `409 principal_status_unmanaged`.
+
+## Errors
+
+Errors use the problem details format and carry the request ID in `x-request-id`. [Errors](/docs/api/errors) describes the body.
+
+| Status | Code                                                            | When                                                                           |
+| ------ | --------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `400`  | `invalid_limit`, `invalid_cursor`, `invalid_state`              | A query parameter is out of range                                              |
+| `400`  | `invalid_organizationId`                                        | The organization ID in the path is not a valid ID                              |
+| `400`  | `invalid_json`                                                  | The request body is not valid JSON                                             |
+| `400`  | `invalid_email`                                                 | The `email` query is missing or is not an email address                        |
+| `401`  | `unauthorized`                                                  | No valid bearer credential                                                     |
+| `403`  | `platform_administrator_required`                               | The caller is not a platform administrator, or used an API key                 |
+| `403`  | `operator_access_required`                                      | A tenant route, without open operator access to the organization               |
+| `403`  | `operator_access_self_membership`                               | An administrator under operator access tried to make themselves a member       |
+| `403`  | `system_observer_required`                                      | An observer route without an admitted IAM session                              |
+| `404`  | `installation_not_recorded`                                     | No verified deployment has been recorded yet                                   |
+| `404`  | `organization_not_found`                                        | A standing change or operator access named an organization that does not exist |
+| `404`  | `principal_not_found`, `sign_up_not_found`                      | No person, or no unexpired sign-up, has that email or ID                       |
+| `409`  | `organization_archived`                                         | Operator access to an archived organization                                    |
+| `409`  | `version_conflict`                                              | The organization's standing kept changing concurrently. Retry                  |
+| `409`  | `email_already_verified`, `verification_not_pending`            | The person has an account, so no sign-up waits on an email                     |
+| `409`  | `registration_disabled`                                         | Registration is off, so a verification link would not work                     |
+| `409`  | `principal_status_unmanaged`                                    | The installation does not run platform identity                                |
+| `429`  | `verification_email_rate_limited`                               | A resend exceeded the self-service limits                                      |
+| `500`  | `internal_error`                                                | An unexpected failure                                                          |
+| `503`  | `system_operator_unconfigured`, `system_operator_misconfigured` | The operator configuration is missing or invalid                               |
+
+## The console System page
+
+The console shows a **System** item in the organization sidebar only to callers who may read the installation. The page shows the target, profile, AWS account and region, source commit, release manifest digest, deploy time and deployer, and the public endpoints. Before the first recorded deployment, it says that no deployment has been recorded yet.
+
+An organization's System page has an **Operator access** panel to open, renew, and close your access. Its standing and spend show without access. Its members and the **Open the organization** link appear only while your access is open. The **Operator access** page lists every open access in the installation. [Management console](/docs/getting-started/console) describes signing in.
+
+**System > People** finds a person by their whole email address, or opens a pasted principal ID. A person's page shows their organizations, which link to each organization's System page, their multi-factor state, their session counts, and their security events. From the page, an administrator can disable or enable the person or end their sessions. A pending sign-up found by email offers **Resend verification**. Every action asks for a reason. Disabling and ending sessions also ask for a typed confirmation.
+
+## Use it
+
+1. Sign in with your platform identity account. The system routes reject API keys, so do not pass `--api-key` or set `DEPLOYMENTS_API_KEY` for these commands.
+
+   ```bash
+   deployments auth login
+   ```
+
+2. Show the deployed release and its endpoints.
+
+   ```bash
+   deployments system installation
+   ```
+
+3. Check component health as JSON.
+
+   ```bash
+   deployments system components --json
+   ```
+
+4. List the alarms that are firing.
+
+   ```bash
+   deployments system alarms --state ALARM
+   ```
+
+5. Read an organization's standing and effective limits, then raise its concurrent runs with an operator grant. Set `ORGANIZATION_ID` from `deployments system organizations`.
+
+   ```bash
+   deployments system standing $ORGANIZATION_ID
+   deployments system set-entitlements $ORGANIZATION_ID --tenant-limits '{"concurrentRuns":32}'
+   ```
+
+6. Remove the operator grant so the organization falls back to the service grant and the defaults. `clear-entitlements` asks for confirmation. Pass `--yes` in scripts or with `--json`.
+
+   ```bash
+   deployments system clear-entitlements $ORGANIZATION_ID
+   ```
+
+7. Open operator access for a support case, work in the organization, then close it.
+
+   ```bash
+   deployments system access-open $ORGANIZATION_ID --reason "Customer asked for help" --ticket SUP-1234 --duration-minutes 30
+   deployments org show $ORGANIZATION_ID --org $ORGANIZATION_ID
+   deployments system access-close $ORGANIZATION_ID
+   ```
+
+A `403` makes the CLI exit with code `4`. Set `DEPLOYMENTS_API_URL` or pass `--api-url` to point the CLI at your installation's API host.
+
+The same alarm query with the SDK:
+
+```ts
+import { createClient, createConfig, listSystemAlarms } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_TENANT_JWT}` },
+  }),
+);
+
+const { data, error } = await listSystemAlarms({ client, query: { state: "ALARM" } });
+```
+
+And over HTTP:
+
+```bash
+curl -H "authorization: Bearer $DEPLOYMENTS_TENANT_JWT" \
+  "$DEPLOYMENTS_API_URL/v1/system/alarms?state=ALARM&limit=20"
+```
+
+## Reference
+
+- API: [Get the installation](/docs/api/reference/system/get-system-installation), [List deployments](/docs/api/reference/system/list-system-deployments), [Get components](/docs/api/reference/system/get-system-components), [List alarms](/docs/api/reference/system/list-system-alarms), [List model providers](/docs/api/reference/system/list-system-model-providers), [List organizations](/docs/api/reference/system/list-system-organizations), [Get organization standing](/docs/api/reference/system/get-system-organization-standing), [Replace entitlements](/docs/api/reference/system/replace-system-organization-entitlements), [Clear entitlements](/docs/api/reference/system/clear-system-organization-entitlements), [Get operator access](/docs/api/reference/system/get-system-organization-access), [Open operator access](/docs/api/reference/system/open-system-organization-access), [Close operator access](/docs/api/reference/system/close-system-organization-access), [List operator access](/docs/api/reference/system/list-system-operator-access), [Find a person](/docs/api/reference/system/find-system-principal), [Get a person](/docs/api/reference/system/get-system-principal), [List security events](/docs/api/reference/system/list-system-principal-security-events), [End sessions](/docs/api/reference/system/revoke-system-principal-sessions), [Resend verification](/docs/api/reference/system/resend-system-principal-verification)
+- CLI: [`deployments system`](/docs/cli/reference/system)
+- SDK: [System functions](/docs/sdk/reference#system)

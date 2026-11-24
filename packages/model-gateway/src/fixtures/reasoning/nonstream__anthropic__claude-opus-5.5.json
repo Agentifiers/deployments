@@ -1,0 +1,59 @@
+{
+  "id": "gen-1791811521-hpewQeMZrS02u4nHsMdE",
+  "object": "chat.completion",
+  "created": 1791811521,
+  "model": "anthropic/claude-opus-5.5",
+  "provider": "Claude Platform on AWS",
+  "system_fingerprint": null,
+  "service_tier": "default",
+  "choices": [
+    {
+      "index": 0,
+      "logprobs": null,
+      "finish_reason": "tool_calls",
+      "native_finish_reason": "tool_use",
+      "message": {
+        "role": "assistant",
+        "content": "Task 1: Canberra has the longest name, with 8 letters (Berlin and Ottawa have 6, and Tokyo has 5).",
+        "refusal": null,
+        "reasoning": "Comparing city name lengths for task 1, Canberra is longest so I'll fetch its weather. For task 2, checking latitudes to find the northernmost city—Reykjavik wins at roughly 64°N. Since the user wants these done sequentially, I'll handle task 1 first, then move to task 2.",
+        "tool_calls": [
+          {
+            "type": "function",
+            "index": 0,
+            "id": "toolu_01SEU3QfuZGkjiojawyoQmZW",
+            "function": { "name": "get_weather", "arguments": "{\"city\": \"Canberra\"}" }
+          }
+        ],
+        "reasoning_details": [
+          {
+            "type": "reasoning.text",
+            "text": "Comparing city name lengths for task 1, Canberra is longest so I'll fetch its weather. For task 2, checking latitudes to find the northernmost city—Reykjavik wins at roughly 64°N. Since the user wants these done sequentially, I'll handle task 1 first, then move to task 2.",
+            "format": "anthropic-claude-v1",
+            "index": 0,
+            "signature": "CAQS8QYKEAgSGAI4AUIIdGhpbmtpbmcSDKOrtLFWY9//ygybExoMS+kLA1/RTTodU2PGIjDEMqX0j4gdnIqd8Ey7pOdsICw8Fzo/qdZM5Jxzxm6f/jY+m0/BIQrd+6G0RiU0l3sqjgbWKi04+BWCl0zz4o/ezHsI8bp8M+V96qAUOvVyCj0JHJl2+Eyk58w7RKh5oGDiGH/kBZchC6TVQ+SJOt2XWvzRK6lWgEBC3qV8ala75tKD4LQEEOiWbW83V6y23DaXzt6zO6pWoQZbjMyxc1beiDI7E6ISFkAVjpMQtnvyTrXUFno6dnxhu2dMvYJ2GqEb6K3/14oa068j47ZubWdXKt24KPHPId5En1Q0l2BEByjOshDf9VOOT9Cus8+auO0kRU1ikjYMS+yxhinHQgzDDvvBm59OLhrlq+WXao490RK+bLcViqtsfDj7Fiu83G+nDaRhot0ofWDLfncPBx3Z5ACLte32yWPQ3iKtBHWZ4nC3hZ7I3FqrapVOndf6rU2sidYaqVJUL5ZswDE0IJf1+838c6xKx7Az3hbs4+PuA42WHbaBxIlL60z7iOTwdEns260m3W+8d2g1rHlunZQtlxSIYOc2Gv7vOXFlowB5pR1s+Md3ZYfqAjYO3gBit9K6y1DAvq8Q7JqGKxzjZ7Uw3C+QwNVQUoizY+AlEMH99bUA1cQe3Swn8OOj/zLItFqOl+W8hkwIg1j6D9BleH56phLD05RrVQW0WuHdGmSsYBuPPoeJpA9flN0qDCPMY9J2SEvcA18xr5cgufb6z70vDrIvOAJmmvLafLbCh04Hwr7Ov5fVONERMZIlXNkoWMDhIawwtJdMu6JvEKLMdl6roNvug5wJqruo3ENeA6MWdR34szrW2jWKYmVFz+udaShHflnjMyYtlqT2JZMCVMsv74LzVhJsEjw2rZJ1O54B+Hu6Q8J20lM0gPYbecJVVcEn4lq7jvnNT12LE2Pa9RfKPjtaFfUfXg+p20psMDG35g93GqM2xXlTlNVmthEvWUM7axwo7X2/LibWEUrGJZV+sRSLhHDnRHciEyDsdPdGRbI9eku+N/D4GUZGjb41wr7/uU7pTYTYYtqoamObacd0pjtV4iZFvaUTOG1/sib1RLLc6znjWZMTU9HWxBoUWd/qbDH8Naq9oyLFtRFRTmNIzxgB.eyJlbmRwb2ludF9zbHVnIjoiYW50aHJvcGljL2NsYXVkZS1vcHVzLTUuNS0yMDI2MDkyMXxjbGF1ZGUtb24tYXdzIn0"
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 546,
+    "completion_tokens": 241,
+    "total_tokens": 787,
+    "cost": 0.007004,
+    "is_byok": false,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0,
+      "audio_tokens": 0,
+      "video_tokens": 0
+    },
+    "cost_details": {
+      "upstream_inference_cost": 0.007004,
+      "upstream_inference_prompt_cost": 0.002184,
+      "upstream_inference_completions_cost": 0.00482
+    },
+    "completion_tokens_details": { "reasoning_tokens": 143, "image_tokens": 0, "audio_tokens": 0 }
+  }
+}

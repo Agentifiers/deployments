@@ -1,0 +1,167 @@
+---
+title: "Agents, releases, and deployments"
+description: "Define an agent, publish immutable releases, deploy them to an environment, and change traffic with rollbacks, canaries, and cross-environment promotion."
+---
+
+An agent moves through three resources. You edit a mutable **agent definition**, publish it as an immutable **agent release**, and run that release in an environment through an **agent deployment**. Use these resources whenever you ship an agent. Every run of a deployed agent is pinned to one deployment and one release.
+
+## Three resources, three jobs
+
+| Resource         | Mutable                       | Holds                                                                                                                                    | Status values                                                                                                        |
+| ---------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Agent definition | Yes                           | A draft [agent manifest](/docs/capabilities/agent-manifests). Its `slug` is the manifest's `metadata.key`.                               | `active`, `archived`                                                                                                 |
+| Agent release    | No                            | One validated manifest, a `contentHash` (`sha256:` of the canonical manifest JSON), and a `releaseNumber` that counts up per definition. | `active`, `archived`                                                                                                 |
+| Agent deployment | Yes, through lifecycle routes | The primary `agentReleaseId`, an optional canary candidate, and an optional runtime configuration.                                       | `desiredState`: `running`, `paused`, `stopped`. `currentState`: `ready`, `paused`, `stopped`, `deploying`, `failed`. |
+
+A release keeps behavior. A deployment keeps environment wiring. The release manifest declares which tools and sub-agents the agent needs, and the deployment's runtime configuration binds them to concrete authorizations and deployments in that environment. A release manifest never contains environment IDs, so you can publish once and promote the same release to other environments.
+
+Every agent route is scoped to one environment. Send `x-deployments-environment` on every request, or let the CLI send it from your saved context. Reads need the `agents:read` scope and writes need `agents:write`.
+
+## Publish and deploy
+
+1. **Create a definition.** The platform validates the manifest on create and on every update. A definition `slug` must be unique in the environment, or in its workspace for a [workspace definition](#definitions-in-a-workspace). A second definition with the same `metadata.key` in the same place fails with `resource_conflict`.
+2. **Publish a release.** Publishing validates the draft again, checks that the environment admits every model the manifest names (see [Models and model policies](/docs/capabilities/models)), and stores a numbered, immutable copy. Publishing also increments the definition's `version`.
+3. **Deploy the release.** The platform validates the runtime configuration against the release, resolves sub-agent bindings, and admits the models again. A new deployment defaults to `desiredState: running` and `currentState: ready`. Pass `desiredState: paused` to create it paused.
+
+You can pause and resume a deployment, change its runtime configuration, or stop it. Stopping is final. A stopped deployment rejects further updates with `deployment_stopped`.
+
+Archiving has guards in both directions:
+
+- You cannot archive a release while an active deployment pins it (`release_in_use`).
+- You cannot deploy or retarget to an archived release (`release_archived`).
+- An archived definition can no longer be updated or published (`definition_archived`).
+
+### Definitions in a workspace
+
+Pass `workspaceId` when you create a definition to give it to one [workspace](/docs/capabilities/tenancy) in the environment. The workspace must exist in the environment (`404 resource_not_found`) and be active (`409 workspace_unavailable`). If the workspace is archived while the create runs, the create fails with `resource_conflict` and stores nothing. Every response for the definition includes its `workspaceId`. A definition without one belongs to the whole environment.
+
+- A slug is unique within its workspace. Two workspaces can each hold a definition with the same `metadata.key`, and so can a workspace and the environment.
+- You set the workspace only on create. Updates and archiving keep it, and an update body that names `workspaceId` fails validation.
+- Lists and reads return every definition in the environment, whatever its workspace. Read `workspaceId` to tell them apart.
+- A release of a workspace definition cannot be promoted to another environment (`workspace_scoped_definition`).
+
+### Versions and idempotency
+
+Every lifecycle change to an existing definition, release, or deployment is optimistic. Send the resource's current `version` as `expectedVersion` (publishing uses `expectedDefinitionVersion`). Each successful change increments `version` by one, and a stale value fails with `version_conflict`. Every agent mutation also requires an `Idempotency-Key` header. The CLI generates one per command. See [Idempotency](/docs/api/idempotency).
+
+## How runs choose a release
+
+Every run records the release it was admitted with in `agentReleaseId` and the reason in `releaseSelection` (`primary` or `candidate`). The worker always executes the run's own release. Retargeting a deployment, or promoting or aborting a canary, never changes a run that is already queued, running, or paused for approval.
+
+## Retarget and roll back
+
+`PATCH /v1/agent-deployments/{id}` with `agentReleaseId` moves a deployment to another active release of the same definition. A release of another definition fails with `definition_mismatch`. A rollback is a retarget to an older release. The resulting runtime configuration must still satisfy the target manifest, and the target release's models are admitted against the environment's model policy.
+
+Retargeting emits one `agent-deployment.updated` event that carries `previousAgentReleaseId`. You can retarget a paused deployment and resume it later. While a canary is active, retargeting fails with `canary_active`. Promote or abort the canary first.
+
+## Canary a new release
+
+A canary sends a share of new threads to a candidate release while the rest stay on the primary release.
+
+- Start one with `candidateAgentReleaseId` and an integer `weight` from 1 to 99, the percentage of threads routed to the candidate.
+- The candidate must differ from the primary (`candidate_same_as_primary`) and belong to the same definition. The deployment's runtime configuration must satisfy both manifests.
+- A deployment runs one canary at a time. Starting a second fails with `canary_already_active`.
+- Promoting or aborting without a canary fails with `canary_not_active`.
+
+The platform assigns a thread to a release when a turn is submitted, for every trigger. The assignment is deterministic per deployment and thread. The platform reads the first four bytes of `sha256("canary-v1|<deploymentId>|<threadId>")` as an unsigned integer and selects the candidate when that value modulo 100 is below the weight. The chosen release is saved on the thread as `pinnedAgentReleaseId`, so later turns stay on it while it remains the primary or the candidate release. To drop the pin and select again, submit the run with `rebaseRelease: true` (`--rebase-release` in the CLI).
+
+| Action                                           | Effect                                                                                         |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| `POST /v1/agent-deployments/{id}/canary/promote` | The candidate becomes the primary release. Threads pinned to it keep using it.                 |
+| `POST /v1/agent-deployments/{id}/canary/abort`   | The candidate is cleared. Threads pinned to it move to the primary release on their next turn. |
+| `DELETE /v1/agent-deployments/{id}`              | Stopping the deployment also ends its canary.                                                  |
+
+To compare the two releases, filter runs by release with `deployments run list --release <release-id>` or `POST /v1/runs/search` with `agentReleaseId`, and check `releaseSelection` on each run.
+
+## Promote a release to another environment
+
+`POST /v1/agent-releases/{id}/promote` with `targetEnvironmentId` copies an active release into another environment of the same organization and project.
+
+- The target definition is matched by slug. If none exists, the platform creates one from the release manifest. An existing target definition keeps its draft.
+- The promoted release has the identical manifest and `contentHash`, a new ID, and a release number local to the target definition.
+- Promotion is idempotent per target definition and content hash. It answers `201` when it creates the release and `200` with the existing release otherwise.
+- The target environment admits the release's models and client tools as if you had published it there.
+- Promotion never creates a deployment and never copies runtime configuration or credentials. Configure those in the target environment, then deploy the promoted release.
+
+| Error                                                       | Cause                                                                                                                              |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `same_environment_promotion`                                | The target is the source environment.                                                                                              |
+| `cross_project_promotion`                                   | The target belongs to another project.                                                                                             |
+| `source_release_archived`                                   | The source release is archived.                                                                                                    |
+| `workspace_scoped_definition`                               | Workspace-scoped definitions cannot be promoted.                                                                                   |
+| `target_definition_archived`                                | The matching definition in the target environment is archived.                                                                     |
+| `hosted_code_tool_unavailable`, `hosted_code_tool_mismatch` | A pinned [hosted code tool](/docs/capabilities/extensions-and-hosted-code) is missing in the target, or its artifact hash differs. |
+| `environment_scope_violation` (403)                         | The credential cannot reach the target environment.                                                                                |
+
+<Callout type="warn" title="Availability">
+  Promotion needs a credential that can reach both environments. An API key is bound to one
+  environment, so it always fails with `environment_scope_violation`. Promote with a user sign-in,
+  for example `deployments auth login`, that has `agents:write` in both environments.
+</Callout>
+
+## Use it
+
+1. Create a definition from a manifest file. The CLI takes the manifest as inline JSON.
+
+   ```bash
+   deployments agent create --manifest "$(cat agent.json)"
+   ```
+
+2. Publish the draft. A new definition has `version` 0.
+
+   ```bash
+   deployments agent release $AGENT_DEFINITION_ID --expected-version 0
+   ```
+
+3. Deploy the release.
+
+   ```bash
+   deployments agent deploy --release $AGENT_RELEASE_ID
+   ```
+
+4. After you publish a second release, send 10 percent of new threads to it. A new deployment has `version` 0.
+
+   ```bash
+   deployments deployment canary-start $AGENT_DEPLOYMENT_ID --release $CANDIDATE_RELEASE_ID --weight 10 --expected-version 0
+   ```
+
+5. Promote the candidate, or roll back to an earlier release later.
+
+   ```bash
+   deployments deployment canary-promote $AGENT_DEPLOYMENT_ID --expected-version 1
+   deployments deployment rollback $AGENT_DEPLOYMENT_ID --to $AGENT_RELEASE_ID --expected-version 2
+   ```
+
+6. Copy a release to another environment of the same project.
+
+   ```bash
+   deployments release promote $AGENT_RELEASE_ID --target-environment env_456
+   ```
+
+The same deploy step through the SDK:
+
+```ts
+import { createClient, createConfig, createAgentDeployment } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data, error } = await createAgentDeployment({
+  client,
+  headers: {
+    "x-deployments-environment": "env_123",
+    "idempotency-key": crypto.randomUUID(),
+  },
+  body: { agentReleaseId: process.env.AGENT_RELEASE_ID! },
+});
+```
+
+## Reference
+
+- API: [create definition](/docs/api/reference/agents/create-agent-definition), [publish release](/docs/api/reference/agents/publish-agent-release), [create deployment](/docs/api/reference/agents/create-agent-deployment), [update deployment](/docs/api/reference/agents/update-agent-deployment), [start canary](/docs/api/reference/agents/start-agent-deployment-canary), [promote canary](/docs/api/reference/agents/promote-agent-deployment-canary), [abort canary](/docs/api/reference/agents/abort-agent-deployment-canary), [promote release](/docs/api/reference/agents/promote-agent-release)
+- CLI: [`deployments agent`](/docs/cli/reference/agent), [`deployments release`](/docs/cli/reference/release), [`deployments deployment`](/docs/cli/reference/deployment)
+- SDK: [Agents functions](/docs/sdk/reference#agents)

@@ -1,0 +1,98 @@
+name: Deploy platform
+description: >-
+  Deploy a platform release bundle into the AWS account named by a deployment target file
+  (see apps/docs/content/docs/operate/deployment.mdx in the action repository). Runs the deploy
+  tool from this action's own repository, either as a remote action pinned to a full commit SHA or
+  as a local action from a checkout of that repository (for example a git submodule), and never
+  checks out code with the caller token. It installs a pinned crane to copy the release images into
+  the target account's ECR, so it needs no Docker daemon. Caller prerequisites: a Linux runner, AWS
+  credentials for the target account in the standard SDK/CLI environment, and the optional secret
+  environment contract (DEPLOYMENTS_AI_MODEL_GRANTS_JSON, DEPLOYMENTS_AI_OPENAI_API_KEY,
+  DEPLOYMENTS_AI_OPENROUTER_API_KEY) set on this step.
+inputs:
+  target:
+    description: Path to the deployment target JSON file.
+    required: true
+  bundle:
+    description: Path to the release bundle directory (release.json, Lambda archives, image archives).
+    required: false
+    default: .artifacts/deployment
+  result:
+    description: Optional path for the deployment result JSON (name, sourceCommit, images, endpoint).
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Resolve the deploy tool's commit
+      id: source
+      shell: bash
+      env:
+        PLATFORM_ACTION_PATH: ${{ github.action_path }}
+        PLATFORM_ACTION_REF: ${{ github.action_ref }}
+      # A checkout (including a submodule, whose .git is a file) names its own HEAD. A remote action
+      # is downloaded without .git, so the pairing guard needs the commit from its ref.
+      run: |
+        set -euo pipefail
+        root="$(cd "${PLATFORM_ACTION_PATH}/../../.." && pwd -P)"
+        if toplevel="$(git -C "${root}" rev-parse --show-toplevel 2>/dev/null)" \
+          && [[ "$(cd "${toplevel}" && pwd -P)" == "${root}" ]]; then
+          echo "commit=$(git -C "${root}" rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+        if [[ ! "${PLATFORM_ACTION_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "Agentifiers/deployments/.github/actions/deploy-platform@${PLATFORM_ACTION_REF} has no git checkout to name its commit. Pin the action to Agentifiers/deployments/.github/actions/deploy-platform@<40-hex>, the full commit SHA of the release, instead of a tag or branch." >&2
+          exit 1
+        fi
+        echo "commit=${PLATFORM_ACTION_REF}" >> "${GITHUB_OUTPUT}"
+    # The pins live in this repository's package.json and .opentofu-version, beside this action.
+    - name: Set up Bun
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      with:
+        bun-version-file: ${{ github.action_path }}/../../../package.json
+        no-cache: true
+    - name: Set up OpenTofu
+      uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+      with:
+        tofu_version_file: ${{ github.action_path }}/../../../.opentofu-version
+        tofu_wrapper: false
+    - name: Set up crane
+      shell: bash
+      # Checksums from checksums.txt of the go-containerregistry v0.22.1 release.
+      run: |
+        set -euo pipefail
+        if [[ "${RUNNER_OS}" != "Linux" ]]; then
+          echo "The deploy action installs crane for Linux runners only." >&2
+          exit 1
+        fi
+        case "$(uname -m)" in
+          x86_64) arch=x86_64 sha256=0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0 ;;
+          aarch64) arch=arm64 sha256=898c0cff975f898a33e8c4580bdafb0e7c02c7faa33374e946762f97c4ab7110 ;;
+          *) echo "Unsupported runner architecture $(uname -m)." >&2; exit 1 ;;
+        esac
+        directory="${RUNNER_TEMP}/crane"
+        mkdir -p "${directory}"
+        curl -fsSLo "${directory}/crane.tar.gz" "https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_${arch}.tar.gz"
+        echo "${sha256}  ${directory}/crane.tar.gz" | sha256sum -c -
+        tar -xzf "${directory}/crane.tar.gz" -C "${directory}" crane
+    - name: Install deploy tool dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../..
+      # Like the deployer image: a remote action has no git checkout for the hooks:install lifecycle script.
+      run: bun install --frozen-lockfile --ignore-scripts
+    - name: Deploy from the action repository
+      shell: bash
+      env:
+        PLATFORM_ACTION_PATH: ${{ github.action_path }}
+        PLATFORM_BUNDLE: ${{ inputs.bundle }}
+        PLATFORM_RESULT: ${{ inputs.result }}
+        PLATFORM_SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+        PLATFORM_TARGET: ${{ inputs.target }}
+      run: |
+        set -euo pipefail
+        export PATH="${RUNNER_TEMP}/crane:${PATH}"
+        arguments=(deploy --target "${PLATFORM_TARGET}" --bundle "${PLATFORM_BUNDLE}")
+        if [[ -n "${PLATFORM_RESULT}" ]]; then
+          arguments+=(--result "${PLATFORM_RESULT}")
+        fi
+        exec bun "${PLATFORM_ACTION_PATH}/../../../scripts/deploy-platform.ts" "${arguments[@]}"

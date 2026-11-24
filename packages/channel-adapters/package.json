@@ -1,0 +1,26 @@
+{
+  "name": "@deployments-ai/channel-adapters",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./aws-rcs": "./src/providers/aws-rcs/index.ts",
+    "./registry": "./src/registry.ts",
+    "./shared": "./src/shared/core.ts",
+    "./slack": "./src/providers/slack/index.ts",
+    "./teams": "./src/providers/teams/index.ts",
+    "./telegram": "./src/providers/telegram/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-pinpoint-sms-voice-v2": "3.1090.0",
+    "@deployments-ai/api-contract": "workspace:*",
+    "@deployments-ai/net-security": "workspace:*",
+    "jose": "6.2.4"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/ingress-media",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/ingress-media.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../agent-manifest" }, { "path": "../db" }, { "path": "../file-text" }]
+}

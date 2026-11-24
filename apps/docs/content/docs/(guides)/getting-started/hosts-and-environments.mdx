@@ -1,0 +1,76 @@
+---
+title: "Hosts and environments"
+description: "The API, identity, stream, and console origins, and how environments isolate resources."
+---
+
+A platform install exposes a few public origins, each with one job. This page lists them and explains how platform environments keep work apart. Platform environments are a resource inside your organization. They are separate from the install you connect to.
+
+## Origins of an install
+
+Each install chooses its own hostnames when its operator deploys it. These docs use `example.com` placeholders for them; replace each one with your install's value.
+
+| Origin                         | What it serves                                                                                                          | OpenTofu variable                                              |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `https://api.example.com`      | The public API under `/v1`, the health check at `/health`, and the OpenAPI document at `/v1/openapi.json`.              | `platform_api_domain_name`                                     |
+| `https://auth.example.com`     | The identity service. Sign-in pages, the device approval page at `/device`, and the OAuth and OpenID Connect endpoints. | `platform_identity_domain_name`                                |
+| `https://streams.example.com`  | The stream gateway. Clients read live thread events here over Server-Sent Events or long polling.                       | `stream_gateway_domain_name`                                   |
+| `https://channels.example.com` | Channel webhooks from Slack, Teams, Telegram and RCS, and the OAuth redirect URI you register with a provider.          | `channel_provider_domain_name`, when set                       |
+| `https://app.example.com`      | The management console.                                                                                                 | `platform_identity_application_origin`, when the console is on |
+
+Agent inboxes receive mail at the install's `agent_email_domain`, written here as `agents.example.com`. See [Agent email](/docs/capabilities/agent-email).
+
+If you run the install, these are the values you deployed. See [Deploying the platform](/docs/operate/deployment). Otherwise, ask the install's operator for its API origin; it is the only one you configure. The CLI's built-in default API origin is `https://api.us.deployments.ai`. To use another install, pass `--api-url` once at sign-in, or set `DEPLOYMENTS_API_URL`:
+
+```sh
+export DEPLOYMENTS_API_URL=https://api.example.com
+deployments health
+```
+
+## How the origins work together
+
+You only configure the API origin. The other origins come to you from the API or the identity service.
+
+- **Sign-in.** `deployments auth login` starts the device flow through the API. The API returns a verification URL on the identity origin, which you open in a browser.
+- **Streaming.** To watch a thread, you ask the API for a stream session. The response contains an absolute `streamUrl` on the stream gateway and a short-lived access token. Use that URL as given. Do not build stream URLs from the API origin.
+- **Console.** The console signs you in through the identity service and calls the API on your behalf. See [Management console](/docs/getting-started/console).
+
+The SDK accepts an origin only, such as `https://api.example.com`, with no path. It rejects plain HTTP origins other than loopback addresses, URLs with embedded credentials, and redirects. [Streaming](/docs/capabilities/streaming) covers stream sessions.
+
+## Environments isolate credentials, deployments, and usage
+
+An environment is the boundary for anything that should not leak between, for example, development and production.
+
+| Belongs to exactly one environment                | Effect                                                                                      |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Service accounts and API keys                     | A key authenticates only in its own environment. A development key cannot reach production. |
+| Agent definitions, releases, and deployments      | A deployment serves traffic only in its environment.                                        |
+| Provider connections, credentials, and OAuth apps | You create them in an environment, and that environment's deployments use them.             |
+| Threads and runs                                  | Run history stays in the environment that ran it.                                           |
+
+A run's spend counts toward its environment, its project, and its organization, and you can set budgets at each level. See [Usage and budgets](/docs/capabilities/usage-and-budgets).
+
+Each environment has a `type`: `development`, `staging`, `production`, or `custom`. The type is a label, and the API applies no rules based on it. The console shows it as a badge next to the environment name. In a `production` environment, the console asks you to type a confirmation phrase before every change.
+
+## Move releases between environments
+
+Because a release is immutable, you move tested work forward by promoting the release, not by rebuilding it.
+
+```sh
+deployments release promote $AGENT_RELEASE_ID --target-environment $PRODUCTION_ENV_ID
+```
+
+Promotion copies the release into the target environment. The rules are strict:
+
+- The target must be a different environment in the same project.
+- The source release must be active.
+- Definitions scoped to a workspace cannot be promoted.
+
+After promotion, deploy the copied release in the target environment with its own credentials and tool authorizations.
+
+## Reference
+
+- [Organizations, projects, and environments](/docs/capabilities/tenancy)
+- [Promote an agent release](/docs/api/reference/agents/promote-agent-release)
+- [Check API health](/docs/api/reference/system/get-health)
+- [`deployments env`](/docs/cli/reference/env) and [`deployments release promote`](/docs/cli/reference/release#release-promote)
+- [Global CLI flags](/docs/cli/reference#global-flags)

@@ -1,0 +1,19 @@
+{
+  "name": "@deployments-ai/event-analytics-projector",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --target=node --format=esm --outfile=dist/index.mjs",
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-firehose": "3.1090.0",
+    "@deployments-ai/events": "workspace:*"
+  }
+}

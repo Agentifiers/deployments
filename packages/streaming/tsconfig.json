@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/streaming",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/streaming.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"]
+}

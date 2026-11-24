@@ -1,0 +1,450 @@
+---
+title: "Organization standing"
+description: "Holds and entitlement grants on one organization: who may place and release them, how a machine service authenticates with SigV4, how grants merge with install defaults, data boundaries, the month spend read and the exhausted event, dropping a held organization's memory index, and the routes, CLI commands, and errors."
+---
+
+An organization's standing is the set of holds on it and the entitlement grants that set its limits. A platform administrator and named machine services, such as a billing service, change standing through the system API. Each hold and grant belongs to the caller that wrote it, so a service can change only its own.
+
+## Who writes standing
+
+The platform derives each hold's and grant's source from the authenticated caller. A request body cannot name a source.
+
+| Caller                                                  | Source           | Route prefix          | Authentication                                                                                                   |
+| ------------------------------------------------------- | ---------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| A human platform administrator                          | `operator`       | `/v1/system`          | A platform identity access token, as in [System operator](/docs/operate/system-operator#who-can-call-the-routes) |
+| A machine service listed in `system_service_principals` | `service:<name>` | `/v1/system/services` | AWS Signature Version 4, checked by API Gateway                                                                  |
+
+A source changes only what it owns:
+
+- An organization is suspended while it has at least one hold. Holds are keyed by source and key, so `operator` and `service:billing` can each hold `payment-overdue` at once.
+- Only the source that placed a hold can release it. Releasing another source's hold fails with `409 standing_owned_by_another_source` and an `owner` field that names the source.
+- An organization has at most one operator grant and one service grant. Only the service that wrote the service grant can replace or clear it.
+
+Every change is idempotent. Placing a hold that exists, releasing one that does not, and writing a grant equal to the current one change nothing and return `changed: false`.
+
+## What a hold refuses
+
+While an organization has a hold, every API edge refuses its changes. That covers the platform API, the runtime API, the memory API, the agent email API, and SCIM directory sync, for platform access tokens, API keys, agent tokens, and directory tokens alike. A refused request gets `403 organization_suspended`, and its problem body lists each hold's `reason`, `customerMessage`, and `since`. SCIM answers with its own error schema instead, and the `detail` carries each hold's customer message. A refusal never shows the operator's note or who placed the hold.
+
+A suspended organization can still:
+
+- Read. Every `GET` answers, and so do the `POST` routes that only read, such as searches, exports, and access URLs.
+- Reduce access or activity. Revoke API keys, service accounts, credentials, connections, grants, and directory tokens. Remove members and invitations, and deprovision users through SCIM. Pause schedules and heartbeats. Cancel runs, workflow executions, and email drafts. Disable webhooks, stop deployments, and update or archive budgets.
+- Erase customer data through tenant, thread, and end-user erasure, except while an `abuse` hold preserves evidence.
+
+Each route that a suspended organization can still call says so in its API reference description. The route contract declares it with a `standing` flag. The platform never infers it from the path.
+
+Members see the same holds with `deployments org standing $ORGANIZATION_ID` or [`GET /v1/organizations/{id}/standing`](/docs/api/reference/tenancy/get-organization-standing). That route also returns the effective tenant limits and operator-funded model spend ceiling.
+
+Each API function caches an organization's standing for 5 seconds. A hold takes effect within 5 seconds, and so does a release. When a function cannot read standing, it admits the request on the last standing it read, or as active when it has read none. It also emits the `StandingUnavailable` metric in the `DeploymentsAi/OrganizationAdmission` namespace with a `Service` dimension. The system routes under `/v1/system` are never refused, so an administrator can always release a hold.
+
+## What a hold does to runs
+
+A hold's reason decides what happens to runs that are already admitted. A run counts as admitted once a worker has started it, including while it waits in the queue again after a checkpoint, a worker restart, a scheduled retry, or an approval. A `payment` hold drains admitted runs, so they run to the end. An `abuse`, `policy`, or `manual` hold stops them. When an organization has a stopping hold and a `payment` hold, the stopping hold wins.
+
+While an organization has any hold:
+
+- It starts no new run. That covers turns, previews, evaluations, retries, replays, schedules, heartbeats, channel messages, inbound email, and runs that an agent delegates. A refused API request gets `403 organization_suspended`.
+- A schedule or heartbeat records the fire as skipped with `skipReason` set to `organization-suspended`, and stays enabled. It fires again at its next time.
+- A channel message is dropped without a retry.
+- Inbound email to the organization's agents is dropped, as it is when a budget refuses the run.
+- A queued run that no worker has started yet fails when a worker picks it up, with error code `organization_suspended`, before it takes a concurrent run slot.
+
+Under a stopping hold, the worker's next claim renewal for a running run fails, and the worker cancels the run with error code `organization_suspended`. An admitted run that is back in the queue fails with `organization_suspended` when a worker picks it up. A worker renews each claim every 60 seconds with the default 3-minute claim timeout, so a stopping hold cancels a running run within about a minute. A run that finishes before its next renewal completes normally. If the worker cannot read standing after a refused renewal, it retries the read once. When that also fails, it stops executing without canceling, and the run fails with `organization_suspended` when a worker reclaims it after the claim timeout.
+
+Run admission reads standing with a strongly consistent read and no cache. When it cannot read standing, it refuses the run with the retryable `503 organization_standing_unavailable`, and schedules, channel messages, and inbound email retry. After the last hold is released, schedules, channels, and email start runs again at once, and API requests do within the 5-second cache. Nothing restarts on its own, so a member retries or resumes a canceled run.
+
+## What a hold does to apps and background work
+
+While an organization has any hold:
+
+- Its published agent apps answer members and anonymous visitors with `503` and `Retry-After: 300`. Pages show a neutral "App unavailable" page, and API calls get the `app_unavailable` error. Neither says why. The app gateway caches standing for 5 seconds, so a hold and a release each take effect within 5 seconds.
+- Brain sync and Brain index jobs, memory index jobs, and the daily governance retention run are skipped and left as they were. Each dispatcher sends them again on its next sweep, and they run once every hold is released. Governance exports and erasures keep running.
+- Workflow tool steps fail with `organization_suspended`. Outbound webhooks fail as `organization-suspended`, and agent email sends fail as `organization_suspended`, without retry.
+- New sandboxes get no slots.
+- The channel provider API refuses to create or rotate a stored credential, start an OAuth authorization, or refresh an OAuth connection, with `403 organization_suspended` and the same problem body as the other API edges. Deleting a credential and revoking an OAuth connection still work. These routes read standing with a strongly consistent read, so a hold and a release take effect at once. When the read fails, the request fails and changes nothing. An OAuth callback for an authorization that began before the hold still completes.
+
+These workers read standing with a strongly consistent read. When the read fails, the job fails and its queue or dispatcher retries it.
+
+Every Lambda event source mapping, EventBridge target, and schedule under `infrastructure/modules` has a standing decision in `packages/organization-admission/src/background-coverage.test.ts`. The test fails when a new trigger has none.
+
+## What a hold does to model tokens
+
+The token issuers decide each model token by what the token is for:
+
+- A token whose models are all embedding models (`model_token_embedding_models`) is minted under any hold. Embeddings are operator-funded infrastructure. Memory search and Brain search depend on them, and a suspended organization can still call both.
+- A run token follows the run. A running run keeps minting under a `payment` hold until it finishes. A stopping hold refuses it with `organization_suspended`.
+- The agent worker requests service tokens for a running run's Brain queries, and each one carries the worker's claim on the run. The issuer checks that claim against the thread execution lease and the run record, as it does for a run token, and then follows the run's standing. When the claim no longer holds the lease, or the run is no longer running, the issuer refuses the token with `lease_inactive`.
+- Every other service token whose context names the organization is refused under any hold with `organization_suspended`. That covers memory flushes, which start after the run completes, and Brain answers through the API.
+
+The issuers read standing with a strongly consistent read. When the read fails, the invocation fails and no token is minted.
+
+## Data boundaries
+
+A data boundary limits where an organization's data can go. The only profile is `phi`, for organizations whose data includes protected health information. Under `phi`, agent tools reach the public internet only at destinations the organization allowlists or a person approves, and model calls stay on Bedrock. An organization without a boundary is unaffected.
+
+Only a platform administrator sets or clears a boundary, with a note such as the agreement reference. A machine service is refused. Each change writes one history entry and one semantic event. Members never see the note.
+
+```bash
+deployments system set-data-boundary $ORGANIZATION_ID --profile phi --operator-note "BAA 2026-17"
+deployments system clear-data-boundary $ORGANIZATION_ID --operator-note "BAA ended"
+```
+
+| Method   | Route                                                     | SDK function                          | Body                                      |
+| -------- | --------------------------------------------------------- | ------------------------------------- | ----------------------------------------- |
+| `PUT`    | `/v1/system/organizations/{organizationId}/data-boundary` | `setSystemOrganizationDataBoundary`   | `{ "profile": "phi", "operatorNote": … }` |
+| `DELETE` | `/v1/system/organizations/{organizationId}/data-boundary` | `clearSystemOrganizationDataBoundary` | `{ "operatorNote": … }`                   |
+
+`operatorNote` is required on both, 1 to 500 characters and not blank. Setting the profile already set, or clearing an absent boundary, returns `changed: false`. Neither route is served under `/v1/system/services`. The console shows the boundary on the organization's standing page, and members see a notice with its profile and since when.
+
+A `phi` organization cannot publish, deploy, canary, or promote a release, or create a preview or evaluation binding, when the manifest:
+
+- Names a model that is not a Bedrock model, as the primary or a fallback. The refusal is `422 model_outside_data_boundary` at `/spec/model/id` or `/spec/model/fallbackIds/<i>`.
+- Declares a public-internet tool whose destinations cannot be read from its input, such as `code.execute` or hosted code with `network: sandbox`. The refusal is `422 tool_outside_data_boundary` at `/spec/capabilities/tools/<i>`. A tool name that resolves to no registered tool is refused too, because its egress cannot be checked. Tools whose calls name their destinations, such as `web.scrape`, are admitted and decided per call, as [Egress allowlist and approvals](#egress-allowlist-and-approvals) describes.
+
+At runtime, the worker does not resolve, authorize, or run a public-internet tool whose destinations cannot be read from its input, and the run fails with `tool_outside_data_boundary`. The token issuers refuse a model outside Bedrock with `model_outside_data_boundary`. Both read the boundary with a strongly consistent read and fail closed when the read fails.
+
+### Egress allowlist and approvals
+
+An organization under a boundary keeps a list of https origins that its tools may reach. Organization owners and admins maintain the list. Members, viewers, and billing members can read it. Each change emits one `organization.egress-allowlist-updated` event with the origins `added` and `removed`.
+
+Inside a boundary, an agent can still see and call a public tool when each call names its destinations in its input: `web.scrape`, `web.map`, `web.crawl`, `web.batch_scrape`, `web.search`, the browser capture and session tools, `firecrawl.page.scrape`, and the SendGrid, Postmark, Twilio, Plivo, and Demio sends. The worker reads the allowlist and checks that call's destinations when it authorizes the call and again right before it runs:
+
+- A call whose every destination is a URL on a listed origin runs without approval.
+- A call that names any other destination waits for approval, even when the tool's policy would allow it. The destination can be an unlisted URL, an email or SMS recipient, or a search query. The approval request lists each such destination in `request.destinations`, in full with its path and query, and the console's approval inbox and approval dialog show the full list. The approval covers that exact input only. When the run resumes, a call whose input differs fails before it runs.
+- A call whose destination cannot be read from its input is denied with a reason that says it is outside the organization's `phi` data boundary. Agents are never offered these tools, and publishing a release that declares one fails with `422 tool_outside_data_boundary`: `code.execute`, `sandbox.files.*`, hosted code with `network: sandbox`, `app.*`, `artifact.share`, `web.extract`, `web.deep_research`, `web.crawl_params_preview`, `web.generate_llms_txt`, and `web.parse`. Calls to tools in the first list are also denied when their options run the web tools' own LLM, such as `json` or `summary` formats, `prompt`, or `schema`, or when they set `actions`, follow links to other hosts, or scrape search results.
+
+Approving a call does not approve the web tools' own LLM, which runs outside the boundary. Calls whose options use it are denied, so it never receives the organization's data.
+
+A browser navigation also loads the page's subresources and scripts. Approving or allowlisting a page's URL covers its subresources on the same host. It does not cover subresources the page loads from other hosts. The browser still loads those, and nobody approves them. The installation's browser origin allowlist bounds only where the browser navigates. Allowlist or approve only pages whose third-party content you accept.
+
+The browser and Firecrawl follow redirects, and the check reads only the URL in the call's input. An allowlisted origin that redirects to another host can forward the request, with its path and query, to a destination nobody approved. Allowlist only origins you trust not to redirect elsewhere.
+
+A workflow tool step cannot wait for a destination approval. Its linked approval step is decided before the step's input exists, so the approver never sees the destination. A step that names an unlisted destination fails with `tool_outside_data_boundary`, and a step whose destinations are all allowlisted runs.
+
+Only a person resolves an approval inside a boundary. This applies to every approval in the organization, including workflow approval steps, not only destination approvals. An API key that resolves one gets `403 approval_requires_human`. If the boundary cannot be read, the API key is refused as well.
+
+If the allowlist or the boundary cannot be read, the call does not run. The worker retries it as it does other transient preparation failures.
+
+Each entry is an `origin` and an optional `note` of 1 to 200 characters. An origin is `https://host` or `https://host:port`, in lowercase, with no path, query, credentials, or wildcard. The list holds at most 200 unique origins. A save replaces the whole list. A save that changes nothing returns `changed: false` and emits no event.
+
+```bash
+deployments egress-allowlist get $ORGANIZATION_ID
+deployments egress-allowlist set $ORGANIZATION_ID \
+  --origin https://claims.example.com --origin https://labs.example.org
+deployments egress-allowlist set $ORGANIZATION_ID \
+  --entries '[{"origin":"https://claims.example.com","note":"Claims clearinghouse"}]'
+```
+
+| Method | Route                                     | Scope              | SDK function                         | Body                                    |
+| ------ | ----------------------------------------- | ------------------ | ------------------------------------ | --------------------------------------- |
+| `GET`  | `/v1/organizations/{id}/egress-allowlist` | `governance:read`  | `getOrganizationEgressAllowlist`     |                                         |
+| `PUT`  | `/v1/organizations/{id}/egress-allowlist` | `governance:write` | `replaceOrganizationEgressAllowlist` | `{ "entries": [{ "origin", "note" }] }` |
+
+Both routes need the `x-deployments-organization` header. The `PUT` needs an `Idempotency-Key`. Only a person with the owner or admin role writes the list. An API key may read it, but a write by an API key returns `403 insufficient_role`, whatever its scopes. An entry that breaks a rule returns `400 invalid_egress_allowlist` with a JSON `pointer` such as `/entries/2/origin` and an `errors` list. In the console, the list is on the organization's **Data governance** page, which shows it only while the organization has a boundary. Operators see it as `egressAllowlist` in `GET /v1/system/organizations/{organizationId}/standing`.
+
+The boundary does not close these gaps:
+
+- The installation's service and embedding models must be Bedrock models. Otherwise the organization's Brain, memory, and evaluation judge calls are refused.
+- The sandbox network keeps internet egress. The boundary blocks the tools that use it, not the network.
+- Tools with an administrator-configured destination, such as MCP servers, HTTP callbacks, and vendor connections, still send data to that destination.
+- Releases deployed before the boundary was set keep running and fail at their first refused tool or model call. Model tokens minted earlier stay valid until they expire. Set the boundary before the organization's protected data arrives.
+- Sandbox processes that are already running when the boundary is set are not interrupted.
+- The channel provider runtime's `provider.tool.requested` executor (`functions/channel-provider-runtime/src/provider-tools.ts`) does not check the boundary. Nothing in the platform emits that event today.
+
+## Drop a held organization's memory index
+
+A hold keeps the organization's memory search index on the OpenSearch domain. To free that space while the organization keeps its data, an operator drops the organization's own memory index from a laptop with AWS credentials for the installation:
+
+```bash
+AWS_PROFILE=<profile> AWS_REGION=<region> \
+  bun run memory:search:control -- drop-disabled-index $ORGANIZATION_ID
+```
+
+The command invokes the `memory-erasure` function, which runs inside the VPC. It prints a JSON answer and exits 1 when the drop is refused. The function refuses unless an `operator` hold with a reason other than `payment` suspends the organization:
+
+| `reason`                | When                                                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------------------------------- |
+| `organization-active`   | The organization has no hold.                                                                           |
+| `no-operator-hold`      | No operator hold stops the organization. Services hold it, or the operator's holds are `payment` holds. |
+| `organization-draining` | Every hold is a `payment` hold, so admitted runs still finish.                                          |
+| `evidence-preserved`    | An `abuse` hold preserves evidence, the same rule that refuses erasure.                                 |
+
+The function deletes only memory indexes that the organization alone owns and whose name is exactly `memory-<organizationId in lowercase>-v<number>`. A name with `*` or `,`, which OpenSearch would read as several indexes, is never sent. Every other index is listed in `kept`. The function records which operator hold authorized the drop, and a second call answers `already-dropped` without deleting anything. Memory records, Brain data, and the search placement stay as they are.
+
+Each organization gets one receipt, and it stays until the organization is erased. If the organization is provisioned again and held again later, the command answers `already-dropped` and deletes nothing.
+
+Releasing the hold does not restore memory search. The organization's memory searches fail until an operator provisions a new memory search target for it or erases it. Do one of those before you release the hold, because a memory write after the release can recreate the index with the wrong mapping. To bring the organization back, provision a target with a new index name such as `memory-<organizationId in lowercase>-v2`, complete the migration, then release the hold. The memory runtime README lists the commands. Nobody has run these steps after a drop, and nobody has checked whether the new index receives the organization's earlier memories.
+
+## Drop an erased organization's Brain index
+
+Tenant erasure deletes the organization's own Brain search index after it verifies that the index holds none of the organization's documents. Erasures that finished before this release left that index on the OpenSearch domain. An operator drops it from a laptop with AWS credentials for the installation:
+
+```bash
+AWS_PROFILE=<profile> AWS_REGION=<region> \
+  bun run brain:search:control -- drop-erased-index $ORGANIZATION_ID
+```
+
+The command invokes the `brain-search-erasure` function, which runs inside the VPC, for the index `brain-<organizationId in lowercase>-v1`. Pass `--index brain-<organizationId in lowercase>-v<number>` for a later version. It prints a JSON answer and exits 1 when the drop is refused:
+
+| `reason`                  | When                                                                     |
+| ------------------------- | ------------------------------------------------------------------------ |
+| `not-organization-index`  | The name is not exactly `brain-<organizationId in lowercase>-v<number>`. |
+| `organization-exists`     | The organization record still exists.                                    |
+| `search-placement-exists` | A memory or Brain search placement still names the organization.         |
+
+An index that is already gone answers `already-absent`, so the command is safe to repeat.
+
+## Retire an erased organization's memory index
+
+Tenant erasure deletes the organization's own memory search index when the organization alone owns it, and deletes the catalog records that existed only for that index. Erasures that finished before this release left the index on the OpenSearch domain and its catalog records in the control table. An operator retires both from a laptop with AWS credentials for the installation:
+
+```bash
+AWS_PROFILE=<profile> AWS_REGION=<region> \
+  bun run memory:search:control -- retire-erased-index $ORGANIZATION_ID
+```
+
+The command invokes the `memory-erasure` function, which runs inside the VPC, for the index `memory-<organizationId in lowercase>-v1`. Pass `--index memory-<organizationId in lowercase>-v<number>` for a later version. It prints a JSON answer with the number of records it retired of each type, and exits 1 when it refuses:
+
+| `reason`                  | When                                                                      |
+| ------------------------- | ------------------------------------------------------------------------- |
+| `not-organization-index`  | The name is not exactly `memory-<organizationId in lowercase>-v<number>`. |
+| `organization-exists`     | The organization record still exists.                                     |
+| `search-placement-exists` | A memory or Brain search placement still names the organization.          |
+| `live-reference`          | A memory search target still references the index.                        |
+| `physical-owner`          | A physical owner still claims the index.                                  |
+| `generation-shared`       | A component of another index shares the index's generation.               |
+
+An index that is already gone answers `already-absent`, and a second call retires nothing, so the command is safe to repeat.
+
+## Configure machine services
+
+A machine service is an IAM role in the installation's own account. List it in the `system_service_principals` input of `module "platform"`:
+
+```hcl
+system_service_principals = {
+  billing = {
+    role_arn = "arn:<partition>:iam::<account>:role/hosted/billing-service"
+    grants   = ["organization-read", "organization-holds", "organization-entitlements"]
+  }
+}
+```
+
+The map key is the service's name, and its holds and grant belong to `service:<name>`. Each grant admits a group of routes:
+
+| Grant                       | Admits                                                 |
+| --------------------------- | ------------------------------------------------------ |
+| `organization-read`         | Reading standing, its history, and month spend         |
+| `organization-holds`        | Placing and releasing the service's own holds          |
+| `organization-entitlements` | Replacing and clearing the service's entitlement grant |
+
+The plan fails unless all of these hold:
+
+- Each name is 1 to 63 lowercase letters, digits, or hyphens, and does not start with a hyphen.
+- Each `role_arn` is an IAM role ARN in the installation's account. A role in another account is never admitted.
+- Each grant is one of the three above.
+- At most one service holds `organization-entitlements`, because an organization has one service grant.
+- No two services use roles with the same name. An assumed-role session names only the role, not its path.
+
+`system_service_principals` is empty by default, and then OpenTofu adds nothing. With at least one service, OpenTofu adds one API Gateway route, `ANY /v1/system/services/{proxy+}`, with `AWS_IAM` authorization. It passes the map as JSON in `DEPLOYMENTS_AI_SYSTEM_SERVICE_PRINCIPALS` to the system and tenancy API functions.
+
+The service's role needs permission to call the route. HTTP APIs have no resource policies, so grant `execute-api:Invoke` on the route in the role's own policy:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": "execute-api:Invoke",
+  "Resource": "arn:<partition>:execute-api:<region>:<account>:<api-id>/*/*/v1/system/services/*"
+}
+```
+
+The system API function reads `DEPLOYMENTS_AI_SYSTEM_SERVICE_PRINCIPALS` once when it starts. When the value does not decode, every service route returns `503 system_services_misconfigured` with the reason, and the administrator routes keep working.
+
+## Set the default model spend ceiling
+
+An organization with no grant gets the install defaults: the four [tenant limit defaults](/docs/operate/tenant-limits#set-the-defaults) and an operator-funded model spend ceiling. Operator-funded spend is model usage on the installation's own provider keys, plus sandbox time when the install [prices it](/docs/operate/costs#price-sandbox-time). Set the ceiling in USD micros, one millionth of a dollar, with the `default_model_spend_ceiling_usd_micros` input of `module "platform"`:
+
+```hcl
+default_model_spend_ceiling_usd_micros = 5000000
+```
+
+The value is a whole number from 0 to 9007199254740991. It is `null` by default, and then the ceiling is `unlimited`. OpenTofu passes a set value as `DEPLOYMENTS_AI_OPERATOR_FUNDED_MODEL_SPEND_CEILING_USD_MICROS` to every platform API function, to the runtime, memory, and agent email API functions, and to the usage materializer, because each one reads standing. It also passes it to the model gateway, which [refuses operator-funded calls](/docs/operate/model-gateway#organization-model-keys) within 5 seconds of recorded spend reaching the ceiling. A function or the gateway fails to start when the value is not a whole number.
+
+## How grants merge
+
+A grant sets any of the four tenant limits, `operatorFundedModelSpendCeiling`, and `features`. A field the grant leaves out falls to the next source. The platform resolves each field separately, in this order:
+
+1. The operator grant.
+2. The service grant.
+3. The install defaults.
+
+For example, the service grant sets `concurrentRuns` to 16 and the ceiling to 100 USD, and the operator grant sets `concurrentRuns` to 64. The effective `concurrentRuns` is 64, and the effective ceiling is 100 USD.
+
+Each source sets its fields alone, so the merged `apiRequestBurst` can end up below the merged `apiRequestsPerSecond`. The platform then raises the burst to the rate. For example, the service grant sets the rate to 50 and the burst to 100, and the operator grant sets the rate to 200. The effective rate and burst are both 200.
+
+The effective tenant limits are the limits the platform enforces. [Tenant limits](/docs/operate/tenant-limits) describes how each one is enforced and how soon a grant change takes effect.
+
+## Plan features
+
+`features` turns plan features on or off. Each key is merged on its own, like a tenant limit. The install default turns every feature on, so an install that never grants `features` is unchanged.
+
+| Feature | What it covers                        | Routes it refuses when `false`                                                           |
+| ------- | ------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `sso`   | Identity federation and login domains | `addLoginDomain`, `verifyLoginDomain`, `putIdentityProvider`, `setIdentityProviderState` |
+| `scim`  | Directory sync                        | `putDirectory`, `createDirectoryToken`                                                   |
+
+A refused route answers `403` with code `feature_not_in_plan`, `type` `https://docs.deployments.ai/errors/feature-not-in-plan`, and `feature` naming the feature. Reads, removals, and token revocation still answer, so an organization that loses a feature can see and undo its setup. Turning a feature off does not remove what is already configured. A configured identity provider keeps signing members in, and existing directory tokens keep working until they are revoked.
+
+For example, the service grant sets `{ "features": { "sso": false } }` for a plan without single sign-on. The operator grant can set `{ "features": { "sso": true } }` to make an exception for one organization.
+
+## Read month spend
+
+The platform records every metered cost under the UTC month of its `occurredAt`, split by who paid. Operator-funded spend is everything the installation pays for: model calls on its own provider keys and every other metered cost. Organization-funded spend is model calls on the organization's own provider keys, at the catalog price.
+
+An administrator and a service with `organization-read` read it at `GET /v1/system/organizations/{organizationId}/spend`. A member of the organization reads it at `GET /v1/organizations/{id}/spend` with the `x-deployments-organization` header set to the same ID. Every organization role may read it, and the credential needs `organizations:read`. An API key gets `403 insufficient_role`, because only members read spend. The CLI reads it with `deployments org spend $ORGANIZATION_ID --org $ORGANIZATION_ID`.
+
+Both routes take an optional `month` query parameter, a UTC month as `YYYY-MM`. Without it they read the current UTC month. A month after the current one, or a value in any other form, returns `400 invalid_month`.
+
+| Field                             | Meaning                                                                                                               |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `organizationId`                  | The organization.                                                                                                     |
+| `month`                           | The month read, as `YYYY-MM`.                                                                                         |
+| `periodStart`                     | The first instant of the month, such as `2026-10-01T00:00:00.000Z`.                                                   |
+| `asOf`                            | When the platform read the spend. A cost recorded later, even one that occurred in the month, is not in the response. |
+| `totalUsdMicros`                  | All spend in the month.                                                                                               |
+| `operatorFundedUsdMicros`         | The part the installation paid for.                                                                                   |
+| `organizationFundedUsdMicros`     | The part the organization paid for with its own model keys.                                                           |
+| `operatorFundedModelSpendCeiling` | Members' route only. The organization's effective ceiling now, even when reading a past month.                        |
+
+The read is strongly consistent and costs one query of at most 16 items. Like `GET .../standing`, the system route does not check that the organization exists, so a mistyped ID reads zero spend.
+
+## Operator-funded spend exhausted event
+
+The usage materializer emits one `organization.operator-funded-spend-exhausted` semantic event per organization and month. It fires when an operator-funded cost takes the month's operator-funded spend to or past the organization's effective ceiling. The payload has `organizationId`, `month`, `ceilingUsdMicros`, and `operatorFundedUsdMicros`, which is the spend when the event fired.
+
+- The event fires at most once per organization and month. The materializer writes a create-only claim for the organization and month in the same transaction as the event, so concurrent materializers and redelivered costs never emit a second one.
+- An organization-funded cost never fires it, and organization-funded spend never counts toward the ceiling.
+- An organization whose effective ceiling is `unlimited` never gets it.
+- A ceiling raised after the event does not re-arm it for that month.
+- The event reports the crossing and refuses nothing. Customer budgets and their `budget.threshold-crossed` events are unchanged.
+- A webhook subscription in any environment of the organization receives the event when its `eventTypes` lists `organization.operator-funded-spend-exhausted` by name. See [Webhooks](/docs/capabilities/webhooks#organization-and-project-billing-alerts).
+
+## Routes
+
+Every route takes the organization ID in the path. A machine service calls the same operation at the path under `/v1/system/services`.
+
+| Method   | Administrator route                                          | Service route                                                         | Grant                       | SDK function                            |
+| -------- | ------------------------------------------------------------ | --------------------------------------------------------------------- | --------------------------- | --------------------------------------- |
+| `GET`    | `/v1/system/organizations/{organizationId}/standing`         | `/v1/system/services/organizations/{organizationId}/standing`         | `organization-read`         | `getSystemOrganizationStanding`         |
+| `GET`    | `/v1/system/organizations/{organizationId}/spend`            | `/v1/system/services/organizations/{organizationId}/spend`            | `organization-read`         | `getSystemOrganizationSpend`            |
+| `GET`    | `/v1/system/organizations/{organizationId}/standing/history` | `/v1/system/services/organizations/{organizationId}/standing/history` | `organization-read`         | `listSystemOrganizationStandingHistory` |
+| `PUT`    | `/v1/system/organizations/{organizationId}/holds/{holdKey}`  | `/v1/system/services/organizations/{organizationId}/holds/{holdKey}`  | `organization-holds`        | `placeSystemOrganizationHold`           |
+| `DELETE` | `/v1/system/organizations/{organizationId}/holds/{holdKey}`  | `/v1/system/services/organizations/{organizationId}/holds/{holdKey}`  | `organization-holds`        | `releaseSystemOrganizationHold`         |
+| `PUT`    | `/v1/system/organizations/{organizationId}/entitlements`     | `/v1/system/services/organizations/{organizationId}/entitlements`     | `organization-entitlements` | `replaceSystemOrganizationEntitlements` |
+| `DELETE` | `/v1/system/organizations/{organizationId}/entitlements`     | `/v1/system/services/organizations/{organizationId}/entitlements`     | `organization-entitlements` | `clearSystemOrganizationEntitlements`   |
+
+No other system route is served under `/v1/system/services`.
+
+### Place and release a hold
+
+`holdKey` is the caller's name for the hold: 1 to 63 lowercase letters, digits, or hyphens. The `PUT` body takes these fields and no others:
+
+```json
+{
+  "reason": "payment",
+  "customerMessage": "Update your payment method to keep using the platform.",
+  "operatorNote": "Invoice in_123 failed three times"
+}
+```
+
+- `reason` is `payment`, `abuse`, `policy`, or `manual`.
+- `customerMessage` is required. It is the message for the organization's members.
+- `operatorNote` is optional. It is for operators and services, never for members.
+- Each text field is 1 to 500 characters and must not be blank.
+
+The `DELETE` body is optional and takes only `releaseNote`, which the history records.
+
+### Replace and clear a grant
+
+The `PUT` body is the caller's whole grant. A field you leave out falls to the next source:
+
+```json
+{
+  "tenantLimits": { "concurrentRuns": 16, "activeSandboxes": 4 },
+  "operatorFundedModelSpendCeiling": { "monthlyUsdMicros": 100000000 },
+  "features": { "scim": false }
+}
+```
+
+`features` takes `sso` and `scim`, each `true` or `false`. `tenantLimits` takes the ranges in [System operator](/docs/operate/system-operator#organization-limits). `operatorFundedModelSpendCeiling` is `"unlimited"` or `{ "monthlyUsdMicros": <whole number> }`. `DELETE` takes no body and removes the caller's grant.
+
+### Responses
+
+`GET .../standing` returns the organization's standing. Every `PUT` and `DELETE` returns `{ "changed": <boolean>, "standing": <standing> }`.
+
+| Field             | Meaning                                                                                                                    |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `organizationId`  | The organization.                                                                                                          |
+| `state`           | `suspended` while the organization has at least one hold, otherwise `active`.                                              |
+| `suspendedAt`     | When the organization went from no holds to one. `null` while `active`.                                                    |
+| `holds`           | Each hold's `source`, `key`, `reason`, `customerMessage`, `operatorNote` (`null` when absent), `placedAt`, and `placedBy`. |
+| `grants`          | `operator` and `service`, each `null` or the grant's `entitlements`, `grantedAt`, and `grantedBy`.                         |
+| `dataBoundary`    | `null`, or the boundary's `profile`, `operatorNote`, `setAt`, and `setBy`.                                                 |
+| `egressAllowlist` | The organization's [egress allowlist](#egress-allowlist-and-approvals) entries, each `origin` and optional `note`.         |
+| `effective`       | The merged `tenantLimits`, `operatorFundedModelSpendCeiling`, and `features`.                                              |
+| `defaults`        | The install defaults.                                                                                                      |
+| `version`         | The number of changes. `0` for an organization with no standing record.                                                    |
+
+`GET .../standing/history` lists the changes newest first. It takes `limit` from 1 through 100, 50 by default, and the `cursor` from the previous page. Each item has `version`, `occurredAt`, `actor`, the `state` after the change, and a `change` whose `kind` is `hold-placed`, `hold-released`, `grant-set`, `grant-cleared`, `data-boundary-set`, or `data-boundary-cleared`. `nextCursor` is `null` on the last page.
+
+`GET` does not check that the organization exists, so a mistyped ID shows the install defaults at version `0`. A `PUT` or `DELETE` on an organization that does not exist returns `404 organization_not_found`.
+
+### Errors
+
+These codes add to the [system operator errors](/docs/operate/system-operator#errors).
+
+| Status | Code                               | When                                                                                          |
+| ------ | ---------------------------------- | --------------------------------------------------------------------------------------------- |
+| `400`  | `invalid_holdKey`                  | The hold key in the path is not 1 to 63 lowercase letters, digits, or hyphens                 |
+| `400`  | `invalid_request`                  | The body has an unknown field, such as `source`, or a missing or out-of-range value           |
+| `400`  | `invalid_month`                    | `month` is not `YYYY-MM`, or is after the current UTC month                                   |
+| `400`  | `invalid_cursor`                   | The history `cursor` is not one the route returned                                            |
+| `403`  | `system_service_required`          | A service route without a session of a role in `system_service_principals`                    |
+| `403`  | `system_service_grant_required`    | The service lacks the route's grant. `grant` names it                                         |
+| `409`  | `standing_owned_by_another_source` | The hold, the service grant, or the data boundary belongs to another source. `owner` names it |
+| `409`  | `version_conflict`                 | The organization's standing kept changing during the request. Retry                           |
+| `503`  | `system_services_misconfigured`    | `DEPLOYMENTS_AI_SYSTEM_SERVICE_PRINCIPALS` does not decode                                    |
+
+API Gateway answers an unsigned request to a service route with its own `403` before it reaches the platform. An admitted service gets `404 route_not_found` for a path that names no service operation.
+
+## Use it
+
+An administrator holds and releases an organization from the CLI. `hold` asks for confirmation. Pass `--yes` in scripts or with `--json`.
+
+```bash
+deployments system standing $ORGANIZATION_ID
+deployments system spend $ORGANIZATION_ID --month 2026-09
+deployments system hold $ORGANIZATION_ID tos-review --reason policy \
+  --customer-message "Your organization is under review." --operator-note "Ticket 4411"
+deployments system release $ORGANIZATION_ID tos-review --release-note "Review closed"
+deployments system set-entitlements $ORGANIZATION_ID --tenant-limits '{"concurrentRuns":64}'
+deployments system clear-entitlements $ORGANIZATION_ID
+deployments system standing-history $ORGANIZATION_ID
+```
+
+A machine service signs its requests. With credentials for a session of the service's role in the environment, curl places a hold like this:
+
+```bash
+curl --aws-sigv4 "aws:amz:$AWS_REGION:execute-api" \
+  --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
+  -H "x-amz-security-token: $AWS_SESSION_TOKEN" \
+  -X PUT -H "content-type: application/json" \
+  -d '{"reason":"payment","customerMessage":"Update your payment method."}' \
+  "$DEPLOYMENTS_API_URL/v1/system/services/organizations/$ORGANIZATION_ID/holds/payment-overdue"
+```
+
+## Reference
+
+- API: [Get organization standing](/docs/api/reference/system/get-system-organization-standing), [Get organization spend](/docs/api/reference/system/get-system-organization-spend), [Get organization spend as a member](/docs/api/reference/tenancy/get-organization-spend), [List standing history](/docs/api/reference/system/list-system-organization-standing-history), [Place a hold](/docs/api/reference/system/place-system-organization-hold), [Release a hold](/docs/api/reference/system/release-system-organization-hold), [Replace entitlements](/docs/api/reference/system/replace-system-organization-entitlements), [Clear entitlements](/docs/api/reference/system/clear-system-organization-entitlements), [Set a data boundary](/docs/api/reference/system/set-system-organization-data-boundary), [Clear a data boundary](/docs/api/reference/system/clear-system-organization-data-boundary), [Get the egress allowlist](/docs/api/reference/governance/get-organization-egress-allowlist), [Replace the egress allowlist](/docs/api/reference/governance/replace-organization-egress-allowlist)
+- CLI: [`deployments system`](/docs/cli/reference/system), [`deployments egress-allowlist`](/docs/cli/reference/egress-allowlist)
+- Related: [System operator](/docs/operate/system-operator), [Tenant limits](/docs/operate/tenant-limits)

@@ -1,0 +1,95 @@
+---
+title: "Core concepts"
+description: "The resource hierarchy, the path from definition to release to deployment to run, principals, and scopes."
+---
+
+This page explains the handful of resources that every other page builds on. Read it once before you design how your product uses the platform.
+
+## Resources live in a four-level hierarchy
+
+```text
+organization
+└── project
+    └── environment
+        ├── workspace (optional)
+        ├── service accounts and API keys
+        ├── provider connections and credentials
+        └── agent definitions, releases, and deployments
+            └── threads
+                └── runs
+```
+
+| Level        | What it is                                                                                             |
+| ------------ | ------------------------------------------------------------------------------------------------------ |
+| Organization | The membership boundary. People join an organization with a role.                                      |
+| Project      | A group of environments for one product or integration.                                                |
+| Environment  | The isolation boundary for credentials, deployments, provider connections, and usage.                  |
+| Workspace    | An optional scope inside an environment. Threads, runs, and some definitions can carry a workspace ID. |
+
+Every resource ID is a 26-character ULID in canonical uppercase Crockford base32. Each level keeps its own status. An archived project accepts no new environments, and an archived environment accepts no new service accounts or API keys. [Organizations, projects, and environments](/docs/capabilities/tenancy) covers the lifecycle.
+
+## An agent moves from definition to run
+
+The platform separates what you are editing from what is running.
+
+| Resource         | Mutable? | What it holds                                                                                              |
+| ---------------- | -------- | ---------------------------------------------------------------------------------------------------------- |
+| Agent definition | Yes      | A draft `AgentManifestV1` and a `version` counter that changes on every update and release.                |
+| Agent release    | No       | A frozen copy of the manifest, a `sha256:` content hash, and a `releaseNumber` that counts up from 1.      |
+| Agent deployment | Yes      | The release that serves traffic in one environment, its desired and current state, and its runtime config. |
+| Thread           | Yes      | One conversation with one deployment.                                                                      |
+| Run              | No\*     | One execution of the agent on a thread, pinned to the deployment and release that ran it.                  |
+
+\*A run's status changes as it executes, but its pinned deployment and release never change.
+
+A deployment's `desiredState` is `running`, `paused`, or `stopped`. Its `currentState` is `deploying`, `ready`, `paused`, `failed`, or `stopped`. You can retarget a deployment to another release of the same definition, roll it back, or send a share of new threads to a candidate release as a canary. A stopped deployment cannot be resumed. [Agents, releases, and deployments](/docs/capabilities/agents) explains each operation.
+
+A run's `status` is one of `queued`, `running`, `waiting-for-approval`, `waiting-for-tool`, `completed`, `failed`, or `canceled`. Runs start from the API, chat, email, schedules, heartbeats, webhooks, and workflows, and all of them use the same thread and run model. [Threads and runs](/docs/capabilities/threads-and-runs) covers the runtime.
+
+## Principals act on resources
+
+A principal is anyone or anything that calls the API.
+
+- **Human principals** sign in through the platform's identity service. They belong to organizations through memberships, and each membership has one role.
+- **Service accounts** are machine principals. Each one belongs to exactly one environment and authenticates with API keys. [Service accounts and API keys](/docs/capabilities/service-accounts-and-api-keys) describes them.
+- **Platform administrators** are human principals with the `administrator` platform role. They inspect and operate the install itself through the `/v1/system` operations. No organization role grants this.
+
+## Scopes and roles decide what a principal may do
+
+Two checks decide what a request may do.
+
+**Capability scopes.** Operations require a scope in the form `namespace:level`, such as `agents:read` or `runs:write`. A credential carries a list of scopes. A wildcard such as `agents:*` covers every level in that namespace.
+
+**Organization roles.** For human callers, the API also checks live membership in the organization on every request. The role then narrows the token's scopes.
+
+| Role      | Adds on top of reading                                                                                                                                                                         |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner`   | Everything an admin can do, plus renaming the organization, managing owners, and requesting tenant erasure.                                                                                    |
+| `admin`   | Changing projects, environments, workspaces, service accounts, API keys, agents, runs, memory, and connections. Managing non-owner members and invitations, budgets, and email administration. |
+| `billing` | Managing spend budgets.                                                                                                                                                                        |
+| `member`  | Holding Brain grants that target a role.                                                                                                                                                       |
+| `viewer`  | Nothing beyond reading.                                                                                                                                                                        |
+
+Some namespaces, such as evaluations, observability, and Brains, have no role restriction. Token scopes and their own resource grants control them. Service accounts have no role. A request with an API key gets only the scopes that both the key and its service account hold.
+
+[Authentication](/docs/getting-started/authentication) shows how credentials carry scopes and how to check what you can do.
+
+## Tenant headers select the scope of a request
+
+Requests name the organization, project, and environment they act on with headers:
+
+| Header                       | Selects            |
+| ---------------------------- | ------------------ |
+| `x-deployments-organization` | An organization ID |
+| `x-deployments-project`      | A project ID       |
+| `x-deployments-environment`  | An environment ID  |
+
+Each operation's reference page lists the headers it needs. The CLI sends them from its context, and the SDK takes them in each call's `headers`.
+
+## Reference
+
+- [Organizations, projects, and environments](/docs/capabilities/tenancy)
+- [Agents, releases, and deployments](/docs/capabilities/agents)
+- [Threads and runs](/docs/capabilities/threads-and-runs)
+- [Tenancy functions in the SDK](/docs/sdk/reference#tenancy)
+- [Agents functions in the SDK](/docs/sdk/reference#agents)

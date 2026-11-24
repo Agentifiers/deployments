@@ -1,0 +1,162 @@
+---
+title: "Errors"
+description: "The problem details error format, status codes, common error codes, and how to handle failures."
+---
+
+When a request fails, the API returns a 4xx or 5xx status and a problem details body with the `application/problem+json` media type. Branch on the HTTP status and the `code` field. The `title` and `detail` text is for people and can change.
+
+## The problem details body
+
+```json
+{
+  "type": "https://docs.deployments.ai/errors/insufficient-scope",
+  "title": "The credential does not have the required capability scope.",
+  "status": 403,
+  "code": "insufficient_scope",
+  "requestId": "<request-id>"
+}
+```
+
+<TypeTable
+  type={{
+    status: {
+      type: "integer",
+      description: "The HTTP status, from 400 to 599.",
+      required: true,
+    },
+    title: { type: "string", description: "A short human-readable summary.", required: true },
+    code: {
+      type: "string",
+      description:
+        "A stable machine-readable code in lowercase snake_case, such as `version_conflict`.",
+    },
+    detail: { type: "string", description: "More human-readable context about this occurrence." },
+    requestId: {
+      type: "string",
+      description:
+        "The request ID. The same value is in the `x-request-id` response header. Runtime, artifact, automation, and workflow execution operations send no such header and include this field only when your request sent an `x-request-id` header.",
+    },
+    type: {
+      type: "string",
+      description:
+        "A URI that names the problem kind, such as `https://docs.deployments.ai/errors/insufficient-scope`. Treat it as an identifier. It opens the list of common codes on this page.",
+    },
+    instance: {
+      type: "string",
+      description: "A URI for this occurrence, when the service sets one.",
+    },
+  }}
+/>
+
+Quote the `requestId` when you report a problem. The CLI prints it at the end of its error message, and the console shows it on its error screen.
+
+## Status codes
+
+Each operation page lists the statuses that operation can return. This is what each status means across the API.
+
+| Status        | Meaning                                                                                                                | Retry?                                          |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| 400           | The request is malformed: bad JSON, a bad query value, a missing header, or an invalid cursor.                         | No. Fix the request.                            |
+| 401           | The bearer credential is missing, invalid, expired, or revoked.                                                        | Only after you get a new credential.            |
+| 403           | The credential is valid but lacks a scope, a role, or access to the tenant.                                            | No.                                             |
+| 404           | The resource or route does not exist, or it is outside the tenant you selected.                                        | No.                                             |
+| 409           | The request conflicts with current state: a stale version, a reused idempotency key, or a resource in the wrong state. | Read the current state first.                   |
+| 410           | The resource existed but is gone.                                                                                      | No.                                             |
+| 413           | The request body or message is too large.                                                                              | No. Send less.                                  |
+| 422           | The request is well formed but fails validation.                                                                       | No. Fix the request.                            |
+| 429           | The request was throttled, or a spend budget refused new work.                                                         | See [429 responses](#429-responses).            |
+| 500           | The platform failed unexpectedly.                                                                                      | Yes, with backoff and the same idempotency key. |
+| 502, 503, 504 | An upstream service failed, is unavailable, or timed out.                                                              | Yes, with backoff and the same idempotency key. |
+
+## Common codes
+
+| Status | Code                                | When                                                                                                                                           |
+| ------ | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400    | `invalid_json`                      | The body is not valid JSON.                                                                                                                    |
+| 400    | `invalid_cursor`                    | The cursor is malformed, tampered with, or from another scope.                                                                                 |
+| 400    | `invalid_limit`                     | `limit` is outside the operation's range. Some services report this as 422 `validation_failed`.                                                |
+| 400    | `missing_scope`                     | A required tenant header is missing. Runtime operations called with a platform access token report this as 403 `tenant_scope_required`.        |
+| 400    | `missing_idempotency_key`           | A required `idempotency-key` header is missing. Some services report this as 400 `idempotency_key_required` or 422 `validation_failed`.        |
+| 401    | `unauthorized`                      | No valid bearer credential.                                                                                                                    |
+| 403    | `insufficient_scope`                | The credential lacks the operation's capability scope.                                                                                         |
+| 403    | `insufficient_role`                 | Your organization role does not allow the operation.                                                                                           |
+| 403    | `environment_scope_violation`       | The credential cannot reach the environment you selected. `organization_scope_violation` and `project_scope_violation` cover the other levels. |
+| 403    | `organization_suspended`            | The organization is suspended. The body lists each hold's `reason`, `customerMessage`, and `since` when the API edge refuses the request.      |
+| 409    | `version_conflict`                  | The `expectedVersion` you sent is stale, or the resource changed concurrently.                                                                 |
+| 409    | `idempotency_conflict`              | The idempotency key was already used for a different request.                                                                                  |
+| 409    | `idempotency_in_progress`           | A request with the same idempotency key is still running.                                                                                      |
+| 422    | `validation_failed`                 | The body does not match the operation's schema.                                                                                                |
+| 429    | `budget_exhausted`                  | A spend budget for the organization, project, or environment refuses new runs.                                                                 |
+| 429    | `organization_rate_limited`         | The organization sent requests faster than its request rate and burst allow. Wait for `retry-after`.                                           |
+| 500    | `internal_error`                    | An unexpected failure. Retry with the same idempotency key.                                                                                    |
+| 503    | `organization_standing_unavailable` | The platform could not read the organization's standing, so it refused a new run. Retry with the same idempotency key.                         |
+
+Many operations add their own codes, such as `last_owner_required` when you try to remove the last owner. The `title` or `detail` explains each one.
+
+## 429 responses [#429-responses]
+
+A 429 has three causes, and they need different handling.
+
+- **`organization_rate_limited`.** Your organization exceeded its own request rate. The response has a `retry-after` header with the whole number of seconds to wait, at least 1. Send the request again after that many seconds. The `detail` names the organization's rate and burst. See [Versioning and limits](/docs/api/versioning-and-limits#request-rate).
+- **`budget_exhausted`.** A budget has spent its amount for the current period. New runs, retries, replays, and previews are refused until the period ends or someone raises, pauses, or archives the budget. Retrying does not help. Runs already accepted keep running. See [Usage and budgets](/docs/capabilities/usage-and-budgets).
+- **Gateway throttling.** The API gateway limits the request rate for the whole installation. It answers a throttled request itself, before the platform sees it, with `application/json` and the body `{"message":"Too Many Requests"}`. The answer has no `code` and no `retry-after` header. Wait and retry with exponential backoff. The SDK and the CLI resend a throttled request on their own after 0.25, 0.5, 1, 2, and 4 seconds, and then return the last answer. See [Versioning and limits](/docs/api/versioning-and-limits#request-rate).
+
+An organization rate limit response looks like this:
+
+```http
+HTTP/1.1 429 Too Many Requests
+content-type: application/problem+json
+retry-after: 2
+x-request-id: <request-id>
+
+{
+  "type": "https://docs.deployments.ai/errors/organization-rate-limited",
+  "title": "The organization exceeded its API request rate limit.",
+  "status": 429,
+  "code": "organization_rate_limited",
+  "detail": "This organization is limited to 20 requests per second with a burst of 40.",
+  "requestId": "<request-id>"
+}
+```
+
+## Organization limit failures outside HTTP
+
+Two organization limits do not fail a request. They show up on the run instead.
+
+| Code                                    | Where                                    | When                                                                                                                                                                                       |
+| --------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `organization_concurrency_wait_expired` | The run's `error`, with status `failed`  | The run waited in `queued` for more than 6 hours while the organization was at its concurrent run limit. See [Threads and runs](/docs/capabilities/threads-and-runs#concurrent-run-limit). |
+| `organization_sandbox_limit_reached`    | A sandbox tool call's result, in `error` | The organization was at its active sandbox limit, so the tool did not run. The run continues. See [Code sandbox](/docs/capabilities/sandbox#active-sandbox-limit).                         |
+
+## Handle errors in code
+
+The SDK returns `{ data, error }`. On failure, `error` holds the problem details body:
+
+```ts
+import { createClient, createConfig, getAgentDeployment } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data, error, response } = await getAgentDeployment({
+  client,
+  path: { id: process.env.AGENT_DEPLOYMENT_ID! },
+  headers: { "x-deployments-environment": process.env.ENV_ID! },
+});
+
+if (error) {
+  console.error(response?.status, error.code, error.requestId);
+}
+```
+
+The CLI maps failures to exit codes, such as `3` for authentication, `4` for authorization, `5` for not found, `6` for conflict, and `7` for validation. [Output, scripting, and exit codes](/docs/cli/output-and-scripting) lists them all. [Error handling](/docs/sdk/errors) covers the SDK in depth.
+
+## Reference
+
+- [API overview](/docs/api)
+- [Idempotency](/docs/api/idempotency)
+- [Authentication](/docs/getting-started/authentication)

@@ -1,0 +1,31 @@
+{
+  "name": "@deployments-ai/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run src/contract",
+    "test:contract": "vitest run src/contract",
+    "test:live": "DEPLOYMENTS_E2E_LIVE=true vitest run src/live",
+    "test:provider-oauth-live": "DEPLOYMENTS_E2E_LIVE=true DEPLOYMENTS_E2E_PROVIDER_OAUTH_LIVE=true vitest run src/live/provider-oauth.e2e.ts",
+    "test:public": "vitest run src/live/public-api.e2e.ts",
+    "test:slack-live": "DEPLOYMENTS_E2E_LIVE=true DEPLOYMENTS_E2E_SLACK_LIVE=true vitest run src/live/slack-identity.e2e.ts",
+    "test:telegram-live": "DEPLOYMENTS_E2E_LIVE=true DEPLOYMENTS_E2E_TELEGRAM_LIVE=true vitest run src/live/telegram-ingress.e2e.ts",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@agentifiers/deployments-cli": "workspace:*",
+    "@agentifiers/deployments-sdk": "workspace:*",
+    "@aws-sdk/client-lambda-microvms": "3.1090.0",
+    "@aws-sdk/client-sesv2": "3.1090.0",
+    "@deployments-ai/api-contract": "workspace:*",
+    "@deployments-ai/channel-adapters": "workspace:*",
+    "@effect/vitest": "4.0.0-beta.92",
+    "effect": "4.0.0-beta.92",
+    "ulid": "3.0.2"
+  },
+  "devDependencies": {
+    "vitest": "4.1.10"
+  }
+}

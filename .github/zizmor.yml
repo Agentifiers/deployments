@@ -1,0 +1,7 @@
+rules:
+  # actionlint does not parse the `$/` self-repository syntax yet, so local actions keep `./`
+  # after a checkout of the same commit.
+  self-repository:
+    ignore:
+      - ci.yml
+      - release-packages.yml

@@ -1,0 +1,6 @@
+---
+"@deployments-ai/cli": minor
+"@deployments-ai/sdk": minor
+---
+
+Platform administrators and named machine services can read and change an organization's standing. `getSystemOrganizationStanding` (`GET /v1/system/organizations/{organizationId}/standing`) returns the holds, each source's entitlement grant, the install defaults, and the effective entitlements. `placeSystemOrganizationHold` and `releaseSystemOrganizationHold` (`PUT|DELETE .../holds/{holdKey}`) place and release the caller's own hold. `replaceSystemOrganizationEntitlements` and `clearSystemOrganizationEntitlements` (`PUT|DELETE .../entitlements`) set and remove the caller's grant of tenant limits and an operator-funded model spend ceiling. `listSystemOrganizationStandingHistory` (`GET .../standing/history`) pages the changes newest first. Every change returns `changed`, which is `false` when nothing was written. A hold or service grant that another source owns answers `409 standing_owned_by_another_source` with its `owner`. A machine service listed in `system_service_principals` calls the same operations under `/v1/system/services/` with SigV4. The CLI adds `deployments system standing`, `standing-history`, `hold`, `release`, `set-entitlements`, and `clear-entitlements`. Holds and grants are recorded but not yet enforced.

@@ -1,0 +1,5 @@
+services:
+  floci:
+    image: floci/floci@sha256:794407b5deee9b7a10d8ecc1af5296ed95b0c735df5406708440bc0b0c46839d
+    ports:
+      - "127.0.0.1:${LOCAL_AWS_PORT:-4566}:4566"

@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/db",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/db.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../agent-email" },
+    { "path": "../agent-manifest" },
+    { "path": "../brains" },
+    { "path": "../identity" },
+    { "path": "../model-gateway" },
+    { "path": "../observability" },
+    { "path": "../streaming" },
+    { "path": "../tenant-limits" }
+  ]
+}

@@ -1,0 +1,93 @@
+deployments
+Copyright 2026 Cinematic Software LLC d/b/a Agentifiers
+
+This software is licensed under the Functional Source License, Version 1.1,
+ALv2 Future License (FSL-1.1-ALv2). See the LICENSE file for the full terms.
+https://github.com/Agentifiers/deployments
+
+Exception: packages/sdk and packages/cli, and the @agentifiers/deployments-sdk and
+@agentifiers/deployments-cli npm packages built from them, are licensed under the MIT
+License. See packages/sdk/LICENSE and packages/cli/LICENSE. The workspace code
+those npm packages bundle is licensed under MIT as part of each package, and
+each package's NOTICE reproduces the licenses of the third-party npm packages
+it bundles.
+
+This product includes or builds on third-party software. Each component below
+remains under its own license; nothing in this file changes those terms.
+
+-------------------------------------------------------------------------------
+Incorporated source
+-------------------------------------------------------------------------------
+
+EvilCharts (MIT)
+  Vendored chart components in apps/console/src/evilcharts.
+  Copyright (c) 2026 Gurbinder. License text: apps/console/src/evilcharts/LICENSE.
+
+shadcn/ui (MIT)
+  Components adapted under apps/console/src/components/ui.
+  https://github.com/shadcn-ui/ui
+
+ReUI (MIT)
+  Free components adapted under apps/console/src/components/reui.
+  https://github.com/keenthemes/reui
+
+-------------------------------------------------------------------------------
+Bundled dependencies
+-------------------------------------------------------------------------------
+
+Hugeicons free icons (MIT)
+  @hugeicons/core-free-icons and @hugeicons/react, used by the console.
+  Copyright (c) 2025 Hugeicons. https://hugeicons.com
+
+Inter (SIL Open Font License 1.1)
+  Typeface shipped via @fontsource-variable/inter.
+  Copyright 2016 The Inter Project Authors. https://github.com/rsms/inter
+
+Durable Streams
+  The durable-streams server image (apps/durable-streams/Dockerfile) builds
+  github.com/durable-streams/durable-streams packages/caddy-plugin (MIT,
+  Copyright (c) 2025 durable-stream), which links Caddy (Apache-2.0).
+  The @durable-streams/server and @durable-streams/client npm packages are
+  licensed under Apache-2.0.
+
+HashiCorp Terraform Plugin Framework and Plugin Go (MPL-2.0)
+  github.com/hashicorp/terraform-plugin-framework, terraform-plugin-go, and
+  related HashiCorp modules are compiled into
+  infrastructure/terraform-provider-deployments. Their source is available at
+  https://github.com/hashicorp.
+
+OpenTofu (MPL-2.0)
+  The deployer image installs the unmodified OpenTofu binary and mirrors the
+  hashicorp/aws, hashicorp/random, and hashicorp/tls providers (MPL-2.0).
+  https://github.com/opentofu/opentofu
+
+Bifrost (Apache-2.0)
+  The model runtime image (infrastructure/images/bifrost) is based on
+  ghcr.io/agentifiers/bifrost, a fork of https://github.com/maximhq/bifrost.
+  Source: https://github.com/Agentifiers/bifrost
+
+-------------------------------------------------------------------------------
+Separately run network services (AGPL-3.0)
+-------------------------------------------------------------------------------
+
+The web tools runtime runs the following programs as separate containers. They
+are independent programs that communicate with this software only over the
+network. They are not part of this software, are not licensed under FSL, and
+remain under the GNU Affero General Public License, version 3.
+
+Firecrawl
+  Image ghcr.io/agentifiers/firecrawl, built from the fork at
+  https://github.com/Agentifiers/firecrawl. Corresponding source for each
+  image is the fork release tagged v<version> for the image's <version> tag,
+  the commit its org.opencontainers.image.revision label records
+  (infrastructure/images/firecrawl/Dockerfile pins the image).
+
+Firecrawl Playwright service
+  Unmodified ghcr.io/firecrawl/playwright-service image, published from
+  https://github.com/firecrawl/firecrawl (apps/playwright-service-ts).
+
+Lightpanda
+  Unmodified lightpanda/browser image. https://github.com/lightpanda-io/browser
+
+SearXNG
+  Unmodified searxng/searxng image. https://github.com/searxng/searxng

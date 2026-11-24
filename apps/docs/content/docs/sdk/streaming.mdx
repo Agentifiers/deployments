@@ -1,0 +1,248 @@
+---
+title: "Streaming run output"
+description: "Open a thread stream session, then read a run's events from the stream gateway with long polling or server-sent events."
+---
+
+A run's live output, including assistant tokens, tool calls, approvals, and the final status, goes to its thread's stream. The stream gateway serves the stream from its own origin, separate from the API. To read it, you ask the API for a stream session, then read the session's `streamUrl` with the session's token. This page shows both read styles: long polling with the SDK, and server-sent events with `fetch`.
+
+## How a stream read works
+
+1. Call `createThreadStreamSession` for the thread. The credential needs the `runs:read` scope. The response holds:
+   - `streamUrl`, the absolute URL of the thread's stream on the stream gateway.
+   - `accessToken`, a bearer token for that URL only. It expires five minutes after the API issues it, at `session.expiresAt`.
+   - `session.offset`, the stream position at the moment the API created the session.
+   - `history`, the first page of the thread's messages up to that moment, oldest first, and `historyNextCursor` when the thread has more messages than that page holds.
+2. Send `GET streamUrl` with `authorization: Bearer <accessToken>`, an `offset`, and a `live` mode.
+3. Each read returns the events after the offset and the offset to resume from. Save it, and send it with the next read.
+4. When the token expires, the gateway answers `401` with code `stream_session_expired`. Create a new session and continue from your saved offset.
+
+Two offsets are useful as a starting point. `-1` reads the thread's stream from the beginning. `session.offset` skips what `history` already shows, which suits a chat view that renders `history` first.
+
+## Choose a read mode
+
+| `live`      | Response                                                                                                                                         | Use it for                            |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------- |
+| Omitted     | A JSON array of the events after the offset                                                                                                      | Catching up once, then stopping       |
+| `long-poll` | The same JSON array, but the gateway waits for new events before it answers. If none arrive before the wait ends, it answers `204` with no body. | Following a run with plain requests   |
+| `sse`       | A `text/event-stream` that stays open. The gateway closes it periodically, and you reconnect from the last offset.                               | Following a run with the lowest delay |
+
+JSON responses carry the position in headers. `stream-next-offset` is the offset to send next, and `stream-cursor` is the cursor to send with it. `stream-up-to-date: true` means you have read everything the stream holds so far, and `stream-closed: true` means the stream is closed and no more events will arrive.
+
+## The events you receive
+
+Each event is a JSON object with at least `eventId`, `eventType`, `occurredAt`, and `payload`, plus IDs such as `runId`, `messageId`, or `toolCallId` that depend on the type. The stream belongs to the thread, so it holds the events of every run in that thread. Filter on `runId` to follow one run, and stop after `run.completed`, `run.failed`, or `run.canceled`.
+
+A reconnect can deliver an event again. Skip any `eventId` you have already handled. [Streaming](/docs/capabilities/streaming) lists the event types and their payloads.
+
+## Follow a run with long polling
+
+The generated `readThreadStream` function works for catch-up and long-poll reads. Because the client sends requests only to its own origin, create a second client for the stream gateway with the session's token:
+
+```ts
+import {
+  createClient,
+  createConfig,
+  createThreadStreamSession,
+  readThreadStream,
+} from "@agentifiers/deployments-sdk";
+
+interface StreamEvent {
+  readonly eventId: string;
+  readonly eventType: string;
+  readonly runId?: string;
+  readonly payload?: unknown;
+}
+
+const TERMINAL_EVENTS = new Set(["run.completed", "run.failed", "run.canceled"]);
+
+const api = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+async function streamClient(threadId: string) {
+  const { data, error } = await createThreadStreamSession({ client: api, path: { threadId } });
+  if (error) throw new Error("createThreadStreamSession failed", { cause: error });
+  return createClient(
+    createConfig({
+      baseUrl: new URL(data.streamUrl).origin,
+      headers: { authorization: `Bearer ${data.accessToken}` },
+    }),
+  );
+}
+
+export async function followRun(
+  threadId: string,
+  runId: string,
+  onEvent: (event: StreamEvent) => void,
+) {
+  let streams = await streamClient(threadId);
+  let offset = "-1";
+  let cursor: string | undefined;
+  const seen = new Set<string>();
+
+  while (true) {
+    const { data, error, response } = await readThreadStream({
+      client: streams,
+      path: { threadId },
+      query: { offset, cursor, live: "long-poll" },
+    });
+    if (error) {
+      if (error.code !== "stream_session_expired") {
+        throw new Error("readThreadStream failed", { cause: error });
+      }
+      streams = await streamClient(threadId);
+      continue;
+    }
+    offset = response?.headers.get("stream-next-offset") ?? offset;
+    cursor = response?.headers.get("stream-cursor") ?? cursor;
+    const events = (Array.isArray(data) ? data : []) as unknown as StreamEvent[];
+    for (const event of events) {
+      if (event.runId !== runId || seen.has(event.eventId)) continue;
+      seen.add(event.eventId);
+      onEvent(event);
+      if (TERMINAL_EVENTS.has(event.eventType)) return;
+    }
+    if (response?.headers.get("stream-closed") === "true") return;
+  }
+}
+```
+
+For a catch-up read that stops when it reaches the end, leave out `live` and stop when `stream-up-to-date` is `true`.
+
+## Follow a run with server-sent events
+
+By default, `readThreadStream` reads the whole response body before it returns, and an open SSE connection has no end. For `live=sse`, read the body yourself. The example below uses `fetch` and reuses `StreamEvent` and `TERMINAL_EVENTS` from the previous example.
+
+The gateway sends two kinds of events. A `data` event carries a JSON array of stream events. A `control` event carries a JSON object with `streamNextOffset`, and may carry `streamCursor`, `upToDate`, and `streamClosed`. The events in a `data` event count as delivered only when the `control` event after them arrives. If the connection drops between the two, reconnect from the last control offset and the gateway sends those events again.
+
+```ts continues
+interface Position {
+  offset: string;
+  cursor?: string;
+}
+
+/** Reads one SSE connection. Resolves true when the run ended or the stream closed. */
+export async function readSse(
+  session: { readonly streamUrl: string; readonly accessToken: string },
+  runId: string,
+  position: Position,
+  onEvent: (event: StreamEvent) => void,
+): Promise<boolean> {
+  const url = new URL(session.streamUrl);
+  url.searchParams.set("offset", position.offset);
+  url.searchParams.set("live", "sse");
+  if (position.cursor) url.searchParams.set("cursor", position.cursor);
+
+  const response = await fetch(url, {
+    headers: { authorization: `Bearer ${session.accessToken}` },
+    redirect: "error",
+  });
+  if (!response.ok || !response.body) {
+    const problem = await response.json().catch(() => undefined);
+    throw Object.assign(new Error(`Stream read failed with ${response.status}`), { problem });
+  }
+
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  let eventName = "";
+  let dataLines: string[] = [];
+  let pending: StreamEvent[] = [];
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) return false;
+    buffer += value;
+    let newline: number;
+    while ((newline = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newline).replace(/\r$/, "");
+      buffer = buffer.slice(newline + 1);
+      if (line.startsWith("event:")) eventName = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+      else if (line === "") {
+        const payload = dataLines.join("\n");
+        if (eventName === "data" && payload) {
+          const entries: unknown = JSON.parse(payload);
+          pending.push(...((Array.isArray(entries) ? entries : [entries]) as StreamEvent[]));
+        } else if (eventName === "control" && payload) {
+          const control = JSON.parse(payload);
+          position.offset = control.streamNextOffset;
+          if (control.streamCursor) position.cursor = control.streamCursor;
+          for (const event of pending) {
+            if (event.runId !== runId) continue;
+            onEvent(event);
+            if (TERMINAL_EVENTS.has(event.eventType)) return true;
+          }
+          pending = [];
+          if (control.streamClosed) return true;
+        }
+        eventName = "";
+        dataLines = [];
+      }
+    }
+  }
+}
+```
+
+Call it in a loop. Reconnect when the gateway closes the connection, and create a new session when the token expires. This code reuses `api` from the long-polling example:
+
+```ts continues
+const threadId = "<thread-id>";
+const runId = "<run-id>";
+const position: Position = { offset: "-1" };
+const seen = new Set<string>();
+const handle = (event: StreamEvent) => {
+  if (seen.has(event.eventId)) return;
+  seen.add(event.eventId);
+  console.log(event.eventType);
+};
+
+async function newSession() {
+  const { data, error } = await createThreadStreamSession({ client: api, path: { threadId } });
+  if (error) throw new Error("createThreadStreamSession failed", { cause: error });
+  return data;
+}
+
+let session = await newSession();
+while (true) {
+  try {
+    if (await readSse(session, runId, position, handle)) break;
+  } catch (error) {
+    const code = (error as { problem?: { code?: string } }).problem?.code;
+    if (code !== "stream_session_expired") throw error;
+    session = await newSession();
+  }
+}
+```
+
+## Show earlier messages first
+
+A chat view usually renders `history` from the session, then reads the stream from `session.offset`. The stream can repeat messages that `history` already holds. The session's `replayState` lists their IDs, so you can skip the repeats:
+
+- Skip `user-message.accepted` and `assistant-message.finalized` events whose `messageId` is in `replayState.canonicalMessageIds`.
+- Skip `assistant-token.chunk` and `assistant-message.finalized` events whose `messageId` is in `replayState.finalizedMessageIds`.
+
+To load the rest of the history, pass `historyNextCursor` as the `cursor` of `listThreadMessages`.
+
+## Stream gateway errors
+
+The gateway returns problem details with these codes:
+
+| Status | Code                     | Meaning                                                                                   |
+| ------ | ------------------------ | ----------------------------------------------------------------------------------------- |
+| `400`  | `invalid_id`             | The thread ID in the URL is not a canonical ULID.                                         |
+| `400`  | `invalid_stream_request` | A query parameter is invalid, for example a `live` value other than `long-poll` or `sse`. |
+| `401`  | `unauthorized`           | The request has no bearer token.                                                          |
+| `401`  | `invalid_stream_token`   | The token is malformed or its signature does not match.                                   |
+| `401`  | `stream_session_expired` | The session expired. Create a new one.                                                    |
+| `403`  | `stream_scope_violation` | The token belongs to another thread or does not allow reads.                              |
+| `503`  | `stream_unavailable`     | The gateway cannot reach the stream right now. Retry with backoff.                        |
+
+## Reference
+
+- [`createThreadStreamSession`](/docs/api/reference/runtime/create-thread-stream-session) and [`readThreadStream`](/docs/api/reference/runtime/read-thread-stream)
+- [`listThreadMessages`](/docs/api/reference/runtime/list-thread-messages)
+- [Streaming](/docs/capabilities/streaming) and [Threads and runs](/docs/capabilities/threads-and-runs)
+- [`deployments run tail`](/docs/cli/reference/run#run-tail), which follows a run from the terminal

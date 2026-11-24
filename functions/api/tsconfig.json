@@ -1,0 +1,30 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/functions/api",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/functions/api.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/api-contract" },
+    { "path": "../../packages/app-database" },
+    { "path": "../../packages/automations" },
+    { "path": "../../packages/brains" },
+    { "path": "../../packages/credential-vault" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/file-text" },
+    { "path": "../../packages/governance" },
+    { "path": "../../packages/mcp-client" },
+    { "path": "../../packages/net-security" },
+    { "path": "../../packages/observability" },
+    { "path": "../../packages/organization-admission" },
+    { "path": "../../packages/providers" },
+    { "path": "../../packages/secret-store" },
+    { "path": "../../packages/streaming" },
+    { "path": "../../packages/tenant-limits" },
+    { "path": "../../packages/tools" },
+    { "path": "../worker" }
+  ]
+}

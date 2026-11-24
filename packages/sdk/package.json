@@ -1,0 +1,21 @@
+{
+  "name": "@agentifiers/deployments-sdk",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./release-entry": "./src/release-entry.ts"
+  },
+  "scripts": {
+    "build": "bun ../../scripts/build-sdk-package.ts",
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@deployments-ai/agent-email": "workspace:*",
+    "@deployments-ai/agent-manifest": "workspace:*",
+    "@deployments-ai/api-contract": "workspace:*"
+  }
+}

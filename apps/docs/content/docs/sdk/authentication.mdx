@@ -1,0 +1,159 @@
+---
+title: "Authentication"
+description: "Pass API keys and JWTs with SDK requests, refresh tokens, and send the tenant headers each operation needs."
+---
+
+Every SDK call that needs a credential sends it as a bearer token in the `authorization` header. Operations that act inside an organization, project, or environment also take tenant headers. This page shows how to set both on a client and per call. For the credential types themselves and how to get them, see [Authentication](/docs/getting-started/authentication).
+
+## Which credential an operation accepts
+
+Each operation that takes a credential declares a security scheme. The API reference page for the operation shows it, and the generated function sends the credential the same way for all of them.
+
+| Scheme                | Accepts                                                          | Used by                                                                                                                                                  |
+| --------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `platformBearer`      | An API key or a JWT                                              | Operations not listed in the other rows, such as tenancy, agents, agent email, workflow definitions, tools, models, budgets, governance, and evaluations |
+| `apiCredentialBearer` | A service-account API key                                        | Runtime operations, such as runs, threads, approvals, artifacts, schedules, webhooks, and workflow executions. These also accept `platformBearer`.       |
+| `tenantJwt`           | A JWT that carries organization, project, and environment claims | Memory, Brains, and system operator operations                                                                                                           |
+| `streamSessionBearer` | The short-lived token that `createThreadStreamSession` returns   | `readThreadStream` only. See [Streaming run output](/docs/sdk/streaming).                                                                                |
+| None                  | No credential                                                    | `getHealth`, the device authorization operations, and the provider catalog reads `listProviders` and `getProvider`                                       |
+
+To check what a credential can do, call `getIdentity`. It returns the principal `id`, the `authentication` type (`api-credential` or `tenant-jwt`), the organizations, projects, and environments the credential reaches, and its `capabilities`.
+
+## Set a credential on the client
+
+For a credential that does not change, such as a service-account API key, set the header once in the client configuration:
+
+```ts
+import { createClient, createConfig, getIdentity } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data: identity } = await getIdentity({ client });
+console.log(identity?.authentication, identity?.capabilities);
+```
+
+Load the key from a secret store or an environment variable. Do not put it in source code.
+
+## Refresh a token before each request
+
+A JWT expires, so a long-running process needs a fresh token. Instead of a fixed header, give the client an `auth` function. The client calls it before each request to an operation that declares a security scheme, and sends the result as `Bearer <token>`. Operations without a scheme, such as `getHealth`, get no `authorization` header.
+
+```ts
+import { createClient, createConfig, listMemorySpaces } from "@agentifiers/deployments-sdk";
+
+declare const tokenStore: { currentAccessToken(): Promise<string> };
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    auth: async () => tokenStore.currentAccessToken(),
+  }),
+);
+
+const { data, error } = await listMemorySpaces({ client });
+```
+
+`tokenStore` stands for your own code that caches the token and renews it before it expires. The `auth` function may return the token directly or a promise of it. If it returns an empty value, the client sends no credential.
+
+## Send tenant headers
+
+Tenant headers tell the API which part of the hierarchy a request targets. Each value is a canonical ULID.
+
+| Header                       | Selects          |
+| ---------------------------- | ---------------- |
+| `x-deployments-organization` | The organization |
+| `x-deployments-project`      | The project      |
+| `x-deployments-environment`  | The environment  |
+
+Operations use them in one of four ways. The operation's API reference page lists its headers and marks the required ones.
+
+- **One required header.** Most operations outside the runtime need exactly one. For example, `listProjects` needs `x-deployments-organization`, `listEnvironments` needs `x-deployments-project`, and `listAgentDefinitions` needs `x-deployments-environment`.
+- **All three required.** The evaluation operations, `searchBrains`, and `askBrains` need the organization, project, and environment.
+- **Optional check.** Runtime operations accept all three headers. With a JWT, send all three to select the environment. With an API key, the key already belongs to one environment, so the headers are optional, and any you send must match the key. Memory operations also accept the three headers as an optional check that must match the credential.
+- **None.** A few operations, such as `listOrganizations` and `getIdentity`, take no tenant header.
+
+A missing required header fails with status `400` and a code such as `missing_scope` or `missing_environment_context`. Runtime operations called with a JWT that lacks one of the three headers fail with status `403` and `tenant_scope_required`. A header that names a scope the credential cannot reach fails with status `403`.
+
+Pass tenant headers per call, next to any other header the operation takes:
+
+```ts
+import { createClient, createConfig, submitAgentRun } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_TENANT_JWT}` },
+  }),
+);
+
+const { data, error } = await submitAgentRun({
+  client,
+  path: { agentDeploymentId: "<agent-deployment-id>" },
+  headers: {
+    "x-deployments-organization": "<organization-id>",
+    "x-deployments-project": "<project-id>",
+    "x-deployments-environment": "<environment-id>",
+    "idempotency-key": crypto.randomUUID(),
+  },
+  body: { content: "Summarize the latest release notes." },
+});
+```
+
+If one client always works in one environment, put the tenant headers in `createConfig` next to `authorization`. The client merges its headers with the headers of each call, and the call's value wins when both set the same header.
+
+## Sign a person in from your own tool
+
+A command-line tool built on the SDK can sign a person in with the same device flow the `deployments` CLI uses. The operations need no credential, and the API accepts only the client ID `deployments-cli`.
+
+```ts
+import {
+  createClient,
+  createConfig,
+  exchangeDeviceAuthorization,
+  startDeviceAuthorization,
+} from "@agentifiers/deployments-sdk";
+
+const anonymous = createClient(createConfig({ baseUrl: "https://api.example.com" }));
+
+const { data: device, error } = await startDeviceAuthorization({
+  client: anonymous,
+  body: { clientId: "deployments-cli" },
+});
+if (error) throw new Error("Could not start sign-in", { cause: error });
+
+console.log(
+  `Open ${device.verificationUriComplete ?? device.verificationUri} and enter code ${device.userCode}.`,
+);
+
+let intervalMs = Number(device.interval) * 1000;
+const deadline = Date.now() + Number(device.expiresIn) * 1000;
+while (Date.now() < deadline) {
+  await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  const result = await exchangeDeviceAuthorization({
+    client: anonymous,
+    body: { deviceCode: device.deviceCode },
+  });
+  if (result.data) {
+    // result.data.bearerToken is the access token. Keep result.data.refreshToken to renew it.
+    break;
+  }
+  const code = result.error?.code;
+  if (code === "slow_down") intervalMs += 5000;
+  else if (code !== "authorization_pending")
+    throw new Error("Sign-in failed", { cause: result.error });
+}
+```
+
+The exchange returns `bearerToken`, `expiresIn` in seconds, `tokenType` `Bearer`, and a `refreshToken` when the identity provider issues one. To renew the token, call `exchangeDeviceAuthorization` with `body: { refreshToken }`. To end the session, call `revokeDeviceAuthorization` with the refresh token. The CLI's [Signing in](/docs/cli/authentication) page describes the same flow from the user's side.
+
+## Reference
+
+- [`getIdentity`](/docs/api/reference/security/get-identity)
+- [`startDeviceAuthorization`](/docs/api/reference/security/start-device-authorization), [`exchangeDeviceAuthorization`](/docs/api/reference/security/exchange-device-authorization), and [`revokeDeviceAuthorization`](/docs/api/reference/security/revoke-device-authorization)
+- [Service accounts and API keys](/docs/capabilities/service-accounts-and-api-keys)
+- [SDK functions by tag](/docs/sdk/reference#security)

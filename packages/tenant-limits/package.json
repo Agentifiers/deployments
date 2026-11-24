@@ -1,0 +1,15 @@
+{
+  "name": "@deployments-ai/tenant-limits",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./install-defaults": "./src/install-defaults.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  }
+}

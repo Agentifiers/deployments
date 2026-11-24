@@ -1,0 +1,207 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "./dist/workspace",
+    "rootDir": ".",
+    "tsBuildInfoFile": "./dist/workspace.tsbuildinfo"
+  },
+  "include": ["scripts/**/*.ts", "tests/**/*.ts"],
+  "references": [
+    {
+      "path": "./apps/app-gateway"
+    },
+    {
+      "path": "./apps/console"
+    },
+    {
+      "path": "./apps/docs"
+    },
+    {
+      "path": "./apps/durable-streams"
+    },
+    {
+      "path": "./apps/model-gateway"
+    },
+    {
+      "path": "./apps/observability-hot-plane"
+    },
+    {
+      "path": "./apps/sandbox-microvm/browser"
+    },
+    {
+      "path": "./apps/stream-gateway"
+    },
+    {
+      "path": "./packages/api-contract"
+    },
+    {
+      "path": "./packages/agent-manifest"
+    },
+    {
+      "path": "./packages/agent-email"
+    },
+    {
+      "path": "./packages/agent-runtime"
+    },
+    {
+      "path": "./packages/automations"
+    },
+    {
+      "path": "./packages/workflows"
+    },
+    {
+      "path": "./packages/db"
+    },
+    {
+      "path": "./packages/app-database"
+    },
+    {
+      "path": "./packages/credential-vault"
+    },
+    {
+      "path": "./packages/conversations"
+    },
+    {
+      "path": "./packages/net-security"
+    },
+    {
+      "path": "./packages/providers"
+    },
+    {
+      "path": "./packages/channel-adapters"
+    },
+    {
+      "path": "./packages/ingress-media"
+    },
+    {
+      "path": "./packages/tools"
+    },
+    {
+      "path": "./packages/browser-screenshot"
+    },
+    {
+      "path": "./packages/web-tools-proxy"
+    },
+    {
+      "path": "./packages/brains"
+    },
+    {
+      "path": "./packages/brain-runtime"
+    },
+    {
+      "path": "./packages/web-tools"
+    },
+    {
+      "path": "./packages/model-gateway"
+    },
+    {
+      "path": "./packages/model-usage"
+    },
+    {
+      "path": "./packages/observability"
+    },
+    {
+      "path": "./packages/memory"
+    },
+    {
+      "path": "./packages/mcp-client"
+    },
+    {
+      "path": "./packages/sandbox-hosts"
+    },
+    {
+      "path": "./packages/streaming"
+    },
+    {
+      "path": "./packages/usage"
+    },
+    {
+      "path": "./packages/tenant-limits"
+    },
+    {
+      "path": "./packages/organization-admission"
+    },
+    {
+      "path": "./packages/sdk"
+    },
+    {
+      "path": "./packages/secret-store"
+    },
+    {
+      "path": "./packages/cli"
+    },
+    {
+      "path": "./packages/events"
+    },
+    {
+      "path": "./packages/event-analytics-operator"
+    },
+    {
+      "path": "./packages/e2e"
+    },
+    {
+      "path": "./packages/governance"
+    },
+    {
+      "path": "./packages/identity"
+    },
+    {
+      "path": "./packages/identity-emails"
+    },
+    {
+      "path": "./packages/webhooks"
+    },
+    {
+      "path": "./packages/web-bff-auth"
+    },
+    {
+      "path": "./packages/file-text"
+    },
+    {
+      "path": "./functions/event-dispatcher"
+    },
+    {
+      "path": "./functions/ops-alerts-notifier"
+    },
+    {
+      "path": "./functions/app-domains"
+    },
+    {
+      "path": "./functions/apps-database"
+    },
+    {
+      "path": "./functions/identity-api"
+    },
+    {
+      "path": "./functions/identity-email-worker"
+    },
+    {
+      "path": "./functions/api"
+    },
+    {
+      "path": "./functions/channel-provider-runtime"
+    },
+    {
+      "path": "./functions/agent-email-runtime"
+    },
+    {
+      "path": "./functions/event-analytics-projector"
+    },
+    {
+      "path": "./functions/memory-runtime"
+    },
+    {
+      "path": "./functions/worker"
+    },
+    {
+      "path": "./functions/runtime-api"
+    },
+    {
+      "path": "./functions/workflow-runtime"
+    },
+    {
+      "path": "./functions/document-extraction"
+    }
+  ]
+}

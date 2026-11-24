@@ -1,0 +1,113 @@
+---
+title: "Versioning and limits"
+description: "How the API contract is versioned, how to check which contract a client uses, and the limits requests must respect."
+---
+
+This page covers two things you plan around: which version of the contract you are calling, and the limits the API enforces on rates, concurrency, sizes, and spend.
+
+## Versioning
+
+The API has one public contract. Its major version is in every operation path except the health check, as `/v1`. The OpenAPI document at `GET /v1/openapi.json` reports `info.version` `1.0.0`.
+
+The TypeScript SDK is generated from that contract, and the CLI is tested to cover every operation in it. Both packages share one version. The SDK records which contract it was generated from in `contractMetadata`:
+
+| Field            | Meaning                                                         |
+| ---------------- | --------------------------------------------------------------- |
+| `apiVersion`     | The contract version, `1.0.0`.                                  |
+| `operationCount` | The number of operations the SDK has functions for.             |
+| `sha256`         | The SHA-256 of the canonical public OpenAPI document.           |
+| `codegenSha256`  | The SHA-256 of the normalized document the code generator read. |
+
+```ts
+import { contractMetadata } from "@agentifiers/deployments-sdk";
+
+console.log(contractMetadata.apiVersion, contractMetadata.operationCount, contractMetadata.sha256);
+```
+
+To compare your client with a running install, fetch the live document and diff it against the one your SDK was built from:
+
+```sh
+deployments openapi --json
+```
+
+<Callout type="warn" title="Availability">
+  The SDK and CLI are prereleases. They are published to the public npm registry on the `next` tag,
+  and their versions carry a prerelease suffix such as `0.1.0-alpha.1`.
+</Callout>
+
+## Request rate
+
+Two rate limits apply to API requests.
+
+The API gateway throttles all traffic to an installation before it reaches the platform. The operator sets this stage throttle for each installation with `operations.public_api_throttle`, a steady `rate_limit` in requests per second and a `burst_limit`. Ask your operator for your installation's values.
+
+Each organization also has its own request rate and burst. A request counts against an organization when its credential, or its `x-deployments-organization` header, selects exactly that one organization. API keys always select one. Requests that select no organization, such as unauthenticated calls, meet only the stage throttle. The platform checks the organization's rate right after it authenticates the request, so a request that fails authentication does not count. A request that the limit refuses does not count either.
+
+The organization limit admits a burst of requests at once, then a steady rate. A refused request gets status 429 with code `organization_rate_limited` and a `retry-after` header. The header gives the whole number of seconds, at least 1, until the organization's next request is admitted. Wait that long and send the request again.
+
+A 429 from the stage throttle comes from the gateway, not the platform, so it has no problem details `code`. Retry it with exponential backoff and jitter. For mutations, reuse the same idempotency key on every retry. [Errors](/docs/api/errors#429-responses) shows how to tell the 429 causes apart.
+
+## Organization limits
+
+Each organization runs under four limits. The installation's operator sets the defaults, and an entitlement grant on the organization's standing can change them for one organization; see [Tenant limits](/docs/operate/tenant-limits).
+
+| Limit                  | Applies to                                                                                                                                                                |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apiRequestsPerSecond` | The steady rate of API requests across the organization.                                                                                                                  |
+| `apiRequestBurst`      | The number of requests the organization can send at once before the steady rate applies.                                                                                  |
+| `concurrentRuns`       | Runs that execute at once. Later runs wait in `queued`. See [Threads and runs](/docs/capabilities/threads-and-runs#concurrent-run-limit).                                 |
+| `activeSandboxes`      | Sandboxes that run or resume at once. At the limit, a sandbox tool call fails and the run continues. See [Code sandbox](/docs/capabilities/sandbox#active-sandbox-limit). |
+
+The operator sets install-wide defaults. An entitlement grant from the operator or a machine service can raise or lower them for one organization. Ask your operator when you need more. [System operator](/docs/operate/system-operator#organization-limits) describes how they change them.
+
+Any active member can read the limits that apply to their organization with `GET /v1/organizations/{id}/limits`. Send the same organization ID in the `x-deployments-organization` header when you use a sign-in. The response gives each limit's `value` and its `source`. `default` is the install default. `plan` is a value a machine service's grant sets, such as a billing service's plan. `override` is a value the operator's grant sets, which wins over the plan:
+
+```json
+{
+  "organizationId": "<organization-id>",
+  "effective": {
+    "apiRequestsPerSecond": { "value": 20, "source": "default" },
+    "apiRequestBurst": { "value": 40, "source": "default" },
+    "concurrentRuns": { "value": 32, "source": "override" },
+    "activeSandboxes": { "value": 8, "source": "default" }
+  }
+}
+```
+
+The CLI reads the same route:
+
+```sh
+deployments org limits $ORGANIZATION_ID
+```
+
+## Spend budgets
+
+Budgets cap spend for an organization, project, or environment over a period. When an active budget reaches its amount, the platform refuses new runs with status 429 and code `budget_exhausted` until the period ends or someone raises, pauses, or archives the budget. Runs that were already accepted keep running. See [Usage and budgets](/docs/capabilities/usage-and-budgets).
+
+## Size and field limits
+
+| Item                              | Limit                                                                                       |
+| --------------------------------- | ------------------------------------------------------------------------------------------- |
+| A user message submitted to a run | 262,144 bytes (256 KiB). Larger messages fail with status 413 and code `message_too_large`. |
+| Resource names                    | 1 to 120 characters, no surrounding whitespace                                              |
+| Resource descriptions             | 2000 characters                                                                             |
+| Slugs                             | 1 to 63 lowercase letters, digits, and hyphens, no edge hyphens                             |
+| Email addresses                   | 254 characters, lowercase                                                                   |
+| Capability scope names            | 1 to 128 characters                                                                         |
+| List page size                    | Usually 1 to 100, set per operation                                                         |
+| Cursors                           | Usually 4096 characters                                                                     |
+| Idempotency keys                  | 256 bytes, 500 bytes, or 512 characters, by operation                                       |
+| Invitation lifetime               | 30 days. A later `expiresAt` fails with code `invalid_expiration`.                          |
+
+A value outside these limits fails validation with a 4xx problem response before the operation runs.
+
+Some operations accept larger payloads, such as artifact and Brain uploads, and set their own limits. Each operation's reference page lists the statuses it can return, including 413 where it applies. [Pagination](/docs/api/pagination) and [Idempotency](/docs/api/idempotency) give the exact rules for page sizes and keys.
+
+## Reference
+
+- [Check API health](/docs/api/reference/system/get-health)
+- [Get organization limits](/docs/api/reference/tenancy/get-organization-limits)
+- [List budgets](/docs/api/reference/budgets/list-budgets)
+- [`deployments openapi`](/docs/cli/reference/openapi#openapi)
+- [`deployments org limits`](/docs/cli/reference/org#org-limits)
+- [SDK overview](/docs/sdk)

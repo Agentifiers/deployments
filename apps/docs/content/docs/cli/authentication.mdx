@@ -1,0 +1,159 @@
+---
+title: "Signing in"
+description: "Sign in with a browser device flow or an API key, and manage the credentials each profile stores."
+---
+
+Live CLI commands send a bearer credential to the API. You get one of two ways. People sign in through the browser with a device code. Scripts and CI jobs use an API key that belongs to a service account. Both end with the credential stored in a CLI profile, or passed in the environment for one run.
+
+| You are                      | Use                                                                        | The CLI stores                                                                                     |
+| ---------------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| A person at a terminal       | `deployments auth login` with no key, which starts the browser device flow | A short-lived bearer token, its expiry, and a refresh token when the identity provider returns one |
+| A script, CI job, or service | An API key from `--api-key-file` or `DEPLOYMENTS_API_KEY`                  | The API key, or nothing if you only set the environment variable                                   |
+
+For the credential types and the scopes they carry, see [Authentication](/docs/getting-started/authentication).
+
+## Sign in with your browser
+
+<Steps>
+<Step>
+
+Choose the API host. The CLI uses `https://api.us.deployments.ai` by default. To use your install, set its API origin first:
+
+```bash
+export DEPLOYMENTS_API_URL=https://api.example.com
+```
+
+</Step>
+<Step>
+
+Start the sign-in:
+
+```bash
+deployments auth login
+```
+
+The CLI prints `Open <url> and enter code <code>.` to stderr. The URL is the `/device` page of your install's console, for example `https://app.example.com/device?code=ABCD-EFGH`, with the code already filled in.
+
+</Step>
+<Step>
+
+Open the URL in a browser. If you are not signed in to the console, sign in first; the page keeps the code and returns you to it. Check that the code on the page matches the one in your terminal, then select **Continue**.
+
+The page names the client asking for access (`Deployments CLI`), the account you are signed in as, and what the CLI will be able to do, grouped by area such as **Agents and automation** or **Keys and secrets**. Approve only if you started this sign-in yourself. If someone sent you the link or the code, select **Deny**. To approve as another account, select **Sign in with a different account**.
+
+After you approve, the page says **You're signed in** and you can return to the terminal. The CLI polls the API until you approve. If the code expires first, the command fails with `Device authorization expired before it was approved.` and exit code `3`.
+
+The page tells you when a code cannot be used:
+
+| Page says                    | Why                                                                      | What to do                                   |
+| ---------------------------- | ------------------------------------------------------------------------ | -------------------------------------------- |
+| This code has expired        | Codes last 10 minutes.                                                   | Run `deployments auth login` again.          |
+| This code was already used   | It was already approved, denied, or opened by another signed-in browser. | Run `deployments auth login` again.          |
+| We don't recognize this code | The code was mistyped.                                                   | Check the terminal and enter the code again. |
+
+Older CLI versions print a link to the identity origin's `/device` page instead. That page now sends you to the console page with the code, so the link still works.
+
+</Step>
+<Step>
+
+When you approve, the CLI checks the new token against `GET /v1/whoami` and saves the token and the API host in the profile. It prints a result with `status` `authenticated`, the `profile` name, and `mode` `live`. Later commands on this profile use the saved host, so you no longer need `DEPLOYMENTS_API_URL`.
+
+</Step>
+<Step>
+
+Confirm who you are signed in as:
+
+```bash
+deployments whoami
+```
+
+The output shows your principal `id`, the `authentication` type (`tenant-jwt` after a browser sign-in), the organizations, projects, and environments you can reach, and your `capabilities`.
+
+</Step>
+</Steps>
+
+The device flow needs an interactive terminal. Outside a terminal, or with `--json`, `deployments auth login` without a key stops with `Interactive device login requires a terminal.` and exit code `8`.
+
+The device flow starts only when the CLI finds no credential for the host. If `DEPLOYMENTS_API_KEY` is set, or the profile already holds an unexpired credential for the host, `deployments auth login` checks that credential and saves it in the profile instead. To replace a stored credential with a browser sign-in, run `deployments auth logout` first.
+
+### How the CLI renews the token
+
+A browser sign-in stores a bearer token that expires. When a command needs the stored token and the token expires within 60 seconds, the CLI exchanges the stored refresh token for a new one, checks the new token against `GET /v1/whoami`, and saves it. The exchange times out after 30 seconds.
+
+Commands that run at the same time on one profile share a lock, so only one of them renews the token. The others use the result.
+
+If the identity provider rejects the refresh token, the CLI marks the profile as needing a new sign-in and fails with exit code `3`. If the sign-in returned no refresh token, the CLI cannot renew it, and you sign in again after it expires. In both cases, run `deployments auth login` again.
+
+## Sign in with an API key
+
+An API key belongs to a service account and works without a browser. To create one, see [Service accounts and API keys](/docs/capabilities/service-accounts-and-api-keys).
+
+Keep the key out of your shell history. Save it to a file that only you can read, then pass the file:
+
+```bash
+deployments auth login --api-key-file ~/.config/deployments/api-key
+```
+
+The CLI reads the file, removes one trailing newline, and fails if the file is empty. It then calls `GET /v1/whoami` with the key. If the API accepts the key, the CLI saves it in the profile. `deployments whoami` then shows `authentication` `api-credential`.
+
+You can also log in from the environment variable:
+
+```bash
+DEPLOYMENTS_API_KEY="$KEY_FROM_YOUR_SECRET_STORE" deployments auth login
+```
+
+The `--api-key` flag works too, but the key then appears in your shell history and in the process list. Prefer the file or the environment variable.
+
+### Use a key without storing it
+
+To keep credentials off disk in a CI job, set the host and the key in the environment. Every command then uses them without a login step:
+
+```bash
+export DEPLOYMENTS_API_URL=https://api.example.com
+export DEPLOYMENTS_API_KEY="$KEY_FROM_YOUR_SECRET_STORE"
+deployments whoami --json
+```
+
+<Callout type="warn" title="DEPLOYMENTS_API_KEY and --api-url">
+  The CLI ignores `DEPLOYMENTS_API_KEY` on a command that passes `--api-url`. This stops a key meant
+  for one host from going to another. If you pass `--api-url`, pass the key with `--api-key` as
+  well, or set the host with `DEPLOYMENTS_API_URL` instead. On `deployments auth login`,
+  `--api-key-file` also works.
+</Callout>
+
+## Credentials stay with their host
+
+The CLI sends a stored credential only to the API origin it was saved for. If you change a profile's API URL to a different origin, for example with `deployments context set --api-url`, the CLI deletes the stored credential, refresh token, and expiry from that profile. Sign in again for the new host.
+
+## Sign out
+
+```bash
+deployments auth logout
+```
+
+The CLI removes the stored credential, expiry, and refresh token from the profile first. If the profile held a refresh token from a browser sign-in, the CLI then asks the API to revoke it. The command prints `status` `logged_out` and the profile name.
+
+If revocation fails, the local credentials are already gone, but the remote session may still be active. The CLI reports that and exits with code `8`.
+
+Signing out does not revoke an API key. To revoke a key on the platform, run `deployments api-key revoke` with the key ID.
+
+## Use more than one profile
+
+A profile holds one API host, one credential, and one stored context. Use separate profiles to keep, for example, your own browser sign-in apart from a service account key:
+
+```bash
+deployments auth login --profile automation --api-key-file ./automation-key
+deployments whoami --profile automation
+```
+
+`deployments auth login` writes to the profile you select and makes it the current profile. Select a profile per command with `--profile` or `DEPLOYMENTS_PROFILE`. [Configuration and context](/docs/cli/configuration) explains how the CLI picks the profile and every other setting.
+
+## Sign in for mock mode
+
+In mock mode, `deployments auth login --mock` saves a placeholder session in the profile instead of a real credential. The CLI never sends that placeholder to a live API, and `deployments context set --live` removes it from the profile.
+
+## Reference
+
+- [`deployments auth login`](/docs/cli/reference/auth#auth-login) and [`deployments auth logout`](/docs/cli/reference/auth#auth-logout)
+- [`deployments whoami`](/docs/cli/reference/whoami#whoami)
+- API operations: [`startDeviceAuthorization`](/docs/api/reference/security/start-device-authorization), [`exchangeDeviceAuthorization`](/docs/api/reference/security/exchange-device-authorization), [`revokeDeviceAuthorization`](/docs/api/reference/security/revoke-device-authorization), [`getIdentity`](/docs/api/reference/security/get-identity)

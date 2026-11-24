@@ -1,0 +1,175 @@
+---
+title: "Brains"
+description: "Governed knowledge bases that agents and people search and ask, with sources, uploads, citations, and curation."
+---
+
+A Brain is an organization knowledge base built from source documents, such as uploaded files and GitHub repositories. People and agents search a Brain for evidence, or ask it a question and get an answer whose every claim cites a source. Use a Brain when answers must trace back to documents your organization controls.
+
+## How Brains differ from memory
+
+|         | Brains                                                                                         | [Memory](/docs/capabilities/memory)              |
+| ------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| Content | Documents from sources, kept as immutable versions                                             | Short facts that agents learn or that you import |
+| Scope   | Organization                                                                                   | Environment                                      |
+| Access  | Brain grants to people, roles, service accounts, and agent definitions, plus deployment mounts | Memory space grants to agent definitions         |
+| Answers | Search results and answers with citations                                                      | Recalled memories in the agent's context         |
+
+<Callout type="info" title="Availability">
+  An installation from the customer root runs Brains by default. Search and ask return
+  `brain_search_unavailable` only when the installation has no model gateway configured. Every
+  organization gets its own Brain search index automatically once its memory search index is active,
+  with no operator step. Documents captured before then are indexed once the index activates. See
+  [Features](/docs/operate/features#memory-and-brain-search).
+</Callout>
+
+## Resources
+
+| Resource      | What it is                                                                                                                                                                                     |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Brain         | A knowledge base. `kind` is `company` or `member-private`. `sensitivity` is `public`, `internal` (the default), `restricted`, or `confidential`. Status is `active`, `archived`, or `erasing`. |
+| Source        | Where documents come from. Through the API you create `upload` sources and `github` sources.                                                                                                   |
+| Document      | One source item and its immutable versions. A version is `content`, `archive`, `restore`, or `tombstone`.                                                                                      |
+| Upload ticket | A short-lived permission to upload one file to a source.                                                                                                                                       |
+| Grant         | Who may use a Brain, and how.                                                                                                                                                                  |
+| Mount         | Attaches a Brain to one agent deployment.                                                                                                                                                      |
+| Review item   | A curator decision the Brain needs, such as a duplicate document or an entity merge.                                                                                                           |
+| Entity        | A canonical `company`, `concept`, `person`, or `project`, with relationships to documents and other entities.                                                                                  |
+| Erasure       | A request to remove a Brain and its content.                                                                                                                                                   |
+
+Brain routes are organization scoped and need the `x-deployments-organization` header. Search and ask also need `x-deployments-project` and `x-deployments-environment`. Every request other than a `GET` needs an `Idempotency-Key` header. Updates, archives, erasures, and revocations take the record's current `expectedVersion` and fail with a conflict when it changed.
+
+## Access control
+
+Access needs two things: a token scope and a Brain grant. The scopes are `brains:read`, `brains:write`, `brains:admin`, and `brains:create`. A grant targets one of these principals:
+
+| Grant target                                        | Permissions                            |
+| --------------------------------------------------- | -------------------------------------- |
+| `principal` (a person)                              | `owner`, `curator`, `writer`, `reader` |
+| `organization-role` (`owner`, `admin`, or `member`) | `curator`, `writer`, `reader`          |
+| `service-account`                                   | `read`, `read-write`                   |
+| `agent-definition`                                  | `read`, `read-write`                   |
+
+Every permission can read. `writer`, `curator`, and `read-write` can also add content. Only `owner` can administer the Brain, which covers grants, mounts, sources, settings, archiving, and erasure. The person who creates a Brain receives the first `owner` grant.
+
+Some actions need a human caller: creating a Brain, resolving review items, and requesting erasure. A `member-private` Brain belongs to one person. Only that owner and named service accounts or agent definitions can hold grants on it.
+
+An agent reaches a Brain only through both an `agent-definition` grant and a mount on its deployment. Create the grant first, because creating a mount without it fails. To write, an agent needs `read-write` on both the grant and the mount. Agents never administer a Brain.
+
+## Add content
+
+To upload a file:
+
+1. Create an upload ticket on an `upload` source with `expectedByteSize` (at most 8 MiB), `expectedContentHash` (`sha256:` followed by the hex digest), and `mediaType`. Accepted media types are `application/json`, `application/pdf`, `text/csv`, `text/html`, `text/markdown`, and `text/plain`.
+2. Upload the bytes within 5 minutes. An issued ticket offers two ways:
+   - `directUpload`: `PUT` the bytes to its presigned `url` with exactly its `headers`, then `POST` its `completePath`. This carries files up to the full 8 MiB. Completion answers 409 `brain_upload_content_missing` until storage holds the exact bytes the ticket names.
+   - `uploadPath`: `PUT` the bytes to the API with `Content-Length` and `Content-Type` matching the ticket exactly. The API's request payload limit stops this path at about 4.5 MiB.
+
+   `deployments brain-upload content` in the CLI uses `directUpload`. With the SDK, `PUT` the bytes to `directUpload.url` yourself, then call `completeBrainUpload`; the SDK's `uploadBrainContent` is the `uploadPath` route. If an upload fails partway, send the same bytes for the same ticket again before it expires. A resend for a `completed` ticket returns the ticket without storing the bytes again.
+
+3. Capture a `content` document version that names the completed ticket. A capture needs a `sourceRevision` or an idempotency key.
+
+A `github` source names a provider connection (`connectionId`) and a repository (`owner`, `repository`, and an optional `ref`, which defaults to `HEAD`). See [Providers and connections](/docs/capabilities/providers-and-connections). Creating the source queues an initial sync. A sync reads files that end in `.adoc`, `.csv`, `.json`, `.markdown`, `.md`, `.rst`, `.txt`, `.yaml`, or `.yml`, skips files larger than 1 MiB, and fails when the repository has more than 500 matching files or 32 MiB in total.
+
+Indexing runs after capture. It reads at most 750,000 characters and 500 pages of a document version and must finish extracting and embedding within 60 seconds, so a file within the 8 MiB upload limit can still fail to index.
+
+PDF and HTML files are indexed from their text layer. Indexing first extracts the text once per document version, with a separate 60-second limit, and stores it as the version's `normalized` rendition. Search, ask, and `agent.brain.get_document` read and cite that text. Where the installation turns on [OCR](/docs/operate/features#ocr-for-scanned-pdf-pages), indexing also reads PDF pages that have no text layer with Amazon Textract, at most 12 per file, and their text starts with a `--- Page N (OCR) ---` header. Without OCR, or when OCR finds no text, a scanned PDF cannot be indexed.
+
+Index health reports each document version as `pending`, `ready`, `stale`, `failed`, or `suppressed`, with separate status for its `dense`, `lexical`, `exact`, and `entity` components. A `failed` version includes `lastError`. A version whose content can never be indexed, such as text over the character limit, text that is not valid UTF-8, or a PDF with no readable text, fails on its first attempt. Turning on OCR later does not retry that version. Upload a new version to index it with OCR. Other failures retry with exponential backoff and show as `failed` after the 12th attempt.
+
+## Search and ask
+
+Search takes 1 to 20 Brain IDs, a `query` of at most 8,000 characters, and a `limit` of at most 50. Each result has an excerpt, a score, a sensitivity level, and a citation that names the Brain, source, document, document version, rendition, chunk, and position. For a PDF or HTML document, the cited rendition is the extracted text, and the position is a UTF-8 byte range in that text.
+
+Ask takes the same Brain IDs, a `question`, and an `evidenceLimit`. It returns `claims`, where each claim lists the citations that support it, plus `gaps` that the evidence could not answer and the `usedCitations`. The platform rejects a model answer that contains an uncited claim or cites evidence outside the retrieved context. It retries once with the same model and then fails the request.
+
+Search and ask both return a `queryAttemptId`. Record whether the result helped with feedback (`useful`, `neutral`, or `harmful`, plus optional text of at most 2,000 characters).
+
+A search or ask that has not finished after 25 seconds fails with status 504 and code `brain_query_timeout`. Retry it with the same idempotency key. If a request ends without any response, a retry with the same key gets `409 idempotency_in_progress` for up to 60 seconds after the first attempt and then runs the query again.
+
+## Agents and Brains
+
+An agent with a Brain mount can call these tools when its release manifest lists them:
+
+| Tool                       | Effect | Default policy    |
+| -------------------------- | ------ | ----------------- |
+| `agent.brain.search`       | Read   | Allow             |
+| `agent.brain.ask`          | Read   | Allow             |
+| `agent.brain.get_document` | Read   | Allow             |
+| `agent.brain.get_entity`   | Read   | Allow             |
+| `agent.brain.capture`      | Write  | Requires approval |
+
+The deployment config field `brainRetrievalMode` decides whether the runtime adds Brain evidence before the model answers. See [Agents, releases, and deployments](/docs/capabilities/agents).
+
+| Mode            | Behavior                                                                                                      |
+| --------------- | ------------------------------------------------------------------------------------------------------------- |
+| `off` (default) | No automatic Brain retrieval                                                                                  |
+| `explicit`      | Brain evidence only when the run explicitly uses a Brain tool or the prompt requires it                       |
+| `brain-first`   | Always retrieve Brain evidence                                                                                |
+| `memory-first`  | Prefer memory, and add Brain evidence when the prompt calls for it or memory is weak, expired, or conflicting |
+| `hybrid`        | Choose Brain evidence, memory, or both from the prompt                                                        |
+
+In every mode except `off`, a prompt that asks for citations or touches a legal, financial, security, or compliance topic requires Brain evidence. If no authorized evidence is available, the run fails instead of answering without it.
+
+## Curation and erasure
+
+Review items have a kind (`contradiction`, `duplicate-document`, `entity-merge`, `extraction`, or `summary`). A human with write access resolves each one with `approve`, `reject`, or `merge`. A merge names a target entity from the proposed candidates.
+
+Archiving sets a Brain to `archived`. Erasure is a separate request that only a human `owner` can make. It sets the Brain to `erasing` and returns an erasure record whose status moves through `pending`, `running`, and then `completed` or `failed`.
+
+## Use it
+
+1. Create a Brain:
+
+   ```sh
+   deployments brain create --name "Engineering handbook" --slug engineering-handbook --kind company
+   ```
+
+2. Add an upload source, a ticket, and the file:
+
+   ```sh
+   deployments brain-source create $BRAIN_ID --kind upload --name "Handbook uploads"
+   deployments brain-upload create $BRAIN_ID $SOURCE_ID --expected-byte-size 18432 --expected-content-hash sha256:$FILE_SHA256 --media-type text/markdown
+   deployments brain-upload content $BRAIN_ID $SOURCE_ID $TICKET_ID --file handbook.md --content-type text/markdown
+   deployments brain-document capture $BRAIN_ID $SOURCE_ID --kind content --completed-upload-ticket-id $TICKET_ID --external-item-identity handbook.md --source-revision v1
+   ```
+
+3. Grant an agent definition read access and mount the Brain on its deployment. See the [`deployments brain-grant`](/docs/cli/reference/brain-grant#brain-grant-create) and [`deployments brain-mount`](/docs/cli/reference/brain-mount#brain-mount-create) reference for the flags.
+
+4. Ask a question:
+
+   ```sh
+   deployments brain ask --brains $BRAIN_ID --question "How do we roll back a deployment?"
+   ```
+
+The same question through the SDK:
+
+```ts
+import { askBrains, createClient, createConfig } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_TENANT_JWT}` },
+  }),
+);
+
+const { data, error } = await askBrains({
+  client,
+  headers: {
+    "idempotency-key": crypto.randomUUID(),
+    "x-deployments-organization": "org_123",
+    "x-deployments-project": "prj_123",
+    "x-deployments-environment": "env_123",
+  },
+  body: {
+    brainIds: ["brn_123"],
+    question: "How do we roll back a deployment?",
+  },
+});
+```
+
+## Reference
+
+- API: [Brains operations](/docs/api/reference/brains/search-brains), including [Ask Brains](/docs/api/reference/brains/ask-brains), [Create a Brain grant](/docs/api/reference/brains/create-brain-grant), and [Create a Brain mount](/docs/api/reference/brains/create-brain-mount)
+- CLI: [`deployments brain`](/docs/cli/reference/brain#brain-search), [`deployments brain-source`](/docs/cli/reference/brain-source#brain-source-create), [`deployments brain-upload`](/docs/cli/reference/brain-upload#brain-upload-create), [`deployments brain-review`](/docs/cli/reference/brain-review#brain-review-list), [`deployments brain-erasure`](/docs/cli/reference/brain-erasure#brain-erasure-create)
+- SDK: [Brains functions](/docs/sdk/reference#brains)

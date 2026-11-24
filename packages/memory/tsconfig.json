@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/memory",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/memory.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../db" }, { "path": "../events" }, { "path": "../governance" }]
+}

@@ -1,0 +1,32 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/functions/runtime-api",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/functions/runtime-api.tsbuildinfo"
+  },
+  "include": ["scripts/**/*.ts", "src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/agent-email" },
+    { "path": "../../packages/agent-manifest" },
+    { "path": "../../packages/automations" },
+    { "path": "../../packages/conversations" },
+    { "path": "../../packages/credential-vault" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/events" },
+    { "path": "../../packages/file-text" },
+    { "path": "../../packages/identity" },
+    { "path": "../../packages/identity-emails" },
+    { "path": "../../packages/model-gateway" },
+    { "path": "../../packages/net-security" },
+    { "path": "../../packages/observability" },
+    { "path": "../../packages/organization-admission" },
+    { "path": "../../packages/secret-store" },
+    { "path": "../../packages/streaming" },
+    { "path": "../../packages/tenant-limits" },
+    { "path": "../../packages/tools" },
+    { "path": "../../packages/webhooks" },
+    { "path": "../worker" }
+  ]
+}

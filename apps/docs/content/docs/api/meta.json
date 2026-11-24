@@ -1,0 +1,14 @@
+{
+  "title": "API",
+  "description": "HTTP API reference",
+  "root": true,
+  "pages": [
+    "index",
+    "errors",
+    "pagination",
+    "idempotency",
+    "versioning-and-limits",
+    "---Reference---",
+    "...reference"
+  ]
+}

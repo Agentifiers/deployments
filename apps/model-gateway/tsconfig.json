@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/apps/model-gateway",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/apps/model-gateway.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/db" },
+    { "path": "../../packages/model-gateway" },
+    { "path": "../../packages/tenant-limits" }
+  ]
+}

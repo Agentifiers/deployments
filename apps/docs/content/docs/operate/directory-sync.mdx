@@ -1,0 +1,225 @@
+---
+title: "Directory sync"
+description: "Let an organization's identity provider add, update, and remove members through SCIM 2.0: turning it on, bearer tokens, Okta and Microsoft Entra ID setup, the SCIM API, and the rules provisioning follows."
+---
+
+Directory sync lets an organization's identity provider manage its members through SCIM 2.0 (RFC 7643 and RFC 7644). When a person is assigned to the application in Okta or Microsoft Entra ID, the provider creates their account and membership. When the person is unassigned or deactivated, the provider removes the membership.
+
+The platform implements the SCIM `User` resource only. It does not support `Group` resources, bulk operations, sorting, or ETags. SCIM never grants or changes the `owner` or `admin` role.
+
+<Callout type="warn" title="Availability">
+  Provisioning accepts only email addresses on a verified login domain, and people sign in through
+  the organization's identity provider. Both are part of [identity
+  federation](/docs/operate/identity-federation), which runs only with platform identity. Verify a
+  login domain and configure the identity provider before you turn on directory sync.
+</Callout>
+
+## Who can administer directory sync
+
+| Action                                               | Organization role | Token scope     |
+| ---------------------------------------------------- | ----------------- | --------------- |
+| Read the directory settings and token list           | Owner or admin    | `members:read`  |
+| Turn on sync, change the default role, manage tokens | Owner or admin    | `members:write` |
+
+In the console, the organization's **Sign-in** page has a **Directory sync** section for these actions.
+
+## Turn on directory sync
+
+1. Choose the default role. SCIM gives this role to every member it adds or reactivates. It is `member` or `viewer`.
+
+   ```bash
+   deployments directory set --default-role member --org <organization-id>
+   ```
+
+   In the console, click **Turn on** in the **Directory sync** section. Running `directory set` again changes the default role. The change applies to members that SCIM adds or reactivates afterwards. Existing memberships keep their roles.
+
+2. Create a bearer token for the identity provider:
+
+   ```bash
+   deployments directory token create --org <organization-id> --reveal
+   ```
+
+   The response contains `secret`, which starts with `dpl_scim_`. The platform stores only its SHA-256 hash, so this response is the only place the secret appears. The CLI prints it only with `--reveal`. The console shows it once, with a copy button.
+
+3. Copy the SCIM base URL. `deployments directory show` returns it as `scimBaseUrl`, and the console shows it with a copy button. It is the platform API origin followed by `/scim/v2`, for example `https://api.example.com/scim/v2`.
+
+4. Configure the identity provider with the base URL and the token. See [Okta](#set-up-okta) or [Microsoft Entra ID](#set-up-microsoft-entra-id).
+
+### Rotate a token
+
+A directory holds at most two tokens, so you can move the identity provider to a new token before you revoke the old one. Tokens do not expire.
+
+1. Create a second token.
+2. Replace the token in the identity provider's provisioning settings.
+3. Revoke the old token:
+
+   ```bash
+   deployments directory token revoke <token-id> --org <organization-id> --yes
+   ```
+
+A revoked token gets 401 from the SCIM API at once. Creating a third token fails with 409 `directory_token_limit`. Each token has an `id`, a `tokenPrefix` with the first 16 characters of the secret, `createdAt`, and `createdBy`. The CLI treats the `tokens` list as secret output, so `deployments directory show` prints the token IDs only with `--reveal`. The list never contains a secret.
+
+## Set up Okta
+
+1. In the Okta Admin Console, open the application that members use to sign in to the platform. On the **General** tab, edit **App Settings** and set **Provisioning** to **SCIM**.
+2. On the **Provisioning** tab, open **Integration** and fill in the connector:
+   - Set **SCIM connector base URL** to the SCIM base URL.
+   - Set **Unique identifier field for users** to `userName`.
+   - Under **Supported provisioning actions**, select **Push New Users** and **Push Profile Updates**. Leave **Push Groups** off.
+   - Set **Authentication Mode** to **HTTP Header** and enter the token as the bearer token.
+3. Click **Test Connector Configuration**, then save.
+4. Under **Provisioning** > **To App**, enable **Create Users**, **Update User Attributes**, and **Deactivate Users**.
+5. Assign people to the application.
+
+Okta sends PATCH requests with value objects, such as `{"op":"replace","value":{"active":false}}`, to deactivate a person. The platform accepts that form.
+
+## Set up Microsoft Entra ID
+
+1. In the Microsoft Entra admin center, open the enterprise application that members use to sign in to the platform. Open **Provisioning** and set **Provisioning Mode** to **Automatic**.
+2. Under **Admin Credentials**, set **Tenant URL** to the SCIM base URL and **Secret Token** to the token. Click **Test Connection**.
+3. Under **Mappings**, turn off **Provision Microsoft Entra ID Groups**. The platform has no `Group` resource.
+4. Open **Provision Microsoft Entra ID Users**. Map `emails[type eq "work"].value` to an attribute that holds the person's address on a verified login domain, usually `mail`. Keep `userName` as the matching attribute.
+5. Set **Scope** to **Sync only assigned users and groups**, assign people to the application, and set **Provisioning Status** to **On**.
+
+Entra ID sends PATCH requests with attribute paths, capitalized operations such as `Replace`, and the strings `"True"` and `"False"` for `active`. The platform accepts that form. When a person is unassigned or disabled, Entra ID sets `active` to `"False"`. When the person is permanently deleted, it sends `DELETE`.
+
+## What provisioning does
+
+### Creating a user
+
+`POST /Users` takes the email address from the `emails` entry marked `primary`, else the entry with `type` `work`, else the first entry. Without an `emails` entry, it uses `userName` when `userName` is an email address. The platform lowercases the address. Its domain must be a verified login domain of the organization, or the request fails with 400 `invalidValue`.
+
+- If no account has the address, the platform creates an account with that verified address and no password. When `active` is `true`, the platform also adds a membership with the default role.
+- If an account already has the address, the platform maps that account to the SCIM user instead. When `active` is `true` and the account has no active membership, the platform adds one with the default role. An active membership keeps its role.
+- Platform administrators, non-human principals, and inactive accounts cannot be provisioned. The request fails with 403.
+
+`userName` is unique within the organization, compared without regard to case. `externalId` is unique within the organization, compared exactly. A duplicate in `POST` fails with 409 `uniqueness`.
+
+### Updating a user
+
+`PUT` and `PATCH` change `userName`, `externalId`, `displayName`, and `active`.
+
+- The primary email address never changes through SCIM. The platform ignores `emails` in `PUT` and every email path in `PATCH`, so a different address is not an error.
+- A `userName` or `externalId` that another user in the organization holds fails with 409 `uniqueness`, unless the request also sets `active` to `false` (see [Deprovisioning](#deprovisioning)).
+- A `userName` change updates only the SCIM user. The email address stays.
+- `PUT` without `externalId` clears it. `PUT` without `active` leaves the membership as it is.
+- The display name comes from `displayName`, else `name.formatted`, else `name.givenName` and `name.familyName`. SCIM changes the account's display name only when this organization's directory created the account, the person has no membership in another organization, and their role here is not `owner` or `admin`. Otherwise the platform ignores the display name.
+
+### Deprovisioning
+
+Setting `active` to `false` removes the person's membership in this organization. `DELETE /Users/{id}` removes the membership and the SCIM user, so a later `GET /Users/{id}` returns 404. Neither request disables the account or changes the person's memberships in other organizations.
+
+A request that sets `active` to `false` removes the membership whatever else it carries, unless the person is an active `owner` or `admin`. When it also asks for a `userName` or `externalId` that another user holds, the platform keeps the current value of that attribute instead of failing the request. Its other changes still apply.
+
+The platform checks membership on every request, so the person loses access to this organization on their next request. Their `/v1` requests for this organization then fail with 401 `unauthorized`, not 403. Deprovisioning does not end the person's identity sessions or delete their identity provider link, and their access to other organizations is unchanged.
+
+SCIM never removes an active `owner` or `admin`, never changes their role, and never changes their display name. Deactivating or deleting one fails with 403. Manage those members in the console.
+
+Setting `active` to `true` on a removed membership adds the person back with the default role, even when they had another role before.
+
+## How provisioned people sign in
+
+SCIM creates accounts without a password. A provisioned person signs in through the organization's identity provider. The first federated sign-in links the provider identity to the account without the mailbox confirmation email when all of these hold:
+
+- This organization's directory created the account. An account that existed before SCIM mapped it does not qualify.
+- The person's membership in this organization is active.
+- The account has no password.
+- No link confirmation or link deletion has ended the account's sessions.
+- The account has no link in this organization yet.
+- The account has no membership in any other organization.
+
+Otherwise the sign-in follows the [linking rules](/docs/operate/identity-federation#linking-rules) and emails a confirmation link to the account's address. Just-in-time membership is not involved, because the membership already exists.
+
+## SCIM API reference
+
+### Endpoints
+
+The base URL is the platform API origin followed by `/scim/v2`. A trailing slash is accepted.
+
+| Method   | Path                                                              | Success                                     |
+| -------- | ----------------------------------------------------------------- | ------------------------------------------- |
+| `GET`    | `/Users`                                                          | 200 with a `ListResponse`                   |
+| `POST`   | `/Users`                                                          | 201 with the `User` and a `Location` header |
+| `GET`    | `/Users/{id}`                                                     | 200 with the `User`                         |
+| `PUT`    | `/Users/{id}`                                                     | 200 with the `User`                         |
+| `PATCH`  | `/Users/{id}`                                                     | 200 with the `User`                         |
+| `DELETE` | `/Users/{id}`                                                     | 204                                         |
+| `GET`    | `/ServiceProviderConfig`                                          | 200                                         |
+| `GET`    | `/ResourceTypes`, `/ResourceTypes/User`                           | 200                                         |
+| `GET`    | `/Schemas`, `/Schemas/urn:ietf:params:scim:schemas:core:2.0:User` | 200                                         |
+
+A `User` has `schemas`, `id` (the platform principal ID), `externalId` when set, `userName`, `displayName` and `name.formatted` when set, `emails` with one entry marked `primary` with `type` `work`, `active`, and `meta` with `resourceType`, `created`, `lastModified`, and `location`. `active` is `true` when the person has an active membership in the organization. Roles and groups are not exposed.
+
+### Authentication
+
+Send the token as `Authorization: Bearer dpl_scim_...`. The token alone selects the organization. A missing, unknown, or revoked token gets 401 with `WWW-Authenticate: Bearer realm="scim"`. A SCIM token does not authenticate `/v1` routes.
+
+### Filtering and paging
+
+`GET /Users` accepts one filter of the form `userName eq "<value>"` or `externalId eq "<value>"`. Attribute names and `eq` are case-insensitive. Any other filter fails with 400 `invalidFilter`.
+
+`startIndex` is 1-based and defaults to 1. `count` defaults to 100, and values above 100 are treated as 100. A value that is not an integer fails with 400 `invalidValue`.
+
+### PATCH
+
+The body is a `PatchOp` with an `Operations` array. Each operation's `op` is `add`, `replace`, or `remove`, in any case. Later operations override earlier ones.
+
+- With a `path`, the platform reads `active`, `userName`, `displayName`, `name`, `name.formatted`, and `externalId`. The path may carry the core `User` schema URN as a prefix. The platform ignores email paths, other paths, and extension schema paths.
+- Without a `path`, `value` must be an object, and each key is read as a path.
+- `remove` clears `externalId`. It is ignored for `displayName`, `name`, and the email paths. It fails with 400 `mutability` for `active` and `userName`, and with 400 `noTarget` when it has no `path`.
+- `active` accepts `true`, `false`, `"True"`, and `"False"`.
+
+### Request bodies and limits
+
+Send bodies as `application/scim+json` or `application/json`. Another content type, or none, fails with 415. A body larger than 64 KiB (65,536 bytes) fails with 413. A body that is not valid JSON fails with 400 `invalidSyntax`. Text attributes are at most 256 characters.
+
+SCIM requests count against the organization's API request rate, the same limit as `/v1` routes. See [Tenant limits](/docs/operate/tenant-limits). Over the limit, the API answers 429 with a `Retry-After` header.
+
+While the organization is [suspended](/docs/operate/organization-standing), SCIM reads still answer, and so does deprovisioning: `DELETE`, and a `PUT` or `PATCH` that sets `active` to false. Every other write fails with 403, and the `detail` ends with each hold's customer message.
+
+### Errors
+
+Errors use the SCIM `Error` schema and `Content-Type: application/scim+json`. The body has `schemas`, `status` as a string, `detail`, and `scimType` when one applies.
+
+| Status | `scimType`      | Cause                                                                                                            |
+| ------ | --------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 400    | `invalidFilter` | The filter is not `userName eq` or `externalId eq`.                                                              |
+| 400    | `invalidPath`   | A PATCH path is not a valid attribute path.                                                                      |
+| 400    | `invalidSyntax` | The body is not valid JSON, is not a `User` object, or has no `Operations` array.                                |
+| 400    | `invalidValue`  | An attribute has the wrong type, or the email domain is not a verified login domain.                             |
+| 400    | `mutability`    | The request removes a required attribute.                                                                        |
+| 400    | `noTarget`      | A `remove` operation has no `path`.                                                                              |
+| 401    | none            | The bearer token is missing, unknown, or revoked.                                                                |
+| 403    | none            | The account cannot be provisioned, the person is an active `owner` or `admin`, or the organization is suspended. |
+| 404    | none            | The path is unknown, or the user does not exist in this organization.                                            |
+| 405    | none            | The method is not allowed on the path. The `Allow` header lists the allowed methods.                             |
+| 409    | `uniqueness`    | Another user in the organization has the `userName`, the email address, or the `externalId`.                     |
+| 413    | none            | The body exceeds 64 KiB.                                                                                         |
+| 415    | none            | The content type is not `application/scim+json` or `application/json`.                                           |
+| 429    | none            | The organization is over its request rate. Retry after `Retry-After` seconds.                                    |
+| 503    | none            | Concurrent changes to the same user collided. Retry after one second.                                            |
+
+## Directory administration API and CLI
+
+These routes use platform bearer authentication and the `x-deployments-organization` header. Writes need an `Idempotency-Key`, which the CLI generates.
+
+| Route                              | CLI                                  | API reference                                                                 |
+| ---------------------------------- | ------------------------------------ | ----------------------------------------------------------------------------- |
+| `GET /v1/directory`                | `deployments directory show`         | [`getDirectory`](/docs/api/reference/security/get-directory)                  |
+| `PUT /v1/directory`                | `deployments directory set`          | [`putDirectory`](/docs/api/reference/security/put-directory)                  |
+| `POST /v1/directory/tokens`        | `deployments directory token create` | [`createDirectoryToken`](/docs/api/reference/security/create-directory-token) |
+| `DELETE /v1/directory/tokens/{id}` | `deployments directory token revoke` | [`revokeDirectoryToken`](/docs/api/reference/security/revoke-directory-token) |
+
+`GET /v1/directory` returns `defaultRole`, `scimBaseUrl`, `tokens`, `createdAt`, and `updatedAt`. `POST /v1/directory/tokens` returns `directory` and `token`, where `token` adds `secret` to the token fields. `DELETE /v1/directory/tokens/{id}` returns the directory. The CLI reference page for [`directory`](/docs/cli/reference/directory) lists every flag.
+
+The routes return these error codes, among others:
+
+| Status | Codes                                                                                     |
+| ------ | ----------------------------------------------------------------------------------------- |
+| 400    | `missing_organization_context`, `invalid_organization_context`, `missing_idempotency_key` |
+| 403    | `insufficient_scope`, `insufficient_role`, `organization_scope_violation`                 |
+| 404    | `directory_not_configured`, `directory_token_not_found`                                   |
+| 409    | `directory_token_limit`, `directory_conflict`                                             |
+| 422    | `validation_failed`                                                                       |
+
+SCIM writes appear in the audit log with an actor of type `directory-token` and the token's ID. Membership events from SCIM carry `source: "scim"`.

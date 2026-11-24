@@ -1,0 +1,35 @@
+{
+  "name": "@deployments-ai/memory-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bun build src/api.ts src/cleanup-worker.ts src/erasure-worker.ts src/index-dispatcher.ts src/index-worker.ts src/flush-worker.ts src/operation-reconciler.ts src/operation-worker.ts src/reconcile.ts src/search-placement-worker.ts src/shadow-worker.ts src/usage-worker.ts --target=node --format=esm --root src --outdir=dist && cp package.json dist/package.json",
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1090.0",
+    "@aws-sdk/client-kms": "3.1090.0",
+    "@aws-sdk/client-lambda": "3.1090.0",
+    "@aws-sdk/client-s3": "3.1090.0",
+    "@aws-sdk/client-sqs": "3.1090.0",
+    "@aws-sdk/credential-provider-node": "3.972.70",
+    "@aws-sdk/lib-dynamodb": "3.1090.0",
+    "@deployments-ai/api-contract": "workspace:*",
+    "@deployments-ai/db": "workspace:*",
+    "@deployments-ai/memory": "workspace:*",
+    "@deployments-ai/model-gateway": "workspace:*",
+    "@deployments-ai/model-usage": "workspace:*",
+    "@deployments-ai/organization-admission": "workspace:*",
+    "@deployments-ai/secret-store": "workspace:*",
+    "@deployments-ai/tenant-limits": "workspace:*",
+    "@smithy/signature-v4": "5.6.7",
+    "effect": "4.0.0-beta.92",
+    "jose": "6.2.4"
+  }
+}

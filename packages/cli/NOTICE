@@ -1,0 +1,13 @@
+@agentifiers/deployments-cli
+Copyright (c) 2026 Cinematic Software LLC d/b/a Agentifiers
+https://github.com/Agentifiers/deployments/tree/main/packages/cli
+
+The source code in this directory and the published @agentifiers/deployments-cli npm
+package are licensed under the MIT License. See the LICENSE file.
+
+The published package bundles code from other workspace packages in the
+Deployments repository, including @agentifiers/deployments-sdk and
+@deployments-ai/api-contract, into bin.js. That bundled code, as distributed in
+this package, is licensed under the MIT License too. The rest of the
+Deployments repository remains licensed under the Functional Source License,
+Version 1.1, ALv2 Future License, as stated in the repository's LICENSE file.

@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/model-gateway",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/model-gateway.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": []
+}

@@ -1,0 +1,109 @@
+---
+title: "Authentication"
+description: "Authentication schemes, device sign-in, service accounts and API keys, tenant headers, and capability scopes."
+---
+
+Every API call except the health check, the device sign-in operations, and the provider catalog reads carries a bearer credential in the `Authorization` header. This page explains which credentials exist, how you get each one, and how the API decides what a credential may do.
+
+## Two kinds of credential
+
+| Credential            | Who holds it      | Format                                       | How you get it                                     |
+| --------------------- | ----------------- | -------------------------------------------- | -------------------------------------------------- |
+| Platform access token | A person          | A JWT signed by the platform identity issuer | `deployments auth login`, or the console's sign-in |
+| API key               | A service account | An opaque string that starts with `dpl_`     | `deployments api-key create`                       |
+
+The API tells the two apart by shape. A bearer value with three dot-separated segments is a JWT. Anything else is an opaque API key.
+
+## Authentication schemes in the API reference
+
+The OpenAPI document declares four security schemes. Each operation page names the schemes it accepts.
+
+| Scheme                | Accepts                                   | Used by                                                                                                                                                                                                                        |
+| --------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `platformBearer`      | A platform access token or an API key     | Tenancy, identity, credential references, agents, workflow definitions and releases, managed skills, providers, tools, extensions, models, budgets, operations, observability, governance, email, agent email, and evaluations |
+| `apiCredentialBearer` | An API key                                | Runtime operations, including artifacts, automations, and workflow executions, as an alternative to `platformBearer`                                                                                                           |
+| `tenantJwt`           | A JWT from the platform issuer            | Memory, Brains, and the system operations                                                                                                                                                                                      |
+| `streamSessionBearer` | A short-lived token for one thread stream | Reading a thread stream from the stream gateway                                                                                                                                                                                |
+
+A few operations need no credential: `GET /health`, the three device authorization operations, and the two provider catalog reads, `GET /v1/providers` and `GET /v1/providers/{providerKey}`.
+
+## Sign in as a person with the device flow
+
+The CLI signs people in with the OAuth 2.0 device authorization grant (RFC 8628). You do not paste a password into the terminal.
+
+1. `deployments auth login` asks the API to start a device authorization for the `deployments-cli` client.
+2. The CLI prints a short user code and a link to the console's `/device` page with the code filled in.
+3. You open the link in a browser, sign in to the console, check the client and the access it asks for, and approve.
+4. The CLI polls the API until you approve, then stores the access token, its expiry, and a refresh token in your CLI profile.
+5. Before the token expires, the CLI uses the refresh token to get a new one.
+
+`deployments auth logout` revokes the refresh token on the server and removes the credentials from the profile. [Signing in](/docs/cli/authentication) covers profiles and non-interactive login.
+
+The identity service also issues refresh tokens in families. If someone presents a refresh token that was already used, the service marks the whole family as compromised.
+
+## Authenticate a machine with an API key
+
+Backend services and CI jobs use API keys. An API key belongs to one service account, and a service account belongs to one environment. The key works only in that environment.
+
+```sh
+deployments service-account create --name "ci" --scopes agents:read,runs:read,runs:write
+deployments api-key create --name "ci-key" --service-account $SERVICE_ACCOUNT_ID --reveal
+```
+
+The response contains the secret exactly once. The CLI hides secrets unless you pass `--reveal`. [Service accounts and API keys](/docs/capabilities/service-accounts-and-api-keys) covers scopes, rotation, and revocation.
+
+To use a key with the CLI without putting it in your shell history, read it from a file or the environment:
+
+```sh
+deployments auth login --api-key-file ./deployments-api-key
+```
+
+## Send tenant headers
+
+Tenant headers tell the API which organization, project, or environment a request acts on. Which headers an operation needs depends on the operation.
+
+- Tenancy and agent operations take the one header for their level, such as `x-deployments-environment` for agent operations.
+- Runtime operations called with a platform access token need all three headers: `x-deployments-organization`, `x-deployments-project`, and `x-deployments-environment`. The API checks that your membership gives you access to that environment.
+- Runtime operations called with an API key do not need the headers. If you send them, they must match the key's environment.
+
+```sh
+curl "$DEPLOYMENTS_API_URL/v1/agent-definitions" \
+  --header "authorization: Bearer $DEPLOYMENTS_API_KEY" \
+  --header "x-deployments-environment: $ENV_ID"
+```
+
+## How the API decides what you may do
+
+The API checks three things on each request.
+
+1. **The credential is valid.** An API key must be active, unexpired, and owned by an active service account. A platform access token must be signed by the issuer and belong to an active person.
+2. **The credential reaches the requested tenant.** An API key reaches only its own environment. A person reaches an organization only while their membership is active. The API reads membership on every request, not from the token.
+3. **The credential holds the required scope.** For people, the organization role narrows the token's scopes. For API keys, the effective scopes are the key's scopes that its service account also holds.
+
+To see your effective identity, run:
+
+```sh
+deployments whoami
+```
+
+`whoami` returns `authentication` (`tenant-jwt` or `api-credential`), your principal `id`, the organization, project, and environment IDs that your credential or your tenant headers select, and `capabilities`. When your CLI context selects an organization, the response also includes your `organizationRole` and the capabilities that role leaves you.
+
+## Failures
+
+| Status | Code                          | Meaning                                                                                                          |
+| ------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 401    | `unauthorized`                | The bearer credential is missing, invalid, expired, or revoked.                                                  |
+| 403    | `insufficient_scope`          | The credential lacks the scope the operation requires.                                                           |
+| 403    | `environment_scope_violation` | The credential cannot reach the environment in the header. Organization and project headers have matching codes. |
+| 400    | `missing_scope`               | A required tenant header is missing.                                                                             |
+| 403    | `tenant_scope_required`       | A runtime operation called with a platform access token is missing one of the three tenant headers.              |
+
+[Errors](/docs/api/errors) describes the error format.
+
+## Reference
+
+- [Start a device authorization](/docs/api/reference/security/start-device-authorization)
+- [Show the authenticated identity](/docs/api/reference/security/get-identity)
+- [`deployments auth login`](/docs/cli/reference/auth#auth-login) and [`deployments whoami`](/docs/cli/reference/whoami#whoami)
+- [SDK authentication](/docs/sdk/authentication)
+- [Security functions in the SDK](/docs/sdk/reference#security)

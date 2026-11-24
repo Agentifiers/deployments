@@ -1,0 +1,30 @@
+{
+	admin off
+	auto_https off
+}
+
+http://:{$DURABLE_STREAMS_EFFECTIVE_PORT:4437} {
+	bind {$DURABLE_STREAMS_EFFECTIVE_HOST:0.0.0.0}
+
+	route {
+		respond /healthz 200
+
+		@blocked path /_test/*
+		respond @blocked 404
+
+		@unauthorized not header Authorization "Bearer {$DURABLE_STREAMS_AUTH_TOKEN}"
+		respond @unauthorized 401
+
+		route /v1/stream/* {
+			durable_streams {
+				data_dir {$DURABLE_STREAMS_EFFECTIVE_DATA_DIR:/data}
+				long_poll_timeout {$DURABLE_STREAMS_EFFECTIVE_LONG_POLL_TIMEOUT:20000ms}
+				# SSE reads may sit idle until this close; it stays below the 60 s CloudFront origin
+				# read timeout in front of the stream gateway. Clients resume from their last offset.
+				sse_reconnect_interval 50s
+			}
+		}
+
+		respond 404
+	}
+}

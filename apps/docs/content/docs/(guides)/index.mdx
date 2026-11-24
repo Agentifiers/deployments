@@ -1,0 +1,64 @@
+---
+title: "Overview"
+description: "What Deployments.ai is, who it is for, and the four ways to work with it: console, CLI, SDK, and HTTP API."
+---
+
+Deployments.ai is a multi-tenant control plane and runtime for AI agents. You describe an agent in a manifest, publish it as an immutable release, deploy that release into an environment, and send it work. The platform runs the agent, streams its output, records every run against the exact release that executed, and meters what it used.
+
+These docs are for two groups of readers:
+
+- Engineers who build on the platform through the CLI, the TypeScript SDK, the HTTP API, or the management console.
+- Operators who install and run the platform.
+
+## How an agent gets from idea to answer
+
+Every agent follows the same path, whatever triggers it.
+
+1. **Define.** An agent definition holds a draft `AgentManifestV1`: instructions, model, tools, memory, sandbox, and triggers.
+2. **Release.** Publishing the definition creates an immutable release with a SHA-256 content hash and a release number.
+3. **Deploy.** A deployment pins one release to one environment and binds environment-specific tool authorizations.
+4. **Run.** A message to a deployment starts a run on a thread. The run records which deployment and release executed it.
+
+A run can start from the API, a chat client, email, a schedule, a heartbeat, a webhook, or a workflow. All of them produce the same thread and run records. [Core concepts](/docs/getting-started/concepts) explains each resource.
+
+## Four ways in
+
+All four entry points call the same public API. Pick the one that fits the job.
+
+| Entry point         | Use it to                                                                                                  | Start here                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| CLI (`deployments`) | Script tenancy, agents, runs, and operations from a terminal or CI job. Every API operation has a command. | [CLI overview](/docs/cli)                           |
+| TypeScript SDK      | Call the API from Node.js code with one typed function per operation.                                      | [SDK overview](/docs/sdk)                           |
+| HTTP API            | Integrate from any language with JSON over HTTPS.                                                          | [API overview](/docs/api)                           |
+| Management console  | Inspect agents, releases, deployments, runs, traces, evaluations, and usage in a browser.                  | [Management console](/docs/getting-started/console) |
+
+The SDK is generated from the API contract, and a test checks that every API operation has a CLI command. Each API reference page shows the matching SDK function and CLI command.
+
+## Map of the docs
+
+<Cards>
+  <Card title="Quickstart" href="/docs/getting-started/quickstart">
+    Install the CLI, sign in, and take an agent from manifest to a running conversation.
+  </Card>
+  <Card title="Core concepts" href="/docs/getting-started/concepts">
+    The resource hierarchy, releases and deployments, principals, and scopes.
+  </Card>
+  <Card title="Authentication" href="/docs/getting-started/authentication">
+    Bearer credentials, device sign-in, tenant headers, roles, and capability scopes.
+  </Card>
+  <Card title="Hosts and environments" href="/docs/getting-started/hosts-and-environments">
+    The API, identity, stream, and console origins, and how environments isolate work.
+  </Card>
+  <Card title="Platform capabilities" href="/docs/capabilities/tenancy">
+    One guide per capability, including tenancy, agents, memory, webhooks, and governance.
+  </Card>
+  <Card title="API reference" href="/docs/api">
+    Conventions for errors, pagination, idempotency, and limits, plus a page per operation.
+  </Card>
+  <Card title="CLI reference" href="/docs/cli/reference">
+    Every command and flag, generated from the CLI catalog.
+  </Card>
+  <Card title="Operate the platform" href="/docs/operate">
+    Architecture, deployment, and the security model for install operators.
+  </Card>
+</Cards>

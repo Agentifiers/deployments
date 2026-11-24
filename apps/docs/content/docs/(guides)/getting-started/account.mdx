@@ -1,0 +1,78 @@
+---
+title: "Your account"
+description: "Change your email, set your password and two-factor authentication, sign out sessions, and delete your account."
+---
+
+Your account is yours alone and sits outside every organization. To manage it, open the console, open the account menu or the organization list, and click **Account security**. The page is at `/account` on the console origin, for example `https://app.example.com/account`.
+
+The page has these sections, from top to bottom: **Email**, **Password**, **Two-factor authentication**, **Browser sessions**, and **Delete account**. If you sign in only through your organization's identity provider, the page shows **Sign-in** in place of the password and two-factor sections, because that provider manages them.
+
+## Change your email
+
+1. In **Email**, click **Change email**.
+2. Enter the new address and your password. If two-factor authentication is on, also enter a code from your authenticator app or an unused recovery code.
+3. Click **Send confirmation link**. The console shows the new address as **pending** with the time the link expires.
+4. Open the email sent to the new address and click **Review and confirm**. On the page that opens, click **Confirm new email**.
+
+The link works once and for one hour. Your email does not change until you confirm it. The console sends the link even when another account already uses the new address, so it never shows which addresses have accounts. In that case confirming fails, and your email stays as it is. If you ask for another change before you confirm, the newer request replaces the older one and the older link stops working. Changing your password also cancels a pending change. To stop a change, click **Cancel change**.
+
+When you confirm:
+
+- Your account signs in with the new address, and the old address is free for anyone to use.
+- Every browser, console, and CLI session signs out. Sign in again with the new address.
+- The old address receives a notice that names the new address and has a **This wasn't me** link. That link works for seven days. It signs every session out again and moves the account back to the old address if nobody has taken it in the meantime.
+
+You cannot change the email again during those seven days, so the notice to the old address stays useful.
+
+Reporting a change also stops the password from working, because whoever made the change knew it. Password reset links sent before the report stop working too. To sign in again, use **Forgot password**. The reset link goes to the address the account uses after the report, which is the old address when it came back. The address that was reported away gets an email that says the change was reported. After a report, the email cannot change again for seven days.
+
+<Callout type="info" title="Addresses an organization manages">
+  If an organization signs you in through its identity provider (SSO) or provisions you through
+  SCIM, that organization keeps your email in step with its own directory. The **Email** section
+  names the organization and has no **Change email** button. Ask that organization's administrators
+  to change the address.
+</Callout>
+
+## Password
+
+Click **Change password**, enter your current password, and enter the new one twice. The new password needs at least 15 characters. Changing it signs out every session, including this one, and we email you that it changed.
+
+## Two-factor authentication
+
+Two-factor authentication asks for a code from an authenticator app after your password when you sign in.
+
+1. In **Two-factor authentication**, click **Turn on** and enter your password.
+2. Scan the QR code with an authenticator app such as 1Password, Google Authenticator, or Authy. If you cannot scan it, copy the **Setup key** or the **Setup link** into the app and choose a time-based (TOTP) account.
+3. Enter the six-digit code the app shows and click **Turn on**.
+4. Store the ten recovery codes somewhere safe, check **I stored these recovery codes**, and click **Done**. The console shows them only once.
+
+When you sign in, the identity service asks for your email and password, then shows **Two-factor authentication**. Enter the current code from your app, or one of your recovery codes. Each recovery code works once, and each app code is accepted once. **Start over** returns to the password step.
+
+With two-factor authentication on, the section counts your unused recovery codes. **Replace recovery codes** issues ten new codes and stops the old ones. **Turn off** needs a code and returns sign-in to the password alone. We email you whenever two-factor authentication turns on or off.
+
+## Browser sessions
+
+**Browser sessions** lists each browser signed in to your account, and marks this one as **this browser**. **Sign out** ends one session, along with the console and CLI sessions started from it. **Sign out everywhere** ends all of them, including this one.
+
+## Delete your account
+
+**Delete account** lists what deletion does before it offers the button:
+
+- Every browser, console, and CLI session signs out, and refresh tokens and device sign-ins stop working.
+- You leave every organization you belong to. Their projects, agents, and audit history stay with them.
+- Your name, email, password, and two-factor settings are removed, and the email address is free for a new account. The platform keeps an anonymous record of the account so that audit history still resolves.
+- Links between your account and an organization's identity provider (SSO) are removed, so that provider can no longer sign in to the deleted account.
+- We send a confirmation to your email address.
+
+API keys and service accounts you created belong to the organization they were created in, not to you. They keep working after you delete your account, as they do when an organization removes a member. Ask that organization's admins to rotate or delete any you no longer want.
+
+Deletion happens at once and cannot be undone. There is no grace period. To delete, click **Delete account**, enter your password and, if two-factor authentication is on, a code, type `delete my account`, and click **Delete account**. The console then signs you out. The code is used up as soon as it is accepted, even if the deletion then fails.
+
+Deletion leaves every organization you belong to at that moment, including one you joined after the page loaded. If you become the only owner of some organizations while the deletion runs, it stops and names each of them. Organizations it already left stay left, because leaving them is part of what you asked for. Fix the named organizations and delete again.
+
+The section explains why you cannot delete your account yet when one of these applies:
+
+- **You are the only owner of an organization.** Every organization needs an owner. Follow **Make another member an owner** to that organization's **Members** page, or **erase the organization** to its **Data governance** page.
+- **An organization manages your account** through its identity provider or SCIM directory. Ask that organization's administrators to remove you.
+- **You are a platform administrator.** Ask another administrator to remove your role first.
+- **Your email changed in the last seven days.** Until the **This wasn't me** link sent to your previous address expires, deleting would take that link away. The section shows when you can delete.

@@ -1,0 +1,189 @@
+---
+title: "Verifying webhooks"
+description: "Check the signature and timestamp of every webhook delivery with node:crypto, and keep deliveries working through a secret rotation."
+---
+
+The platform signs every webhook delivery with the subscription's signing secret. Before you act on a delivery, check that the signature matches and that the timestamp is recent. A request that fails either check did not come from the platform, or it is a replay. The SDK does not ship a verification helper, so this page gives you a self-contained function built on `node:crypto`.
+
+For subscriptions, event types, and delivery retries, see [Webhooks](/docs/capabilities/webhooks).
+
+## What a delivery contains
+
+Each delivery is an HTTPS `POST` with a JSON body and these headers:
+
+| Header                      | Value                                                                                                |
+| --------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `x-deployments-signature`   | One or more signatures, comma separated, each in the form `v1=<hex>`                                 |
+| `x-deployments-timestamp`   | The time of signing, in milliseconds since the Unix epoch                                            |
+| `x-deployments-event-id`    | The event ID. It stays the same on every attempt and every retry of this event to this subscription. |
+| `x-deployments-event-type`  | The event type, such as `run.completed`                                                              |
+| `x-deployments-delivery-id` | The ID of the delivery record                                                                        |
+| `content-type`              | `application/json`                                                                                   |
+| `user-agent`                | `deployments-ai-webhooks/1.0`                                                                        |
+
+The body is a JSON envelope:
+
+| Field                                              | Meaning                                          |
+| -------------------------------------------------- | ------------------------------------------------ |
+| `version`                                          | The envelope version, `1`                        |
+| `source`                                           | `deployments-ai.platform`                        |
+| `eventId`, `eventType`, `occurredAt`               | The event's ID, type, and time                   |
+| `deliveryId`, `endpointId`                         | The delivery record and the webhook subscription |
+| `organizationId`                                   | The organization the event belongs to            |
+| `aggregateType`, `aggregateId`, `aggregateVersion` | The resource the event is about and its version  |
+| `payload`                                          | The event-specific data                          |
+
+## How the signature works
+
+The platform computes each signature like this:
+
+1. Join the timestamp header value, a period, and the raw request body: `<timestamp>.<body>`.
+2. Compute an HMAC-SHA256 of that string, keyed with the signing secret exactly as the API returned it. Do not decode the secret first.
+3. Hex-encode the digest and prefix it with `v1=`.
+
+To verify a delivery, accept it only if both of these hold:
+
+- The timestamp is within five minutes of your clock, in either direction.
+- At least one `v1=` value in the signature header equals the signature you compute with at least one secret you hold. Compare in constant time.
+
+The header can hold more than one signature. During a secret rotation, the platform signs each delivery with both the new and the previous secret. Check every `v1=` value, and ignore values with any other prefix.
+
+## Verify a delivery
+
+```ts
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+const TOLERANCE_MS = 5 * 60 * 1000;
+
+/** True when the delivery is signed by one of `secrets` and its timestamp is recent. */
+export function verifyWebhook(
+  rawBody: string,
+  signatureHeader: string | null | undefined,
+  timestampHeader: string | null | undefined,
+  secrets: readonly string[],
+  now: number = Date.now(),
+): boolean {
+  const timestamp = Number(timestampHeader);
+  if (!signatureHeader || !timestampHeader || !Number.isSafeInteger(timestamp)) return false;
+  if (Math.abs(now - timestamp) > TOLERANCE_MS) return false;
+
+  const presented = signatureHeader
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.startsWith("v1="))
+    .map((entry) => Buffer.from(entry));
+
+  return secrets.some((secret) => {
+    const digest = createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex");
+    const expected = Buffer.from(`v1=${digest}`);
+    return presented.some(
+      (candidate) => candidate.length === expected.length && timingSafeEqual(candidate, expected),
+    );
+  });
+}
+```
+
+`timingSafeEqual` takes the same time whether the values match early or late, so an attacker cannot learn the signature one character at a time. It throws on buffers of different lengths, which is why the length check comes first.
+
+## Use the raw body
+
+The signature covers the exact bytes the platform sent. If your framework parses the JSON body before your handler runs, re-serializing it can change spacing or key order, and the check fails. Read the raw body, verify it, and only then parse it.
+
+This handler uses `node:http` and the `verifyWebhook` function above:
+
+```ts continues
+import { createServer } from "node:http";
+
+// Your code: store the event unless its ID is already stored.
+declare function recordOnce(eventId: string, delivery: unknown): Promise<void>;
+
+const secrets = [
+  process.env.WEBHOOK_SIGNING_SECRET,
+  process.env.WEBHOOK_PREVIOUS_SIGNING_SECRET,
+].filter((secret): secret is string => Boolean(secret));
+
+createServer(async (request, response) => {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(chunk as Buffer);
+  const rawBody = Buffer.concat(chunks).toString("utf8");
+
+  const valid = verifyWebhook(
+    rawBody,
+    request.headers["x-deployments-signature"] as string | undefined,
+    request.headers["x-deployments-timestamp"] as string | undefined,
+    secrets,
+  );
+  if (!valid) {
+    response.writeHead(401).end();
+    return;
+  }
+
+  const delivery = JSON.parse(rawBody);
+  await recordOnce(delivery.eventId, delivery);
+  response.writeHead(204).end();
+}).listen(8080);
+```
+
+In a handler that receives a standard `Request`, read the body with `await request.text()` and the headers with `request.headers.get("x-deployments-signature")` and `request.headers.get("x-deployments-timestamp")`.
+
+## Respond in time and process each event once
+
+- Return a `2xx` status after you verify and store the event. The platform treats any other status, or no answer within 15 seconds, as a failed attempt.
+- Do the slow work after you respond, for example from a queue.
+- Deliveries can arrive more than once. Use `x-deployments-event-id`, or `eventId` in the body, as your deduplication key.
+- If verification fails, return `401`. The platform does not retry a `4xx` status other than `408`, `409`, `425`, and `429`, so the delivery fails at once instead of retrying with the same signature. After you fix your configuration, resend it with `deployments webhook-delivery retry`.
+
+## Get the signing secret
+
+The API returns a subscription's signing secret only in the response to `createWebhook` and `rotateWebhookSecret`, as `signingSecret`. Save it to your secret store when you receive it. The CLI hides it unless you pass `--reveal`:
+
+```bash
+deployments webhook create --name "Run results" --url https://hooks.example.com/deployments \
+  --event-types run.completed,run.failed --reveal --json
+```
+
+## Rotate the secret without dropping deliveries
+
+`deployments webhook rotate-secret` issues a new secret. The previous secret keeps signing, as a second signature on every delivery, until `previousSigningSecretExpiresAt`:
+
+```bash
+deployments webhook rotate-secret "$WEBHOOK_ID" --previous-secret-expires-in-seconds 86400 --reveal --json
+```
+
+`--previous-secret-expires-in-seconds` accepts `0` to `604800`, which is seven days. Without it, the overlap lasts `86400` seconds, which is one day. `0` stops signing with the previous secret at once.
+
+<Steps>
+<Step>
+
+Rotate the secret and save the new `signingSecret` from the response.
+
+</Step>
+<Step>
+
+Add the new secret to the list your receiver accepts. Keep the previous secret in the list.
+
+</Step>
+<Step>
+
+After `previousSigningSecretExpiresAt`, remove the previous secret from the list.
+
+</Step>
+</Steps>
+
+Because every delivery carries both signatures during the overlap, your receiver keeps verifying deliveries whether it holds the old secret, the new one, or both. Finish the change before the overlap ends.
+
+## Test your receiver
+
+`deployments webhook test` sends one signed `webhook.test` event to the subscription right away and reports the result:
+
+```bash
+deployments webhook test "$WEBHOOK_ID" --json
+```
+
+The response shows whether the receiver accepted it in `delivered`, the receiver's `responseStatus`, the `durationMs`, and an `error` message if the attempt failed. The test event's `payload` is `{ "test": true, "webhookEndpointId": "<webhook-id>" }`. The platform does not store a delivery record for it.
+
+## Reference
+
+- [`createWebhook`](/docs/api/reference/runtime/create-webhook), [`rotateWebhookSecret`](/docs/api/reference/runtime/rotate-webhook-secret), [`testWebhook`](/docs/api/reference/runtime/test-webhook), and [`retryWebhookDelivery`](/docs/api/reference/runtime/retry-webhook-delivery)
+- [`deployments webhook`](/docs/cli/reference/webhook) and [`deployments webhook-delivery`](/docs/cli/reference/webhook-delivery) commands
+- [Webhooks](/docs/capabilities/webhooks)

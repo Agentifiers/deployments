@@ -1,0 +1,266 @@
+---
+title: "Agent manifests"
+description: "The AgentManifestV1 format that declares an agent's instructions, model, tools, memory, sandbox, sub-agents, and output contract, and the deployment configuration that binds it to an environment."
+---
+
+An agent manifest is the JSON document that declares what an agent is: its instructions, model, tools, memory, sandbox, triggers, and optional sub-agents. You write one to create an [agent definition](/docs/capabilities/agents), and every release stores one immutable copy. Environment-specific wiring does not belong in the manifest. It goes in the deployment's runtime configuration, described at the end of this page.
+
+## A minimal manifest
+
+```json title="agent.json"
+{
+  "apiVersion": "agents.deployments.ai/v1",
+  "kind": "Agent",
+  "metadata": {
+    "key": "support.triage",
+    "name": "Support triage",
+    "version": "1.0.0"
+  },
+  "spec": {
+    "instructions": "Classify the request and reply with a one-line summary.",
+    "model": {
+      "id": "openai/gpt-4o",
+      "fallbackIds": ["openrouter/qwen/qwen3.7-plus"]
+    },
+    "sandbox": { "mode": "none" },
+    "triggers": ["api"]
+  }
+}
+```
+
+`apiVersion`, `kind`, `metadata`, `spec.instructions`, `spec.model.id`, and `spec.sandbox.mode` are required. Decoding is strict, so an unknown field anywhere in the document fails validation.
+
+The platform hashes the canonical JSON of the manifest (keys sorted) with SHA-256 and stores it as the release `contentHash`. Optional fields you omit do not change the hash, so adding a new optional field to the schema never changes the identity of existing releases.
+
+## Metadata and spec fields
+
+| Field                     | Rules                                                                                                                                                                                                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `metadata.key`            | Lowercase letters, digits, `.`, `_`, and `-`, at most 128 characters. Becomes the definition slug, unique per environment.                                                                                                                                   |
+| `metadata.name`           | Display name, at most 120 characters.                                                                                                                                                                                                                        |
+| `metadata.version`        | Semantic version, at most 64 characters.                                                                                                                                                                                                                     |
+| `spec.instructions`       | Non-empty, at most 131,072 characters.                                                                                                                                                                                                                       |
+| `spec.platformSkills`     | Unique names of skills the platform bundles: `app-builder`, `app-publication`, and `computer-use`. See [Platform skills](#platform-skills).                                                                                                                  |
+| `spec.skills`             | At most 32 pinned skill texts of at most 8,192 characters each, counting platform skills.                                                                                                                                                                    |
+| `spec.model`              | `id`, up to 3 unique `fallbackIds`, and optional `options`. The primary cannot repeat as a fallback. See [Model selection](#model-selection).                                                                                                                |
+| `spec.memory`             | `mode`: `agent`, `organization`, `workspace`, `thread`, or `off` (default `off`). `reviewMode`: `auto-approve` or `manual` (default `manual`). `transcriptPrivacy`: `omit`, `redact`, or `retain` (default `omit`). See [Memory](/docs/capabilities/memory). |
+| `spec.capabilities.tools` | Up to 256 tool capabilities. See [Tool capabilities](#tool-capabilities).                                                                                                                                                                                    |
+| `spec.runtime`            | Loop limits, context budgets, model tools, and output contracts. See [Runtime settings](#runtime-settings).                                                                                                                                                  |
+| `spec.sandbox`            | Code execution isolation. See [Sandbox](#sandbox).                                                                                                                                                                                                           |
+| `spec.triggers`           | Unique values from `api`, `chat`, `email`, `heartbeat`, `schedule`, `webhook`, and `workflow`. Omit the list to allow every trigger.                                                                                                                         |
+| `spec.agents`             | Up to 16 declared sub-agents. See [Sub-agents](#sub-agents).                                                                                                                                                                                                 |
+
+A run whose trigger the release does not allow fails with `trigger_not_allowed`, and so does creating a schedule or heartbeat for it.
+
+## Platform skills
+
+A skill is text the platform adds to the system prompt on every model call, after the instructions. List bundled skills by name in `spec.platformSkills` instead of pasting their text into `spec.skills`:
+
+```json
+{ "spec": { "platformSkills": ["computer-use"], "skills": ["Close each window when you finish."] } }
+```
+
+| Name              | Teaches the agent to                                                             |
+| ----------------- | -------------------------------------------------------------------------------- |
+| `app-builder`     | Build a web app with the `app.*` tools, a Postgres API, and a Vite React UI.     |
+| `app-publication` | Open an app built with `app-builder` to the public or serve it as a static site. |
+| `computer-use`    | Operate the sandbox desktop with `computer.screenshot` and `computer.action`.    |
+
+Platform skills come before the manifest's own skills, so your skills can refine them. A release pins the name, not the text: each run uses the skill text of the platform version that runs it, so platform fixes reach your agent without a new release. To freeze a skill's text, paste it into `spec.skills` instead.
+
+## Tool capabilities
+
+Each entry in `spec.capabilities.tools` declares one tool the agent may use:
+
+```json
+{
+  "name": "orders.lookup",
+  "required": true,
+  "requiredScopes": ["orders:read"],
+  "authorization": "none"
+}
+```
+
+- `name` is a tool name from the environment's [tool catalog](/docs/capabilities/tools) or an [extension tool](/docs/capabilities/extensions-and-hosted-code) you registered.
+- `requiredScopes` are opaque strings, so provider-defined OAuth scope formats pass through unchanged.
+- `authorization: "workspace"` lets a deployment bind a workspace authorization to the tool. `none` (or omitting the field) means it takes no binding.
+- `required: true` together with `authorization: "workspace"` makes the binding mandatory at deploy time.
+
+Declaring a tool does not show it to the model. `spec.runtime.modelTools` lists the tools the model may call, and it defaults to none. A preconfigured `spec.runtime.toolRequests` entry runs a declared tool with fixed input instead.
+
+Some tools carry extra rules:
+
+- Hosted code tools need a `run-ephemeral` or `thread-persistent` sandbox on `aws_lambda_microvm` and cannot use `authorization: "workspace"`.
+- `browser.capture_screenshot`, `browser.screenshot.capture`, and `browser.session.execute` need the same kind of sandbox.
+- `sandbox.files.read`, `sandbox.files.write`, `sandbox.files.list`, `computer.screenshot`, and `computer.action` need `thread-persistent`.
+- `attachment.read` is platform-managed. The platform adds it to runs that have an attached document on the current turn or a listed document from an earlier turn, and a release that declares it fails with `platform_managed_tool`.
+- A client-executed tool needs an interactive caller. A manifest that declares one must restrict `spec.triggers` to `["api"]`, or publishing fails with `client_tool_on_autonomous_trigger`. See [Approvals and client tools](/docs/capabilities/approvals-and-client-tools).
+
+## Runtime settings
+
+| Field                          | Values and default                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `modelTools`                   | Up to 256 unique declared tool names. Default: no model-visible tools.                                                                                                                                                                                                                                                                  |
+| `toolRequests`                 | Up to 29 preconfigured requests. Each has `toolName`, `effect` (`read`, `write`, or `execute`), `inputSummary`, `requiredScopes`, a unique `idempotencyKey`, and optional `input` of at most 32 KiB and 16 nesting levels.                                                                                                              |
+| `maxModelGenerations`          | 1 to 32. Default 16. Bounds assistant generations across every execution of one run.                                                                                                                                                                                                                                                    |
+| `maxToolCalls`                 | 1 to 64. Default 29. Bounds model-requested tool calls across one run.                                                                                                                                                                                                                                                                  |
+| `modelInputTokenBudget`        | 1,024 to 1,000,000. Lowers the input budget below the model's window.                                                                                                                                                                                                                                                                   |
+| `modelOutputTokenReserve`      | 1 to 31,744. Sets the output reserve.                                                                                                                                                                                                                                                                                                   |
+| `recentMessageCharacterBudget` | 1 to 1,000,000. Default 65,536. Bounds how much recent thread history the worker loads.                                                                                                                                                                                                                                                 |
+| `contextCheckpointMode`        | `auto` or `off`. Default `off`.                                                                                                                                                                                                                                                                                                         |
+| `responseFormat`               | A release-pinned structured output contract. See [Structured output](#structured-output).                                                                                                                                                                                                                                               |
+| `responseDepthPolicy`          | Automatic choice between a default and a detailed answer format.                                                                                                                                                                                                                                                                        |
+| `modelToolProtocol`            | `gemma4` selects a textual tool transport for Gemma 4 compatible routes.                                                                                                                                                                                                                                                                |
+| `toolResultImages`             | `screenshots` shows the model the screenshots its latest tool calls captured.                                                                                                                                                                                                                                                           |
+| `ingressAttachments`           | `attach` sends the model the images and documents that channel and agent email bindings capture from incoming messages. A turn leaves out a document the platform cannot read and, when the primary model cannot read images, the images. The agent is told the name of each file left out this way. Default: those runs are text-only. |
+
+[Context management](/docs/capabilities/context-management) explains how the runtime uses these values on every generation.
+
+## Model selection
+
+`model.id` and each `model.fallbackIds` entry name a platform model ID with a provider prefix: `openai/<model>`, `openrouter/<vendor>/<model>`, or `bedrock/<foundation model or inference profile id>`. Bedrock ARNs are rejected. A bare ID such as `gpt-4o` resolves to `openai/gpt-4o`. Any other `<vendor>/<model>` without a prefix is rejected with `unknown_model_provider`.
+
+The runtime tries the primary model first and moves to the fallbacks in order. Model IDs are not checked when you validate the manifest alone, because one release can deploy to environments with different model policies. Publishing, deploying, and every run check them against the environment. See [Models and model policies](/docs/capabilities/models).
+
+`model.options` applies only when the run uses an OpenRouter route:
+
+- `reasoningEffort`: `low`, `medium`, or `high`.
+- `provider`: OpenRouter provider routing with `order` and `only` (each 1 to 8 unique lowercase provider slugs) and `allowFallbacks`.
+- `promptCache`: `system` caches the system prompt. `conversation` also caches the tool history so later generations of the same run reuse it.
+
+## Sandbox
+
+`sandbox.mode` is required:
+
+- `none` disables code execution. Resource fields (`accessPolicyRef`, `imageRef`, `minMemoryMiB`, `minVcpu`, `poolKey`) are rejected in this mode.
+- `run-ephemeral` gives each sandbox use a fresh sandbox that is discarded.
+- `thread-persistent` gives each thread a `/workspace` that persists across tool calls and runs.
+
+`sandbox.provider` is `aws_lambda_microvm`, the default and only provider. See [Code sandbox](/docs/capabilities/sandbox).
+
+## Sub-agents
+
+`spec.agents` declares the agents this agent may delegate to:
+
+```json
+"agents": [
+  {
+    "key": "researcher",
+    "agentKey": "research.agent",
+    "description": "Researches a question and answers with sources.",
+    "edgeKind": "delegation",
+    "awaitResult": true,
+    "required": true
+  }
+]
+```
+
+- `key` is the local alias the model uses. Keys are unique within the release.
+- `agentKey` is the `metadata.key` the bound deployment must run. It cannot be the declaring agent's own key.
+- `edgeKind` is `delegation` (the default) or `handoff`. `description` is at most 4,096 characters.
+- The release must declare the `agent.delegate` tool and expose it through `spec.runtime.modelTools` or a preconfigured tool request. The runtime appends the declared keys and descriptions to the instructions.
+
+When a release declares sub-agents, `agent.delegate` accepts only a declared key or the deployment ID bound to one. At execution the runtime checks that the bound deployment is ready, in the same workspace scope, and runs `agentKey`. It refuses a delegation deeper than 4 levels from the root run or one that targets a deployment already on the delegation chain. A release without `spec.agents` keeps free-form delegation.
+
+With `awaitResult: false` the tool returns the child run and thread IDs right away. With `awaitResult: true` the parent run waits in `waiting-for-tool` until the child finishes:
+
+- If the child completes, the tool call succeeds with the child's structured output or final message, and the parent resumes.
+- If the child fails or is canceled, the tool call fails with the child's reason, and the parent resumes so the model can recover.
+- If the child waits for approval, the parent keeps waiting. Resolve the child's approval through the child run.
+- Canceling the parent does not cancel the child.
+
+Child runs are ordinary runs, visible through the run, thread, tool call, and stream routes.
+
+## Structured output
+
+`spec.runtime.responseFormat` pins a JSON schema contract for the final answer:
+
+```json
+"responseFormat": {
+  "type": "json_schema",
+  "name": "triage_result",
+  "schema": {
+    "type": "object",
+    "properties": { "category": { "type": "string", "enum": ["billing", "bug", "other"] } },
+    "required": ["category"],
+    "additionalProperties": false
+  }
+}
+```
+
+- `name` starts with a letter and has at most 64 letters, digits, `_`, or `-`.
+- The schema is a bounded draft-07 subset: at most 64 KiB, 24 levels deep, and 2,048 nodes. It accepts `type`, `title`, `description`, `default`, `examples`, `const`, `enum`, `properties`, `required`, `additionalProperties`, `items`, length, count, and numeric bounds, `multipleOf`, `anyOf`, `oneOf`, `allOf`, `not`, and `uniqueItems` (which needs `maxItems` of at most 256). References, regular expressions, formats, and tuple schemas are rejected.
+- The final response must be valid JSON of at most 256 KiB that satisfies the schema. Otherwise the run fails instead of completing with an invalid answer.
+
+A run can also send `responseFormat` when you submit it. The effective format is the request's format when present, otherwise the release's. If both are present they must be canonically equal, or submission fails with `422 response_format_conflict`. Heartbeat and schedule runs do not inherit the release format. A release cannot combine `responseFormat` with `responseDepthPolicy`.
+
+## Deployment configuration
+
+A deployment's `runtimeConfig` is an `AgentDeploymentConfigV1` document:
+
+```json
+{
+  "apiVersion": "agents.deployments.ai/v1",
+  "kind": "AgentDeploymentConfig",
+  "toolAuthorizations": {
+    "crm.contacts.read": {
+      "authorizationId": "$AUTHORIZATION_ID",
+      "toolPolicyId": "$TOOL_POLICY_ID"
+    }
+  },
+  "agentBindings": {
+    "researcher": { "agentDeploymentId": "$RESEARCH_DEPLOYMENT_ID" }
+  },
+  "brainRetrievalMode": "off"
+}
+```
+
+Replace the `$` placeholders with real resource IDs before you deploy.
+
+The console's tool bindings editor changes `toolAuthorizations` and keeps every other key as it is. See [Deploy a release and bind its tools](/docs/getting-started/console#deploy-a-release-and-bind-its-tools).
+
+- `toolAuthorizations` binds a workspace authorization, and optionally a [tool policy](/docs/capabilities/tools), to each declared tool whose `authorization` is `workspace`. Binding an undeclared tool, binding a tool that does not allow workspace authorization, or leaving a required tool unbound fails with `invalid_agent_deployment_config`.
+- `agentBindings` must bind every `required` sub-agent and no undeclared key. Each bound deployment must exist in the same environment, must not be stopped or the deployment itself, must belong to an active definition in the same workspace scope, and must run the declared `agentKey`. Optional sub-agents can stay unbound, and delegating to an unbound key fails at execution.
+- `brainRetrievalMode` is `brain-first`, `explicit`, `hybrid`, `memory-first`, or `off` (the default). See [Brains](/docs/capabilities/brains).
+
+## Validation errors
+
+Creating or updating a definition with an invalid manifest fails with `422 validation_failed`. Publishing an invalid draft fails with `422 invalid_agent_manifest`. The error message lists every issue as a JSON pointer path followed by a message. Common causes:
+
+- A tool name is declared twice.
+- A model tool or tool request names an undeclared capability.
+- A tool request omits a scope its capability requires.
+- A tool request input exceeds 32 KiB or 16 levels.
+- The primary model also appears in `fallbackIds`.
+- A resource field is set while `sandbox.mode` is `none`.
+- A sandbox-bound tool lacks the sandbox it needs.
+- Sub-agents are declared without a reachable `agent.delegate`.
+- `reviewMode: auto-approve` is set with `memory.mode: off`.
+- Platform skills and `spec.skills` together exceed 32 (`too_many_skills`).
+- The manifest exceeds 320 KiB.
+
+## Use it
+
+1. Write the manifest and try it against the hosted runtime without publishing. `deployments dev` validates the file locally before it sends anything. See [Preview runs](/docs/capabilities/previews).
+
+   ```bash
+   deployments dev agent.json --message "The export button is missing on the billing page."
+   ```
+
+2. Create the definition, publish, and deploy as shown in [Agents, releases, and deployments](/docs/capabilities/agents#use-it).
+
+   ```bash
+   deployments agent create --manifest "$(cat agent.json)"
+   ```
+
+3. To change the manifest, update the draft and publish a new release.
+
+   ```bash
+   deployments agent update $AGENT_DEFINITION_ID --manifest "$(cat agent.json)" --expected-version 1
+   ```
+
+## Reference
+
+- API: [create definition](/docs/api/reference/agents/create-agent-definition), [update definition](/docs/api/reference/agents/update-agent-definition), [get release](/docs/api/reference/agents/get-agent-release), [create deployment](/docs/api/reference/agents/create-agent-deployment)
+- CLI: [`deployments agent`](/docs/cli/reference/agent), [`deployments dev`](/docs/cli/reference/dev)
+- SDK: [Agents functions](/docs/sdk/reference#agents)

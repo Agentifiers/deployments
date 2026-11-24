@@ -1,0 +1,248 @@
+---
+title: "Webhooks"
+description: "Receive signed platform events at your HTTPS endpoints, with retries, delivery history, and secret rotation."
+---
+
+A webhook subscription sends a signed HTTP `POST` to your HTTPS endpoint each time a matching platform event happens in an environment, such as a run completing. Use webhooks when your system needs to react to platform events without polling the API.
+
+## How events reach your endpoint
+
+The platform records a semantic event in the same transaction as the change that caused it. For each event, it finds the active subscriptions in the event's environment and creates one delivery per matching subscription. Every delivery has its own retry schedule, so a slow endpoint never delays deliveries to another endpoint.
+
+A subscription receives an event only when all of these conditions hold:
+
+- The subscription status is `active`.
+- The event belongs to the subscription's organization, project, and environment, or it is an [organization or project billing alert](#organization-and-project-billing-alerts).
+- `eventTypes` contains the event type, or contains `*` for an event of the subscription's environment.
+- Each filter family in `resourceFilters` contains the event's value for that family.
+
+Events produced by [preview runs](/docs/capabilities/previews) and [evaluation](/docs/capabilities/evaluations) runs stay internal and never reach webhooks.
+
+### Organization and project billing alerts
+
+Two billing alerts belong to an organization or a project instead of one environment. These are `budget.threshold-crossed` for an organization or project budget, and `organization.operator-funded-spend-exhausted`. Such an alert reaches every active subscription in the organization that lists its event type by name, in any environment. A project budget alert reaches only subscriptions in that project. A subscription with `*` does not receive these alerts, so turning on every event in one environment does not add another environment's billing traffic. Each delivery belongs to the subscription's environment and appears in its delivery history.
+
+The platform finds these subscriptions through an index that updates shortly after a subscription is created or changed. A subscription created moments before an alert may miss that alert.
+
+Alert events from an organization monitor, `alert.fired`, `alert.renotified`, `alert.resolved`, and `alert.test`, reach subscriptions the same way. Alert events from an environment monitor stay in that environment. See [Alerts](/docs/capabilities/alerts#webhook-events).
+
+### Event types
+
+Event types are semantic event names. Some examples:
+
+| Family            | Event types                                                                                                                                                                                                            |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runs              | `run.completed`, `run.failed`, `run.canceled`                                                                                                                                                                          |
+| Channels          | `channel.binding.created`, `channel.binding.updated`, `channel.binding.deleted`, `channel.message.received`, `channel.delivery.queued`, `channel.delivery.sending`, `channel.delivery.sent`, `channel.delivery.failed` |
+| Webhook endpoints | `webhook.endpoint.created`, `webhook.endpoint.disabled`, `webhook.endpoint.secret-rotated`                                                                                                                             |
+| Alerts            | `alert.fired`, `alert.renotified`, `alert.resolved`, `alert.test`                                                                                                                                                      |
+
+A test send uses the event type `webhook.test` and is never stored.
+
+### Resource filters
+
+`resourceFilters` narrows a subscription beyond event types. Every family you set must match.
+
+| Filter           | Matches the event's               |
+| ---------------- | --------------------------------- |
+| `aggregateTypes` | Aggregate type, for example `run` |
+| `aggregateIds`   | Aggregate ID                      |
+| `projectIds`     | Project ID                        |
+| `environmentIds` | Environment ID                    |
+
+## Request format
+
+Each delivery is one JSON `POST` with these headers:
+
+| Header                      | Value                                                                                               |
+| --------------------------- | --------------------------------------------------------------------------------------------------- |
+| `content-type`              | `application/json`                                                                                  |
+| `user-agent`                | `deployments-ai-webhooks/1.0`                                                                       |
+| `x-deployments-delivery-id` | The delivery ID                                                                                     |
+| `x-deployments-event-id`    | The event ID. It stays the same across every attempt and manual retry of one event to one endpoint. |
+| `x-deployments-event-type`  | The event type                                                                                      |
+| `x-deployments-timestamp`   | Send time in milliseconds since the Unix epoch                                                      |
+| `x-deployments-signature`   | One or more `v1=` signatures, comma separated                                                       |
+
+The body is an envelope around the event payload:
+
+```json
+{
+  "aggregateId": "run_123",
+  "aggregateType": "run",
+  "aggregateVersion": 3,
+  "deliveryId": "del_123",
+  "endpointId": "wh_123",
+  "eventId": "evt_123",
+  "eventType": "run.completed",
+  "occurredAt": "2026-07-20T00:00:00.000Z",
+  "organizationId": "org_123",
+  "payload": {},
+  "source": "deployments-ai.platform",
+  "version": 1
+}
+```
+
+`version` is the envelope version. Answer with any `2xx` status within 15 seconds. The sender does not follow redirects, and a `3xx` response fails the delivery without retries.
+
+## Verify signatures [#verify-signatures]
+
+Each signature is `v1=` followed by the hex HMAC-SHA256 of `${timestamp}.${rawBody}`, keyed with the endpoint's signing secret. `timestamp` is the `x-deployments-timestamp` header value. During a secret rotation the header carries one signature per valid secret, current secret first.
+
+Accept a request when the timestamp is within five minutes of your clock and any presented signature matches any secret you hold. Compute the HMAC over the raw request body before you parse the JSON, and compare in constant time.
+
+```ts
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+const TOLERANCE_MS = 5 * 60_000;
+
+export function verifyDeploymentsWebhook(
+  rawBody: string,
+  headers: Record<string, string | undefined>,
+  secrets: readonly string[],
+) {
+  const timestamp = headers["x-deployments-timestamp"] ?? "";
+  const timestampMs = Number(timestamp);
+  if (!Number.isSafeInteger(timestampMs)) return false;
+  if (Math.abs(Date.now() - timestampMs) > TOLERANCE_MS) return false;
+  const presented = (headers["x-deployments-signature"] ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.startsWith("v1="))
+    .map((entry) => Buffer.from(entry));
+  return secrets.some((secret) => {
+    const digest = createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex");
+    const expected = Buffer.from(`v1=${digest}`);
+    return presented.some(
+      (candidate) => candidate.length === expected.length && timingSafeEqual(candidate, expected),
+    );
+  });
+}
+```
+
+Pass the current secret, plus the previous secret while a rotation overlap is open. [Verifying webhooks](/docs/sdk/webhook-verification) shows the same check inside a request handler.
+
+## Delivery guarantees
+
+- **At least once.** An endpoint can receive the same event more than once, for example after a manual retry. Deduplicate on `x-deployments-event-id` or the body's `eventId`.
+- **No ordering.** Deliveries of different events are independent, even for the same aggregate. Order by `occurredAt` and `aggregateVersion` when order matters.
+
+## Retries and delivery states
+
+Each delivery gets 10 automatic attempts. After failed attempt _n_, the next attempt is due 1 minute times 2^(n-1) after the request finished, capped at 6 hours. Jitter places the actual delay between half and all of that value.
+
+| After attempt | 1   | 2   | 3   | 4   | 5    | 6    | 7    | 8     | 9     |
+| ------------- | --- | --- | --- | --- | ---- | ---- | ---- | ----- | ----- |
+| Nominal delay | 1 m | 2 m | 4 m | 8 m | 16 m | 32 m | 64 m | 128 m | 256 m |
+
+Network errors, timeouts, `408`, `409`, `425`, `429`, and `5xx` responses are retried. Any other status, and any refusal by the egress checks, fails the delivery at once.
+
+| Status      | Meaning                                               |
+| ----------- | ----------------------------------------------------- |
+| `pending`   | Created and waiting for its first attempt             |
+| `sending`   | An attempt is in progress                             |
+| `retrying`  | The last attempt failed and another is scheduled      |
+| `delivered` | The endpoint answered `2xx`                           |
+| `failed`    | No more automatic attempts. `failureReason` says why. |
+
+| `failureReason`          | Cause                                                               |
+| ------------------------ | ------------------------------------------------------------------- |
+| `attempts-exhausted`     | Every automatic attempt failed with a retryable outcome             |
+| `non-retryable`          | A non-retryable status or an egress refusal                         |
+| `endpoint-inactive`      | The subscription was disabled or archived before the attempt        |
+| `event-unavailable`      | The source event is no longer available                             |
+| `organization-suspended` | The organization was suspended before the attempt; nothing was sent |
+
+Every attempt is kept as an immutable attempt record with its timing, outcome, response status, a set of allowed response headers, and the first 1 KiB of the response body. Deliveries and attempts expire after a retention period that the operator sets for the install.
+
+To send a `delivered` or `failed` delivery again, retry it. A manual retry adds exactly one attempt, reuses the same event ID, and works only while the subscription is `active` and the delivery is still retained.
+
+## Automatic disable
+
+Each delivery whose last attempt fails increments the subscription's `consecutiveFailures`, and any delivered event resets it to zero. At 20 consecutive failed deliveries, the platform sets the subscription to `disabled` with `disabledReason: consecutive-failures` and records `webhook.endpoint.disabled`. You can also disable a subscription yourself, which sets `disabledReason: manual`.
+
+A disabled subscription receives no new deliveries, and its pending retries fail with `endpoint-inactive`. Events that occur while it is disabled are not delivered later. Enabling the subscription resets the failure counter. You can then retry failed deliveries by hand.
+
+## Signing secrets and rotation
+
+Creating a subscription generates a random signing secret and returns it once as `signingSecret`. The platform stores it encrypted and never returns it again. The CLI redacts it unless you pass `--reveal`.
+
+Rotating the secret returns a new `signingSecret`, also once. The previous secret keeps signing, as a second signature, for `previousSecretExpiresInSeconds`. The default is 86,400 seconds (24 hours) and the range is 0 to 604,800 seconds (7 days). A value of `0` stops the old secret immediately. Archiving a subscription revokes its secret.
+
+## Rules and limits
+
+| Rule                          | Value                                                                                                                                      |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Endpoint URL                  | `https`, a public host, no embedded credentials, at most 2,048 characters                                                                  |
+| Name                          | At most 120 characters                                                                                                                     |
+| Event types                   | 1 to 100 unique values of at most 128 characters each, or `*`                                                                              |
+| Resource filters              | At most 100 entries in total and 32,768 bytes of JSON                                                                                      |
+| Subscriptions per environment | 100 `active` or `disabled` subscriptions. Archived subscriptions do not count. Creating one more returns `409 webhook_subscription_limit`. |
+| Request timeout               | 15 seconds per attempt, 10 seconds for a test send                                                                                         |
+| Stored response body          | First 1 KiB                                                                                                                                |
+
+At send time, the platform resolves the endpoint host once, refuses private, loopback, link-local, and other special-purpose addresses, and connects only to the addresses it checked.
+
+Reading subscriptions and deliveries needs `webhooks:read`. Every change, including manual retries and test sends, needs `webhooks:write`. A human caller also needs the organization `owner` or `admin` role to use `webhooks:write`.
+
+## Use it
+
+1. Create a subscription and save the signing secret from the response:
+
+   ```sh
+   deployments webhook create --name "Run results" --url https://hooks.example.com/deployments --event-types run.completed,run.failed --reveal
+   ```
+
+2. Send a signed `webhook.test` event and check that your endpoint verifies it:
+
+   ```sh
+   deployments webhook test $WEBHOOK_ID
+   ```
+
+3. Inspect failed deliveries and their attempts:
+
+   ```sh
+   deployments webhook-delivery list --webhook $WEBHOOK_ID --status failed
+   deployments webhook-delivery attempts $DELIVERY_ID
+   ```
+
+4. Retry a delivery after you fix the endpoint:
+
+   ```sh
+   deployments webhook-delivery retry $DELIVERY_ID
+   ```
+
+5. Rotate the secret with a one-hour overlap:
+
+   ```sh
+   deployments webhook rotate-secret $WEBHOOK_ID --previous-secret-expires-in-seconds 3600 --reveal
+   ```
+
+The same subscription through the SDK:
+
+```ts
+import { createClient, createConfig, createWebhook } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data, error } = await createWebhook({
+  client,
+  body: {
+    name: "Run results",
+    url: "https://hooks.example.com/deployments",
+    eventTypes: ["run.completed", "run.failed"],
+    resourceFilters: { aggregateTypes: ["run"] },
+  },
+});
+```
+
+## Reference
+
+- API: [Create a webhook subscription](/docs/api/reference/runtime/create-webhook), [Rotate a webhook secret](/docs/api/reference/runtime/rotate-webhook-secret), [Test a webhook](/docs/api/reference/runtime/test-webhook), [List webhook deliveries](/docs/api/reference/runtime/list-webhook-deliveries), [Retry a webhook delivery](/docs/api/reference/runtime/retry-webhook-delivery)
+- CLI: [`deployments webhook`](/docs/cli/reference/webhook#webhook-create), [`deployments webhook-delivery`](/docs/cli/reference/webhook-delivery#webhook-delivery-list)
+- SDK: [Runtime functions](/docs/sdk/reference#runtime), [Verifying webhooks](/docs/sdk/webhook-verification)

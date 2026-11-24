@@ -1,0 +1,25 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "jsx": "react-jsx",
+    "lib": ["DOM", "DOM.Iterable", "ES2024"],
+    "outDir": "../../dist/apps/console",
+    "paths": { "@/*": ["./src/*"] },
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/console.tsbuildinfo",
+    "types": ["bun", "vite/client"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"],
+  "exclude": ["src/evilcharts"],
+  "references": [
+    { "path": "./src/evilcharts" },
+    { "path": "../../packages/agent-manifest" },
+    { "path": "../../packages/api-contract" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/identity" },
+    { "path": "../../packages/model-gateway" },
+    { "path": "../../packages/providers" },
+    { "path": "../../packages/web-bff-auth" }
+  ]
+}

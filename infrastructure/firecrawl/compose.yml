@@ -1,0 +1,220 @@
+name: deployments-ai-firecrawl
+
+x-firecrawl-environment:
+  &firecrawl-environment # DynamoDB Local ignores credentials but the AWS SDK requires some.
+  AWS_ACCESS_KEY_ID: local
+  AWS_REGION: us-east-1
+  AWS_SECRET_ACCESS_KEY: local
+  CRAWL_CONCURRENT_REQUESTS: ${FIRECRAWL_CRAWL_CONCURRENT_REQUESTS:-4}
+  ENV: local
+  FIRECRAWL_DYNAMODB_ENDPOINT: http://dynamodb-local:8000
+  FIRECRAWL_DYNAMODB_TABLE: firecrawl
+  HOST: 0.0.0.0
+  # Lightpanda rejects CDP websocket Host headers that are not IP literals or localhost.
+  LIGHTPANDA_CDP_URL: ws://172.30.250.92:9222
+  LOGGING_LEVEL: ${FIRECRAWL_LOGGING_LEVEL:-warn}
+  MAX_CONCURRENT_JOBS: ${FIRECRAWL_MAX_CONCURRENT_JOBS:-4}
+  MODEL_EMBEDDING_NAME: ${FIRECRAWL_MODEL_EMBEDDING_NAME:-}
+  MODEL_NAME: ${FIRECRAWL_MODEL_NAME:-}
+  NUM_WORKERS_PER_QUEUE: ${FIRECRAWL_NUM_WORKERS_PER_QUEUE:-4}
+  OPENAI_API_KEY: ${FIRECRAWL_OPENAI_API_KEY:-}
+  OPENAI_BASE_URL: http://egress-proxy:3336
+  PLAYWRIGHT_MICROSERVICE_URL: http://playwright-service:3000/scrape
+  PORT: 3002
+  PROXY_SERVER: http://egress-proxy:3335
+  SEARXNG_ENDPOINT: http://searxng:8080
+  USE_DB_AUTHENTICATION: "false"
+
+services:
+  dns-resolver:
+    image: coredns/coredns:1.12.3@sha256:1391544c978029fcddc65068f6ad67f396e55585b664ecccd7fefba029b9b706
+    command: -conf /etc/coredns/Corefile
+    networks:
+      backend:
+        ipv4_address: 172.30.250.53
+      egress: {}
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./Corefile:/etc/coredns/Corefile:ro
+
+  egress-proxy:
+    image: deployments-ai-web-tools-proxy:test
+    environment:
+      MODEL_GATEWAY_BASE_URL: ${FIRECRAWL_OPENAI_BASE_URL:-}
+      MODEL_GATEWAY_TOKEN_ISSUER: ${FIRECRAWL_MODEL_GATEWAY_TOKEN_ISSUER:-}
+    command:
+      - bun
+      - -e
+      - >-
+        import { createBrowserEgressProxy } from
+        './packages/web-tools-proxy/src/egress-proxy.ts';
+        import { createModelGatewayProxy } from
+        './packages/web-tools-proxy/src/model-gateway-proxy.ts';
+        createBrowserEgressProxy().listen(3335, '0.0.0.0');
+        createModelGatewayProxy({ baseUrl:
+        process.env.MODEL_GATEWAY_BASE_URL, tokenIssuer:
+        process.env.MODEL_GATEWAY_TOKEN_ISSUER, hostname: '0.0.0.0', port: 3336 });
+    networks:
+      - backend
+      - egress
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+
+  dynamodb-local:
+    image: amazon/dynamodb-local:3.3.1@sha256:ff89bd48ff32cd8d9be5fee8873b65b8854dc408f1afe881be6eb00247bc0dab
+    command: -jar DynamoDBLocal.jar -inMemory -sharedDb
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://127.0.0.1:8000/"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # Creates the Firecrawl table (OpenTofu creates it in AWS).
+  dynamodb-init:
+    image: deployments-ai-firecrawl:local
+    pull_policy: never
+    command: node dist/src/services/dynamo/create-table.js
+    environment:
+      <<: *firecrawl-environment
+    depends_on:
+      dynamodb-local:
+        condition: service_healthy
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+
+  # Default renderer. It fetches every page through the deny-private egress proxy and,
+  # like the other backends, never joins the egress network.
+  lightpanda:
+    image: lightpanda/browser@sha256:5b84708cb3d9bef841aba4a4cd299f4de0609ac1bd7d4c6fbfcbf168d56b685e
+    command:
+      - /bin/lightpanda
+      - serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "9222"
+      - --http-proxy
+      - http://egress-proxy:3335
+      - --log-level
+      - warn
+    environment:
+      LIGHTPANDA_DISABLE_TELEMETRY: "true"
+    depends_on:
+      dns-resolver:
+        condition: service_started
+      egress-proxy:
+        condition: service_started
+    dns:
+      - 172.30.250.53
+    networks:
+      backend:
+        ipv4_address: 172.30.250.92
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+
+  # Chromium fallback renderer; a separate ECS service in AWS.
+  playwright-service:
+    image: ghcr.io/firecrawl/playwright-service@sha256:c2cb9d7e982f9ddaf7902ec79da1e63961ae3760f315cddaa161200a7937162b
+    environment:
+      ALLOW_LOCAL_WEBHOOKS: "false"
+      MAX_CONCURRENT_PAGES: ${FIRECRAWL_CRAWL_CONCURRENT_REQUESTS:-4}
+      PORT: 3000
+      PROXY_SERVER: http://egress-proxy:3335
+    depends_on:
+      dns-resolver:
+        condition: service_started
+      egress-proxy:
+        condition: service_started
+    dns:
+      - 172.30.250.53
+    networks:
+      - backend
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:exec,nosuid,size=2g
+
+  searxng:
+    image: searxng/searxng@sha256:b8ca38ba06eea544d7555e88321e212ddc0d5c3c7de055419cfb2e5c6bf30812
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+      SEARXNG_SECRET: ${FIRECRAWL_SEARXNG_SECRET:-local-development-only}
+    depends_on:
+      dns-resolver:
+        condition: service_started
+      egress-proxy:
+        condition: service_started
+    dns:
+      - 172.30.250.53
+    networks:
+      - backend
+    volumes:
+      - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
+
+  api:
+    image: deployments-ai-firecrawl:local
+    build:
+      context: ../images/firecrawl
+    command: node dist/src/harness.js --start-docker
+    environment:
+      <<: *firecrawl-environment
+    depends_on:
+      dns-resolver:
+        condition: service_started
+      dynamodb-init:
+        condition: service_completed_successfully
+      egress-proxy:
+        condition: service_started
+      lightpanda:
+        condition: service_started
+      playwright-service:
+        condition: service_started
+      searxng:
+        condition: service_started
+    dns:
+      - 172.30.250.53
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+
+  api-gateway:
+    image: nginx:alpine@sha256:4a73073bd557c65b759505da037898b61f1be6cbcc3c2c3aeac22d2a470c1752
+    depends_on:
+      api:
+        condition: service_started
+    networks:
+      - backend
+      - ingress
+    ports:
+      - 127.0.0.1:${FIRECRAWL_PORT:-3002}:3002
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /var/cache/nginx:noexec,nosuid,size=64m
+      - /var/run:noexec,nosuid,size=8m
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+networks:
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.250.0/24
+  egress: {}
+  ingress: {}

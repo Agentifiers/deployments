@@ -1,0 +1,16 @@
+{
+  "name": "@deployments-ai/event-analytics-operator",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-athena": "3.1090.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "effect": "4.0.0-beta.92"
+  }
+}

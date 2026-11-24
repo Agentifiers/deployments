@@ -1,0 +1,216 @@
+---
+title: "Evaluations"
+description: "Score agent output, build regression datasets, replay them against releases, and compare a candidate release with a baseline."
+---
+
+Evaluations measure what an agent does. You define how to score a response, collect test cases into a regression dataset, replay that dataset against an agent release, and compare a candidate release with the one in production before you promote it.
+
+Every evaluation resource belongs to one environment. Requests carry the organization, project, and environment headers. Reads require the `observability:read` scope and changes require `observability:write`. Every change requires an idempotency key.
+
+## The resources
+
+| Resource           | What it holds                                                                                                 |
+| ------------------ | ------------------------------------------------------------------------------------------------------------- |
+| Score definition   | A named evaluator with immutable revisions, a pass threshold, a target, and an automatic sampling rate.       |
+| Score result       | One score of one trace by one definition revision.                                                            |
+| Annotation         | A free-text note on a trace, run, or span, with an optional label and tags.                                   |
+| Regression dataset | A named set of test cases with an optional retention period.                                                  |
+| Dataset case       | One user input plus the expected behavior that evaluators check.                                              |
+| Evaluation run     | A `dataset-replay` of a dataset against a release, or a `trace-score` pass over existing traces.              |
+| Release comparison | Two dataset replays, one per release, paired case by case into an advisory verdict and a downloadable report. |
+
+## Score definitions
+
+A score definition has a name of 1 to 64 lowercase letters, digits, `.`, `_`, or `-`, starting with a letter or digit. Its configuration lives in numbered revisions. Revising a definition publishes revision `n + 1` and marks the previous one `superseded`. You pass `expectedRevision` so a concurrent edit fails instead of overwriting. Archiving stops new use and keeps history.
+
+Scores are numbers from 0 to 1, and higher is better. A score passes when its value is greater than or equal to the threshold, which defaults to `1`.
+
+| Evaluator kind | Type          | Passes when                                                                                              | Case expectation it reads |
+| -------------- | ------------- | -------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `contains`     | deterministic | The final response contains the configured values.                                                       | `mustInclude`             |
+| `not_contains` | deterministic | The final response contains none of the values.                                                          | `mustNot`                 |
+| `regex`        | deterministic | The final response matches the pattern (at most 512 characters).                                         | `matches`                 |
+| `json_schema`  | deterministic | The final response parses as JSON that satisfies the schema.                                             | `jsonSchema`              |
+| `tool_called`  | deterministic | The listed tools were called.                                                                            | `mustUseTools`            |
+| `no_tool`      | deterministic | None of the listed tools were called. With no list, no tool was called at all.                           | `mustNotUseTools`         |
+| `model_judge`  | model-judged  | A judge model grades the response. The prompt may use `{{input}}`, `{{output}}`, and `{{expectations}}`. | none                      |
+| `human`        | human         | People record the score through the API.                                                                 | none                      |
+| `imported`     | imported      | An external system records the score through the API.                                                    | none                      |
+
+`target` is `root-run` (the default) or `trace`, which reads tool evidence from up to 50 runs in the trace. `sampling.rate` turns on automatic scoring of finalized customer traces. It defaults to `0`, which means off. Model-judged definitions sample at most `0.25` of traces. Human and imported definitions must keep a rate of `0`, and only they accept scores recorded with `recordTraceScoreResult`.
+
+A `model_judge` definition names a `modelId` that the environment must admit through its model policy, the curated defaults, or an operator grant. Creating or revising a definition with a denied model returns `422`. The worker checks the model again before each judge call. See [Models and model policies](/docs/capabilities/models).
+
+When an evaluator cannot produce a score, the result has `executionStatus: "error"` and an `errorClass`: `evaluator_failed`, `invalid_configuration`, `judge_invalid_output`, `judge_timeout`, `judge_unavailable`, or `missing_evidence`. An error never counts as a score of `0`. An evaluator with nothing to check produces no score for that case.
+
+## Regression datasets and cases
+
+A dataset case stores its user input and expectations as canonical JSON, addressed by its SHA-256 digest. Adding the same case twice returns the existing case with `created: false`. A case comes from one of three places:
+
+- Inline input that you supply.
+- An existing run (by thread and run ID) or the root run of a trace.
+- A case file import of up to 100 cases per request.
+
+A case file is a JSON array. `message` is the user input. The `expected` fields `mustInclude`, `mustNot`, `mustUseTools`, `mustNotUseTools`, `matches`, and `jsonSchema` feed the evaluators in the table above. Any other field is kept as an opaque constraint that no evaluator reads.
+
+```json
+[
+  {
+    "id": "refund-status",
+    "message": "Where is my refund?",
+    "expected": {
+      "mustInclude": ["refund"],
+      "mustUseTools": ["orders.lookup"]
+    },
+    "tags": ["billing"]
+  }
+]
+```
+
+## Evaluation runs
+
+A `dataset-replay` run sends every case in a dataset to a target:
+
+- `{ "type": "release", "agentReleaseId": "..." }` runs a release. Add `runtimeConfigFromAgentDeploymentId` to reuse a deployment's runtime configuration, such as its connections.
+- `{ "type": "deployment", "agentDeploymentId": "..." }` runs that deployment's release with its runtime configuration.
+
+Replays run through an execution binding with purpose `evaluation`, so each case gets its own thread, run, and trace and never touches a production deployment. The binding applies the evaluation tool policy: only read-effect tools run, write and execute tools are denied, approval-gated calls are rejected, and client-executed tools are denied.
+
+A `trace-score` run scores 1 to 100 existing traces with the definitions you name.
+
+| Object | States                                                                        |
+| ------ | ----------------------------------------------------------------------------- |
+| Run    | `queued`, `running`, then `completed`, `failed`, or `canceled`                |
+| Case   | `pending`, `dispatched`, `submitted`, then `scored`, `failed`, or `timed_out` |
+
+A completed run reports per-definition means and pass rates, total tokens, cost in USD micros, and p50 and p95 latency. The run list filters by `status`, `datasetId`, and `agentReleaseId`. A filtered page can hold fewer items than `limit` and still return a `nextCursor`, so keep paging until `nextCursor` is absent.
+
+Evaluation runs, preview runs, and other bound runs are never scored automatically. Judge model calls create no runs, traces, or customer meter events, so an evaluation cannot trigger another evaluation.
+
+## Release comparisons
+
+A release comparison replays one dataset against a baseline release and a candidate release, pairs cases by case key, and returns a verdict with reasons. Both arms can share one deployment's runtime configuration through `runtimeConfigFromAgentDeploymentId`. The baseline and candidate must differ.
+
+| Gate policy field        | Default |
+| ------------------------ | ------- |
+| `maxMeanDecrease`        | `0.05`  |
+| `maxPassRateDecrease`    | `0.05`  |
+| `maxNewFailures`         | `0`     |
+| `maxEvaluatorErrorRate`  | `0.1`   |
+| `maxMissingEvidenceRate` | `0.1`   |
+| `minComparableCases`     | `1`     |
+
+The verdict rules run in this order:
+
+1. `error` when fewer cases were scored in both arms than `minComparableCases`, or when either arm's evaluator error rate or missing-evidence rate for a definition exceeds its limit. Evaluator errors and missing evidence never produce `fail`.
+2. `fail` when a definition's mean or pass rate drops by more than the allowed decrease, or when more case scores went from passing to failing than `maxNewFailures`.
+3. `pass` otherwise.
+
+`gateMode` is always `advisory`. The verdict never blocks a deployment. A completed comparison links a Markdown report and a JSON report through short-lived download URLs. List items omit the report, so fetch the comparison by ID for fresh URLs.
+
+## Limits
+
+| Limit                                    | Value                       |
+| ---------------------------------------- | --------------------------- |
+| Cases per dataset                        | 500                         |
+| Cases per import request                 | 100                         |
+| Score definitions per run or comparison  | 20                          |
+| Traces per `trace-score` run             | 100                         |
+| Case timeout                             | 30 to 3,600 s (default 600) |
+| Concurrency                              | 1 to 20 (default 5)         |
+| Active score definitions per environment | 200                         |
+| Automatic sampling rate, model-judged    | at most 0.25                |
+| Thread messages read per scored run      | 500                         |
+| Tool calls read per scored run           | 500                         |
+
+A run whose own evidence exceeds the message or tool-call bound scores `missing_evidence` for the evaluators that need it.
+
+<Callout type="warn" title="Availability">
+  Evaluation runs and release comparisons need the evaluation queue. When an installation has no
+  queue configured, `createEvaluationRun` and `createReleaseComparison` return `503
+  evaluations_unavailable`. Score definitions, datasets, cases, and every read keep working.
+</Callout>
+
+## Use it
+
+These steps assume your CLI context names the organization, project, and environment. See [Configuration and context](/docs/cli/configuration).
+
+1. Create a score definition that checks for expected words:
+
+   ```sh
+   deployments eval score-definition create --name mentions-refund --evaluator '{"kind":"contains"}'
+   ```
+
+2. Create a dataset and import a case file:
+
+   ```sh
+   deployments eval dataset create --name billing-regressions --retention-days 90
+   deployments eval case import --dataset "$DATASET_ID" --file cases.json
+   ```
+
+3. Replay the dataset against a release, then read the results:
+
+   ```sh
+   deployments eval run create --kind dataset-replay --dataset "$DATASET_ID" \
+     --score-definitions "$SCORE_DEFINITION_ID" \
+     --target '{"type":"release","agentReleaseId":"'"$AGENT_RELEASE_ID"'"}'
+   deployments eval run show --id "$EVALUATION_RUN_ID"
+   deployments eval run results --id "$EVALUATION_RUN_ID"
+   ```
+
+4. Compare a candidate release with the current one:
+
+   ```sh
+   deployments eval comparison create --baseline "$BASELINE_RELEASE_ID" \
+     --candidate "$CANDIDATE_RELEASE_ID" --dataset "$DATASET_ID" \
+     --score-definitions "$SCORE_DEFINITION_ID" --gate-policy '{"maxNewFailures":1}'
+   deployments eval comparison show --id "$RELEASE_COMPARISON_ID"
+   ```
+
+The same replay with the SDK:
+
+```ts
+import {
+  createClient,
+  createConfig,
+  createEvaluationRun,
+  getEvaluationRun,
+} from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+const tenant = {
+  "x-deployments-organization": "org_123",
+  "x-deployments-project": "prj_123",
+  "x-deployments-environment": "env_123",
+};
+
+const { data: created } = await createEvaluationRun({
+  client,
+  headers: { ...tenant, "idempotency-key": crypto.randomUUID() },
+  body: {
+    kind: "dataset-replay",
+    datasetId: "dataset_123",
+    scoreDefinitionIds: ["score_definition_123"],
+    target: { type: "release", agentReleaseId: "release_123" },
+  },
+});
+
+const { data: run } = await getEvaluationRun({
+  client,
+  headers: tenant,
+  path: { evaluationRunId: created!.id },
+});
+console.log(run?.status, run?.summary);
+```
+
+## Reference
+
+- API: [createScoreDefinition](/docs/api/reference/evaluations/create-score-definition), [reviseScoreDefinition](/docs/api/reference/evaluations/revise-score-definition), [createRegressionDataset](/docs/api/reference/evaluations/create-regression-dataset), [importDatasetCases](/docs/api/reference/evaluations/import-dataset-cases), [createEvaluationRun](/docs/api/reference/evaluations/create-evaluation-run), [listEvaluationRunResults](/docs/api/reference/evaluations/list-evaluation-run-results), [createReleaseComparison](/docs/api/reference/evaluations/create-release-comparison), [recordTraceScoreResult](/docs/api/reference/evaluations/record-trace-score-result), and [createTraceAnnotation](/docs/api/reference/evaluations/create-trace-annotation).
+- CLI: [`deployments eval`](/docs/cli/reference/eval).
+- SDK: [Evaluations functions](/docs/sdk/reference#evaluations).
+- Related: [Observability](/docs/capabilities/observability) for the traces that scores attach to, and [Preview runs](/docs/capabilities/previews) for the other kind of execution binding.

@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/apps/app-gateway",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/apps/app-gateway.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/app-database" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/identity" },
+    { "path": "../../packages/organization-admission" },
+    { "path": "../../packages/secret-store" },
+    { "path": "../../packages/web-bff-auth" }
+  ]
+}

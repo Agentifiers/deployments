@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/agent-manifest",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/agent-manifest.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": []
+}

@@ -1,0 +1,25 @@
+{
+  "name": "@deployments-ai/identity",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./platform-jwt": "./src/platform-jwt.ts",
+    "./saml": "./src/saml/index.ts",
+    "./saml-testing": "./src/saml/testing/saml-identity-provider.ts",
+    "./scope-catalog": "./src/scope-catalog.ts",
+    "./scopes": "./src/scopes.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@deployments-ai/net-security": "workspace:*",
+    "@xmldom/xmldom": "0.9.12",
+    "jose": "6.2.4",
+    "xml-crypto": "6.4.0"
+  }
+}

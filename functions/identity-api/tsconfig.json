@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/functions/identity-api",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/functions/identity-api.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/db" },
+    { "path": "../../packages/identity" },
+    { "path": "../../packages/secret-store" }
+  ]
+}

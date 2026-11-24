@@ -1,0 +1,107 @@
+---
+title: "Idempotency"
+description: "Make retries safe with idempotency keys: which operations need one, key rules, and replay behavior."
+---
+
+An idempotency key lets you retry a mutation without doing the work twice. Send a unique key in the `idempotency-key` header. If the request fails in a way that leaves you unsure whether it ran, send the same request with the same key. The platform runs it once and returns the original result to every retry.
+
+## Which operations take a key
+
+Each operation declares one of four idempotency modes. Its reference page shows whether the header is required.
+
+| Mode             | Header                                          | Operations                                                                                                      |
+| ---------------- | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Required         | Must be present                                 | Most create, update, archive, and action operations, including tenancy, agents, run submission, and email.      |
+| Optional         | Accepted but not required                       | Memory operations other than reads.                                                                             |
+| Required or body | Required unless the body has a stable `fireKey` | Firing a schedule or a heartbeat manually.                                                                      |
+| None             | Ignored                                         | Reads, and some mutations, such as accepting an invitation, canceling or retrying a run, and creating a thread. |
+
+A request that omits a required key fails before it does any work.
+
+## Key rules
+
+The allowed length depends on the authentication scheme of the operation.
+
+| Operations                                                                                | Key length           | Other rules                                               |
+| ----------------------------------------------------------------------------------------- | -------------------- | --------------------------------------------------------- |
+| Runtime, automation, and workflow execution operations (API key or platform access token) | 1 to 256 UTF-8 bytes | No leading or trailing whitespace. No control characters. |
+| Memory and Brains operations (`tenantJwt`)                                                | 1 to 500 UTF-8 bytes |                                                           |
+| All other operations                                                                      | 1 to 512 characters  |                                                           |
+
+Use a fresh random value, such as a UUID, for each new piece of work. Store the key with the work item so a retry after a crash reuses it.
+
+## What a retry returns
+
+| Situation                                                        | Result                                                              |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Same key, same request, first request finished                   | The original response. No work runs again.                          |
+| Same key, same request, first request still running              | Status 409 with code `idempotency_in_progress`. Wait and retry.     |
+| Same key, different request                                      | Status 409 with code `idempotency_conflict`.                        |
+| Same key, a tenancy or agent operation that failed with an error | The platform releases the key, so a retry runs the operation again. |
+
+"Same request" means the same operation, the same target resource, the same tenant scope, and the same body. Changing any of them with an old key is a conflict.
+
+### Scope and retention
+
+The scope of a key depends on the operation.
+
+- For tenancy and agent operations, the platform scopes each key to the caller. It keeps a completed key for 24 hours. After that, the same key starts a new request.
+- For run submissions, the platform scopes each key to the organization, project, environment, and workspace. A run submission key never expires. Reusing it always returns the original run or a conflict.
+
+A run submission replay returns the original `thread`, `run`, and `message` with `created` set to `false`. A replay succeeds even when a spend budget would now refuse a new run, because the run was already admitted.
+
+## Send a key
+
+<Tabs items={["CLI", "SDK", "HTTP"]}>
+<Tab value="CLI">
+
+The CLI generates a key for each command that sends one. The run message publication commands require `--idempotency-key`. Pin your own key with `--idempotency-key` when you need to resume work after a crash:
+
+```sh
+deployments chat --agent $AGENT_DEPLOYMENT_ID --message "Summarize the release notes" --idempotency-key "$WORK_ITEM_ID"
+```
+
+</Tab>
+<Tab value="SDK">
+
+```ts
+import { createClient, createConfig, submitAgentRun } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const idempotencyKey = crypto.randomUUID();
+const { data, error } = await submitAgentRun({
+  client,
+  path: { agentDeploymentId: process.env.AGENT_DEPLOYMENT_ID! },
+  headers: { "idempotency-key": idempotencyKey },
+  body: { content: "Summarize the release notes" },
+});
+```
+
+Keep `idempotencyKey` with your work item and pass the same value on retry.
+
+</Tab>
+<Tab value="HTTP">
+
+```sh
+curl --request POST "$DEPLOYMENTS_API_URL/v1/agent-deployments/$AGENT_DEPLOYMENT_ID/runs" \
+  --header "authorization: Bearer $DEPLOYMENTS_API_KEY" \
+  --header "content-type: application/json" \
+  --header "idempotency-key: $WORK_ITEM_ID" \
+  --data '{"content":"Summarize the release notes"}'
+```
+
+</Tab>
+</Tabs>
+
+## Reference
+
+- [Submit an agent run](/docs/api/reference/runtime/submit-agent-run)
+- [Create an agent definition](/docs/api/reference/agents/create-agent-definition)
+- [Errors](/docs/api/errors)
+- [Output, scripting, and exit codes](/docs/cli/output-and-scripting)

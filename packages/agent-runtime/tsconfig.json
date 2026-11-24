@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/agent-runtime",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/agent-runtime.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../agent-manifest" },
+    { "path": "../db" },
+    { "path": "../model-gateway" },
+    { "path": "../observability" },
+    { "path": "../sandbox-hosts" },
+    { "path": "../streaming" }
+  ]
+}

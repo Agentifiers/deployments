@@ -1,0 +1,161 @@
+---
+title: "Organizations, projects, and environments"
+description: "The tenancy hierarchy, members and invitations, and how every resource is scoped."
+---
+
+Tenancy resources decide who can work where. An organization holds people, a project groups environments for one product, and an environment isolates credentials, deployments, and usage. A workspace is an optional scope inside an environment. You create these once per product and then point the CLI and SDK at them.
+
+## The model
+
+| Resource     | Parent       | Key fields                    | Statuses                                    |
+| ------------ | ------------ | ----------------------------- | ------------------------------------------- |
+| Organization | none         | `name`, `slug`                | `active`, `archived`, `disabled`            |
+| Project      | Organization | `name`, `slug`                | `active`, `archived`, `disabled`            |
+| Environment  | Project      | `name`, `slug`, `type`        | `active`, `archived`, `disabled`            |
+| Workspace    | Environment  | `name`, `slug`, `description` | `active`, `archived`, `disabled`            |
+| Member       | Organization | `principalId`, `role`         | `active`, `invited`, `removed`              |
+| Invitation   | Organization | `email`, `role`, `expiresAt`  | `pending`, `accepted`, `expired`, `revoked` |
+
+Names are 1 to 120 characters with no surrounding whitespace. If you omit a slug, the platform derives one from the name. A slug is 1 to 63 lowercase letters, digits, or hyphens, and cannot start or end with a hyphen. An environment's `type` is `development`, `staging`, `production`, or `custom`.
+
+Every mutable resource has a `version` that starts at 1 and increases on each change.
+
+### Archiving
+
+Archiving is how you retire a project, environment, or workspace. Archiving does not delete anything, and archiving an already archived resource returns it unchanged.
+
+- An archived project accepts no new environments.
+- An archived environment accepts no new workspaces, service accounts, or API keys, and its keys cannot be rotated.
+- An organization that is not active accepts no new projects.
+
+### Standing and spend
+
+Any member can read the organization's standing with `deployments org standing <id>` (`getOrganizationStanding`). It returns `state` (`active` or `suspended`), each hold's `reason`, `customerMessage`, and `since`, and the effective tenant limits and operator-funded model spend ceiling. While the organization is suspended, the API refuses changes with `403 organization_suspended`. [Organization standing](/docs/operate/organization-standing) lists what a hold still allows.
+
+`deployments org spend <id> --month YYYY-MM` (`getOrganizationSpend`) reads the organization's spend for a UTC month, split into operator-funded and organization-funded spend. `deployments org project-spend <id> --month YYYY-MM` (`getOrganizationProjectSpend`) splits the same month by project, with every project of the organization listed, archived ones included.
+
+### Workspaces as usage and billing units
+
+A workspace is the finest unit the platform meters and bills. Usage that names a workspace counts toward its own hourly usage and cost counters and its own spend, as well as its environment's, project's, and organization's. When you give each of your customers one workspace, you can read and cap each customer separately:
+
+- `deployments workspace spend <id> --month YYYY-MM` (`getWorkspaceSpend`) reads the workspace's spend for a UTC month, split like the organization's. It needs `spend:read`, and archived workspaces stay readable.
+- `getUsageSummary` and `getCostSummary` take `workspaceId` for the workspace's usage and cost series.
+- A budget with `scope: "workspace"` refuses new runs in the workspace once its spend reaches the amount.
+
+An environment-scoped API key reads every workspace in its environment. See [Usage and budgets](/docs/capabilities/usage-and-budgets#bill-each-workspace).
+
+Creating an organization can fail with `403 email_verification_required`, `organization_creation_held` when an organization the person owns or administers has a hold, or `organization_quota_reached`. [Users](/docs/operate/users) describes each.
+
+## Membership and roles
+
+The person who creates an organization becomes its first `owner`. Others join in two ways.
+
+- **Invitations.** An owner or admin invites an email address with a role. The response contains a one-time `token`, and the platform can also email it. The emailed link opens `<console origin>/invitations/accept?invitation=<id>&token=<token>`. The invitee signs in and accepts with the token. The signed-in account's primary email must match the invited address.
+- **Direct add.** An owner or admin adds an existing person by `principalId`.
+
+An invitation expires 7 days after it is created unless you set `expiresAt`, which must be in the future and at most 30 days away.
+
+In the [management console](/docs/getting-started/console), owners and admins invite people from **Members** and copy the accept link, which the console shows once. The invitee opens the link, signs in with the invited address, and clicks **Accept invitation**. If the invitee is signed in with another account, **Sign in with a different account** shows the identity service's sign-in form and returns to the invitation. The console also creates organizations, projects, and environments, changes roles, and removes members.
+
+| Role      | Can change                                                                                                                                                                                                                                        |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner`   | Everything below, plus the organization's name and slug, owner memberships and owner invitations, and tenant erasure.                                                                                                                             |
+| `admin`   | Projects, environments, workspaces, service accounts, API keys, agents, workflows, managed-skill installations, memory, provider connections, retention policy, and exports. Non-owner members and invitations. Budgets and email administration. |
+| `billing` | Spend budgets.                                                                                                                                                                                                                                    |
+| `member`  | Nothing in the table above. Members read resources and can hold Brain grants that target a role.                                                                                                                                                  |
+| `viewer`  | Nothing. Viewers read resources.                                                                                                                                                                                                                  |
+
+Every role can read organization resources and list members. Only an owner can grant, change, or remove the owner role, and an organization must always keep at least one active owner. The API checks membership on each request, so removing a member takes effect on their next call.
+
+[Core concepts](/docs/getting-started/concepts) explains how roles combine with capability scopes.
+
+## Scopes for tenancy operations
+
+| Resource      | Read scope           | Write scope                                                |
+| ------------- | -------------------- | ---------------------------------------------------------- |
+| Organizations | `organizations:read` | `organizations:write`                                      |
+| Members       | `members:read`       | `members:write`                                            |
+| Invitations   | `invitations:read`   | `invitations:write`. Accepting needs `invitations:accept`. |
+| Projects      | `projects:read`      | `projects:write`                                           |
+| Environments  | `environments:read`  | `environments:write`                                       |
+| Workspaces    | `workspaces:read`    | `workspaces:write`                                         |
+
+## Use it
+
+<Steps>
+<Step>
+
+Create an organization and select it:
+
+```sh
+deployments org create --name "Example"
+deployments context set --org $ORG_ID
+```
+
+</Step>
+<Step>
+
+Create a project and two environments:
+
+```sh
+deployments project create --name "Support assistant"
+deployments context set --project $PROJECT_ID
+deployments env create --name "Development" --type development
+deployments env create --name "Production" --type production
+```
+
+</Step>
+<Step>
+
+Invite a teammate as an admin:
+
+```sh
+deployments invitation create --email teammate@example.com --role admin
+```
+
+The teammate accepts with the token from the invitation. Reading it from a file keeps it out of shell history:
+
+```sh
+deployments invitation accept $INVITATION_ID --token-file ./invitation-token
+```
+
+</Step>
+<Step>
+
+List members and change a role:
+
+```sh
+deployments member list
+deployments member update $MEMBER_ID --role viewer
+```
+
+</Step>
+</Steps>
+
+The same calls through the SDK take the scope header for their level:
+
+```ts
+import { createClient, createConfig, createEnvironment } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_TENANT_JWT}` },
+  }),
+);
+
+const { data, error } = await createEnvironment({
+  client,
+  headers: {
+    "x-deployments-project": process.env.PROJECT_ID!,
+    "idempotency-key": crypto.randomUUID(),
+  },
+  body: { name: "Staging", type: "staging" },
+});
+```
+
+## Reference
+
+- API: [Create an organization](/docs/api/reference/tenancy/create-organization), [Create a project](/docs/api/reference/tenancy/create-project), [Create an environment](/docs/api/reference/tenancy/create-environment), [Create a workspace](/docs/api/reference/tenancy/create-workspace), [Create an invitation](/docs/api/reference/tenancy/create-organization-invitation), [Accept an invitation](/docs/api/reference/tenancy/accept-organization-invitation), [Update a member](/docs/api/reference/tenancy/update-organization-member)
+- CLI: [`org`](/docs/cli/reference/org), [`project`](/docs/cli/reference/project), [`env`](/docs/cli/reference/env), [`workspace`](/docs/cli/reference/workspace), [`member`](/docs/cli/reference/member), [`invitation`](/docs/cli/reference/invitation)
+- SDK: [Tenancy functions](/docs/sdk/reference#tenancy)

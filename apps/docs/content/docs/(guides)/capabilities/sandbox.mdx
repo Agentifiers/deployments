@@ -1,0 +1,149 @@
+---
+title: "Code sandbox"
+description: "Run agent-written Bash, JavaScript, and Python in an isolated MicroVM, with an optional workspace that persists across a thread."
+---
+
+The `code.execute` tool runs Bash, JavaScript, or Python that the model writes, inside an isolated sandbox MicroVM, and returns the output. The agent manifest's sandbox policy decides whether each call gets a fresh machine or whether the thread keeps a `/workspace` directory between calls and runs. The same sandbox provider also runs the browser tools and hosted code tools.
+
+<Callout type="warn" title="Availability">
+  Sandbox tools need a sandbox provider on the agent worker. An installation from the customer root
+  runs the `aws_lambda_microvm` provider by default, which supports every sandbox tool. See [Sandbox
+  runtime](/docs/operate/sandbox-runtime) for how operators run it.
+</Callout>
+
+## Sandbox policy
+
+The manifest's `spec.sandbox` sets the policy for every run of a release.
+
+| Field                                    | Meaning                                                     |
+| ---------------------------------------- | ----------------------------------------------------------- |
+| `mode`                                   | `none`, `run-ephemeral`, or `thread-persistent`. Required.  |
+| `provider`                               | `aws_lambda_microvm`, the only provider.                    |
+| `minVcpu`, `minMemoryMiB`                | Minimum resources for the MicroVM.                          |
+| `imageRef`, `poolKey`, `accessPolicyRef` | Operator-defined image, pool, and access policy references. |
+
+The platform rejects these combinations when you publish:
+
+| Error code                                 | Cause                                                                 |
+| ------------------------------------------ | --------------------------------------------------------------------- |
+| `sandbox_setting_without_sandbox`          | A sandbox field is set while `mode` is `none`.                        |
+| `sandbox_file_tool_without_thread_sandbox` | A `sandbox.files.*` or `computer.*` tool without `thread-persistent`. |
+| `browser_tool_without_sandbox`             | A sandbox browser tool with mode `none`.                              |
+
+### Modes
+
+- **`run-ephemeral`.** Each tool call gets a new MicroVM that is destroyed when the call ends. Nothing carries over.
+- **`thread-persistent`.** Each thread has a durable `/workspace` for each deployment. Preview and evaluation runs use their execution binding instead of a deployment. The first sandbox call in a run starts one MicroVM and restores the latest `/workspace` snapshot into it. Later calls in the same run reuse that MicroVM. When the run ends, pauses, or fails, the worker snapshots `/workspace` and destroys the MicroVM. Only files under `/workspace` persist to the next run. Processes do not. A run that takes an [execution checkpoint](/docs/capabilities/context-management) keeps its MicroVM and resumes on it, so its processes keep running. When a worker host shuts down mid-run, the run resumes on a new MicroVM restored from the snapshot.
+
+## Run code with `code.execute`
+
+`code.execute` is a platform catalog tool with effect `execute` and default action `allow`.
+
+| Input       | Rule                                           |
+| ----------- | ---------------------------------------------- |
+| `code`      | Required. At most 20 KiB after UTF-8 encoding. |
+| `language`  | Required. `bash`, `javascript`, or `python`.   |
+| `timeoutMs` | 100 to 50,000. Default 30,000.                 |
+
+The result reports `exitCode`, `durationMs`, `stdout`, and `stderr`. Each stream keeps at most 64 KiB and ends with a truncation marker when cut, and the whole structured result fits in 96 KiB. The model sees a summary of up to 3,500 characters, and a private run artifact keeps up to 20 KiB of each stream. A non-zero exit code is a completed result, so the model can read the error and try again. In `thread-persistent` mode the working directory is `/workspace`.
+
+## Work with files in `/workspace`
+
+With `thread-persistent`, three file tools read and write the workspace directly. Paths are absolute under `/workspace` or relative to it, at most 1,024 characters, and cannot leave `/workspace`.
+
+| Tool                  | Effect | Limits                                                                           |
+| --------------------- | ------ | -------------------------------------------------------------------------------- |
+| `sandbox.files.read`  | read   | Reads UTF-8 text. Default 32 KiB, maximum 64 KiB.                                |
+| `sandbox.files.write` | write  | Creates or replaces a UTF-8 file of up to 96 KiB and creates parent directories. |
+| `sandbox.files.list`  | read   | Lists entries. Default 200, maximum 500.                                         |
+
+## Serve and capture a site
+
+A thread-persistent run can serve a site it built and screenshot it. Start the server detached from the `code.execute` call and bound to loopback:
+
+```bash
+setsid -f python3 -m http.server 4173 --bind 127.0.0.1 --directory /workspace/site
+```
+
+The server runs until the run ends. The next run starts a new MicroVM from the snapshot, so start the server again. Then `browser.capture_screenshot` can capture `http://127.0.0.1:4173/`. Do not use the sandbox control port. See [Web and browser tools](/docs/capabilities/web-tools-and-browser). An HTTP callback tool can also send the built files to your endpoint. See [Extensions and hosted code](/docs/capabilities/extensions-and-hosted-code).
+
+## Use a desktop
+
+With `thread-persistent` and an install deployed with `"lambdaMicrovmImage": "desktop"` in its deployment target, the agent can operate a Linux desktop of 1280x800 pixels with Firefox and xterm. The desktop and its windows stay open for the rest of the run, unless a worker host shutdown moves the run to a new MicroVM.
+
+| Tool                  | Effect  | Behavior                                                                                                                                                     |
+| --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `computer.screenshot` | read    | Captures the screen and lists open windows with their positions.                                                                                             |
+| `computer.action`     | execute | Clicks, drags, types, presses keys, scrolls, or launches `firefox` or `xterm`, waits `settleMs` (0 to 5,000, default 1,000), then captures the screen again. |
+
+Each screenshot is a private run artifact. Set `spec.runtime.toolResultImages` to `screenshots` so the model sees them. An action the desktop refuses still returns a screenshot, with an `action_failed` error. On an image without a desktop, both tools return `no_desktop`. `launch` starts the app and waits up to 18 seconds for one of its windows. Its result has `launchStatus`: `ready` when the window appeared, or `starting` when the app is still loading. Firefox can take close to a minute to open its first window in a new sandbox, so its first launch usually returns `starting`. Add `computer-use` to `spec.platformSkills` to teach the agent the screenshot, act, and verify loop. See [Platform skills](/docs/capabilities/agent-manifests#platform-skills).
+
+```json
+{
+  "spec": {
+    "platformSkills": ["computer-use"],
+    "sandbox": { "mode": "thread-persistent", "provider": "aws_lambda_microvm" },
+    "capabilities": {
+      "tools": [
+        { "name": "computer.screenshot", "required": true, "requiredScopes": [] },
+        { "name": "computer.action", "required": true, "requiredScopes": [] }
+      ]
+    },
+    "runtime": {
+      "modelTools": ["computer.screenshot", "computer.action"],
+      "toolResultImages": "screenshots"
+    }
+  }
+}
+```
+
+## Active sandbox limit
+
+Each organization can run a limited number of sandboxes at once, set by its `activeSandboxes` limit. A sandbox counts from the moment the platform starts or resumes it until the platform suspends or destroys it. A `run-ephemeral` sandbox counts for one tool call. A `thread-persistent` sandbox counts until its run ends, pauses, or fails, including while the run waits in the queue after an execution checkpoint. A limit of 0 turns sandboxes off for the organization.
+
+At the limit, the platform refuses to start or resume a sandbox before it creates any MicroVM. The refusal applies to every tool call that needs a sandbox, including HTTP callback tools that attach files from the thread sandbox. The tool call completes with an error result that the model reads, and the run continues:
+
+```json
+{
+  "error": {
+    "code": "organization_sandbox_limit_reached",
+    "limit": 8,
+    "message": "This organization reached its limit of 8 active sandboxes, so code.execute did not run. Try again after other sandbox work finishes, or continue without it."
+  }
+}
+```
+
+The model decides what to do next, such as answering without the sandbox. To see your organization's limit, run `deployments org limits $ORGANIZATION_ID`. [Versioning and limits](/docs/api/versioning-and-limits#organization-limits) lists every organization limit.
+
+## Use it
+
+1. Give the agent a sandbox and declare the tools in its manifest.
+
+   ```json
+   {
+     "spec": {
+       "sandbox": { "mode": "thread-persistent", "provider": "aws_lambda_microvm" },
+       "capabilities": {
+         "tools": [
+           { "name": "code.execute", "required": true, "requiredScopes": [] },
+           { "name": "sandbox.files.read", "required": false, "requiredScopes": [] },
+           { "name": "sandbox.files.write", "required": false, "requiredScopes": [] }
+         ]
+       }
+     }
+   }
+   ```
+
+2. Read the tool's input schema.
+
+   ```bash
+   deployments tool get --name code.execute
+   ```
+
+3. Publish and deploy the release, then start a thread. Files the agent writes under `/workspace` are there in the next run on the same thread.
+
+## Reference
+
+- API: [Get a tool](/docs/api/reference/tools/get-tool), [List run tool calls](/docs/api/reference/runtime/list-run-tool-calls)
+- CLI: [`deployments tool get`](/docs/cli/reference/tool#tool-get), [`deployments tool-call list`](/docs/cli/reference/tool-call#tool-call-list)
+- Related: [Agent manifests](/docs/capabilities/agent-manifests), [Threads and runs](/docs/capabilities/threads-and-runs), [Sandbox runtime](/docs/operate/sandbox-runtime)

@@ -1,0 +1,20 @@
+{
+  "name": "@deployments-ai/brains",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./authorization": "./src/authorization.ts",
+    "./models": "./src/models.ts",
+    "./ports": "./src/ports.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@deployments-ai/agent-manifest": "workspace:*"
+  }
+}

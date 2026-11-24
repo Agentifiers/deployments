@@ -1,0 +1,150 @@
+---
+title: "Observability"
+description: "Query finalized traces, spans, metrics, tool statistics, and trace exports for agent runs."
+---
+
+Observability answers what your agents did and what it cost. Every run records spans for its work: model calls, tool calls, approval waits, memory, sandbox, and queue time. When the runs of a trace finish, the platform finalizes the trace. The observability API queries those finalized traces and spans, and aggregates them into metrics.
+
+Use it to find a failing run's trace, inspect where time and tokens went, chart volume and cost by agent or model, and export trace summaries to your own tools.
+
+## What you can read
+
+| Operation                        | Returns                                                             |
+| -------------------------------- | ------------------------------------------------------------------- |
+| `listObservabilityTraces`        | Finalized trace summaries, newest first, with filters.              |
+| `getObservabilityTrace`          | One trace summary by trace ID.                                      |
+| `getObservabilityRunTrace`       | The trace that contains a run.                                      |
+| `listObservabilitySessionTraces` | The traces of one session, with the same filters as the trace list. |
+| `listObservabilityTraceSpans`    | The spans of one trace, oldest first.                               |
+| `getObservabilityMetrics`        | A bucketed time series of trace or model-call metrics.              |
+| `getObservabilityToolMetrics`    | Call count, error count, and p95 duration per tool.                 |
+| `createObservabilityExport`      | A synchronous export of trace summaries.                            |
+
+Every operation requires the `observability:read` scope. Responses carry metadata only: identifiers, status, timing, token counts, cost, and model routing. They never include prompts, model output, or tool input.
+
+## Traces and spans
+
+A trace summary names its trace, root run, and session, the agent definition, deployment, and release of the root run, its `execution_purpose` (`customer`, `preview`, or `evaluation`), what triggered it, its `status` (`ok`, `error`, or `canceled`) and `error_class`, the number of runs, the duration, and the total tokens and cost in USD micros. Response fields use snake case, for example `total_cost_usd_micros`.
+
+A span has a `kind` and a `status`:
+
+| Field    | Values                                                                                                    |
+| -------- | --------------------------------------------------------------------------------------------------------- |
+| `kind`   | `agent`, `approval_wait`, `artifact`, `custom`, `memory`, `model`, `queue_wait`, `run`, `sandbox`, `tool` |
+| `status` | `ok`, `error`, `canceled`, `timed_out`, `abandoned`                                                       |
+
+Model spans add the requested and actual provider and model, the fallback attempt and reason, input, output, cached, and total tokens, cost, the provider request ID, and the stop reason. They also carry `attempt_id`, `model_call_index` (the run's model generation index, shared by every fallback attempt of one generation), and `invocation_kind` (`assistant` for an answer generation, `response-depth` for the response-depth classifier). Spans link to their parent through `parent_span_id`.
+
+A tool span for a call that a model generation requested is a child of that model attempt's span: its `parent_span_id` is the model span's `span_id`, and it carries the same `attempt_id` and `model_call_index`. These match `modelAttemptId` and `modelCallIndex` on the run's tool calls. Other tool spans, such as tool-plan calls, have the run span as parent.
+
+## Scope
+
+Send the `x-deployments-organization` header with every request. The project and environment headers are optional and narrow the results. If your credential can reach exactly one project or environment, the API narrows to it for you. If it can reach several and you omit the header, the request fails with `400 missing_project_context` or `400 missing_environment_context`.
+
+## Time windows and retention
+
+| Data                                             | Kept for | Default window    | Longest window                     |
+| ------------------------------------------------ | -------- | ----------------- | ---------------------------------- |
+| Trace lists and session traces                   | 90 days  | The last 7 days   | 31 days                            |
+| Spans                                            | 30 days  | The whole trace   | Not applicable                     |
+| Trace metrics (`groupBy` an agent field or none) | 90 days  | The last 24 hours | 31 days, or 7 days grouped by hour |
+| Model metrics (`groupBy` `model` or `provider`)  | 30 days  | The last 24 hours | 31 days, or 7 days grouped by hour |
+| Tool metrics                                     | 30 days  | The last 24 hours | 31 days                            |
+
+`from` and `to` take RFC 3339 timestamps. A window that is empty, too long, or reaches past retention fails with `400 invalid_time_range`.
+
+## Pagination
+
+Trace and span lists return 50 items by default and up to 100 with `limit`. Each `nextCursor` is signed and bound to the query and scope that produced it. Send it with the same filters and window, or the request fails with `400`. A cursor expires 5 minutes after the first page, and an expired cursor returns `410 cursor_expired`. Start the query again from the first page.
+
+## Metrics
+
+`getObservabilityMetrics` returns one point per bucket. `interval` is `hour` (the default) or `day`. `groupBy` picks the dimension and the data source:
+
+- No `groupBy`, or `agentDefinitionId`, `agentDeploymentId`, or `agentReleaseId`, reads finalized traces. Each point has `trace_count`, `error_count`, `total_tokens`, `total_cost_usd_micros`, and p50 and p95 duration.
+- `model` or `provider` reads model calls. Each point has `invocation_count`, `error_count`, input, output, cached, and total tokens, cost, and p50 and p95 latency. The model and provider are the ones the provider confirmed, falling back to the requested ones.
+
+A grouped series keeps the 20 groups with the most traces or calls in the window, so every bucket shows the same groups. The response `source` field says which data the series came from.
+
+`getObservabilityToolMetrics` returns up to 100 tools ordered by call count. With `agentDeploymentId`, it counts only tool calls of that deployment's runs, and only after the run finishes.
+
+## Exports
+
+`createObservabilityExport` returns trace summaries in one response, newest first. `limit` is 1 to 1,000 and defaults to 1,000. The window defaults to the last 7 days, like the trace list. A response larger than 5 MiB fails with `413 export_too_large`. Ask for a smaller `limit`.
+
+## Query capacity
+
+The query service runs at most two queries at once for one organization. Extra requests fail with `429 observability_query_concurrency_exceeded`. When the service is busy across organizations, requests fail with `429 observability_query_capacity_exceeded`. Retry after a short wait.
+
+<Callout type="info" title="Availability">
+  The observability API runs on the observability hot plane, which an installation from the customer
+  root runs by default. While it starts, or while an operator rebuilds it, operations return `503
+  observability_initializing`. An installation whose operator turned it off returns `503
+  observability_unavailable` for every observability operation.
+</Callout>
+
+## Use it
+
+These steps assume your CLI context names the organization. See [Configuration and context](/docs/cli/configuration).
+
+1. Find recent failed traces for a deployment:
+
+   ```sh
+   deployments trace list --deployment "$AGENT_DEPLOYMENT_ID" --status error \
+     --from 2026-10-01T00:00:00Z --to 2026-10-04T00:00:00Z
+   ```
+
+2. Open the trace of a run you already know, then list its spans:
+
+   ```sh
+   deployments trace for-run --run "$RUN_ID"
+   deployments trace spans --id "$TRACE_ID"
+   ```
+
+3. Chart daily cost and tokens by model:
+
+   ```sh
+   deployments observability metrics --interval day --group-by model \
+     --from 2026-09-20T00:00:00Z --to 2026-10-04T00:00:00Z
+   ```
+
+4. Check which tools a deployment calls most and how often they fail:
+
+   ```sh
+   deployments observability tools --deployment "$AGENT_DEPLOYMENT_ID"
+   ```
+
+5. Export up to 500 trace summaries:
+
+   ```sh
+   deployments observability export --limit 500 --json > traces.json
+   ```
+
+The same trace query with the SDK:
+
+```ts
+import { createClient, createConfig, listObservabilityTraces } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data, error } = await listObservabilityTraces({
+  client,
+  headers: { "x-deployments-organization": "org_123" },
+  query: { agentDeploymentId: "deployment_123", executionPurpose: "customer", limit: 100 },
+});
+for (const trace of data?.items ?? []) {
+  console.log(trace.trace_id, trace.status, trace.total_cost_usd_micros);
+}
+```
+
+## Reference
+
+- API: [listObservabilityTraces](/docs/api/reference/observability/list-observability-traces), [getObservabilityTrace](/docs/api/reference/observability/get-observability-trace), [getObservabilityRunTrace](/docs/api/reference/observability/get-observability-run-trace), [listObservabilitySessionTraces](/docs/api/reference/observability/list-observability-session-traces), [listObservabilityTraceSpans](/docs/api/reference/observability/list-observability-trace-spans), [getObservabilityMetrics](/docs/api/reference/observability/get-observability-metrics), [getObservabilityToolMetrics](/docs/api/reference/observability/get-observability-tool-metrics), and [createObservabilityExport](/docs/api/reference/observability/create-observability-export).
+- CLI: [`deployments trace`](/docs/cli/reference/trace) and [`deployments observability`](/docs/cli/reference/observability).
+- SDK: [Observability functions](/docs/sdk/reference#observability).
+- Related: [Evaluations](/docs/capabilities/evaluations) scores traces, and [Usage and budgets](/docs/capabilities/usage-and-budgets) is the ledger that budgets enforce from.

@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "releaseManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "sourceCommit": "640b8f91a97f1eca492c7415ea4fdd648249336d",
+  "label": "2026.10.09-640b8f9",
+  "builtAt": "2026-10-09T03:51:43.000Z",
+  "publishedAt": "2026-10-09T04:02:10.000Z",
+  "ciRunId": 37877507979,
+  "sizeBytes": 755778973,
+  "files": {
+    "release.json": {
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "sizeBytes": 3976
+    }
+  },
+  "compatibility": {
+    "comparedWith": "2222222222222222222222222222222222222222222222222222222222222222",
+    "rollbackBarrier": true,
+    "reasons": [
+      { "kind": "terraform-moved", "file": "infrastructure/modules/x/main.tf", "count": 3 },
+      { "kind": "record-schema", "file": "packages/db/src/records/system.ts" },
+      { "kind": "deploy-migration", "name": "installation-record" }
+    ]
+  },
+  "deployer": {
+    "image": "123456789012.dkr.ecr.us-east-2.amazonaws.com/deployments-ai/platform/deployer@sha256:3333333333333333333333333333333333333333333333333333333333333333"
+  }
+}

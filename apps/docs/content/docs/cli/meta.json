@@ -1,0 +1,14 @@
+{
+  "title": "CLI",
+  "description": "The deployments command",
+  "root": true,
+  "pages": [
+    "index",
+    "authentication",
+    "configuration",
+    "output-and-scripting",
+    "preview-loop",
+    "---Reference---",
+    "reference"
+  ]
+}

@@ -1,0 +1,125 @@
+import {
+  action,
+  id,
+  json,
+  list,
+  number,
+  requiredJson,
+  requiredNumber,
+  requiredText,
+  text,
+} from "./catalog-helpers.ts";
+export const artifactRuntimeCommands = {
+  artifact: {
+    summary: "Run and message artifacts",
+    actions: {
+      list: {
+        ...list("/v1/artifacts", "environment", "List artifacts", {
+          limitField: "limit",
+          maxLimit: 100,
+          target: "query",
+        }),
+        listField: "artifacts",
+        args: {
+          "run-id": { ...text("Filter by run ID", "query"), field: "runId" },
+          "thread-id": { ...text("Filter by thread ID", "query"), field: "threadId" },
+          type: text("Filter by artifact type", "query"),
+          "content-type": {
+            ...text("Filter by media type or family, such as image/*", "query"),
+            field: "contentType",
+          },
+          "created-after": {
+            ...text("Only artifacts created at or after this timestamp", "query"),
+            field: "createdAfter",
+          },
+          "created-before": {
+            ...text("Only artifacts created at or before this timestamp", "query"),
+            field: "createdBefore",
+          },
+        },
+      },
+      upload: action({
+        summary: "Create a customer artifact upload",
+        method: "POST",
+        path: "/v1/artifacts",
+        scope: "environment",
+        output: "detail",
+        args: {
+          name: requiredText("Artifact name"),
+          type: requiredText("Artifact type"),
+          "file-name": { ...requiredText("Artifact file name"), field: "fileName" },
+          "content-type": { ...requiredText("Artifact media type"), field: "contentType" },
+          "byte-size": { ...requiredNumber("Artifact byte size"), field: "byteSize" },
+          sha256: requiredText("Lowercase SHA-256 digest"),
+          visibility: text("private or organization"),
+          "run-id": { ...text("Associated run ID"), field: "runId" },
+          "thread-id": { ...text("Associated thread ID"), field: "threadId" },
+          "retention-expires-at": {
+            ...text("Canonical retention expiration"),
+            field: "retentionExpiresAt",
+          },
+          metadata: json("Artifact metadata"),
+        },
+        sensitiveOutput: true,
+        sensitiveOutputFields: ["url"],
+      }),
+      show: action({
+        summary: "Show artifact metadata",
+        method: "GET",
+        path: "/v1/artifacts/:artifactId",
+        scope: "environment",
+        output: "detail",
+        args: { id: { ...id, field: "artifactId" } },
+      }),
+      download: action({
+        summary: "Create a scoped artifact access URL",
+        method: "POST",
+        path: "/v1/artifacts/:artifactId/access-urls",
+        scope: "environment",
+        output: "detail",
+        args: {
+          id: { ...id, field: "artifactId" },
+          "expires-in-seconds": number("Access URL lifetime in seconds"),
+          disposition: text("attachment to make a browser save the file, or inline"),
+        },
+        sensitiveOutput: true,
+        sensitiveOutputFields: ["url", "value", "export-url"],
+      }),
+      complete: action({
+        summary: "Verify and complete a customer artifact upload",
+        method: "POST",
+        path: "/v1/artifacts/:artifactId/complete",
+        scope: "environment",
+        output: "detail",
+        args: { id: { ...id, field: "artifactId" } },
+      }),
+      delete: action({
+        summary: "Delete an artifact and erase its stored bytes",
+        method: "DELETE",
+        path: "/v1/artifacts/:artifactId",
+        scope: "environment",
+        output: "detail",
+        args: { id: { ...id, field: "artifactId" } },
+        destructive: true,
+      }),
+      retention: action({
+        summary: "Set or clear artifact retention",
+        method: "PATCH",
+        path: "/v1/artifacts/:artifactId/retention",
+        scope: "environment",
+        output: "detail",
+        args: {
+          id: { ...id, field: "artifactId" },
+          "expected-version": {
+            ...requiredNumber("Expected artifact version"),
+            field: "expectedVersion",
+          },
+          "retention-expires-at": {
+            ...requiredJson("Canonical retention expiration string or null"),
+            field: "retentionExpiresAt",
+          },
+        },
+      }),
+    },
+  },
+};

@@ -1,0 +1,101 @@
+---
+title: "Costs"
+description: "The AWS resources a default installation runs, which of them cost money while idle, and the variables that shrink them."
+---
+
+A default installation runs a fixed set of always-on resources and bills everything else by use. This page lists the always-on resources the OpenTofu modules create with the sample var file's production posture, then the levers that shrink them. It names resource types, sizes, and counts from the modules; check current prices for your region on the AWS pricing pages. The sample uses `us-east-2`.
+
+`infrastructure/environments/customer` also creates AWS Budgets and a Cost Anomaly Detection monitor. `billing_daily_budget_usd` defaults to 100, `billing_monthly_budget_usd` to 350, and `billing_anomaly_threshold_usd` to 100, and they alert `billing_alert_email`.
+
+## Always-on resources
+
+| Resource                           | Feature                       | Size and count with the sample posture                                                                                        |
+| ---------------------------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| OpenSearch domains                 | Memory and Brains             | Two domains, each 2 × `m7g.large.search` with 50 GiB gp3 per node. `shared_search_domain = true` makes it one domain.         |
+| Agent worker                       | Agent runtime                 | Fargate ARM64, 1 vCPU and 4 GiB per task, at least 2 tasks, up to 20.                                                         |
+| Model gateway                      | Model runtime                 | Fargate ARM64, 1 vCPU and 2 GiB per task, `bifrost_desired_count` tasks (1). Never Spot.                                      |
+| Durable Streams                    | Agent runtime                 | Fargate x86, 1 vCPU and 2 GiB, 1 task, plus an EFS file system with AWS Backup.                                               |
+| Stream gateway                     | Agent runtime                 | Fargate ARM64, 0.5 vCPU and 1 GiB per task, 2 tasks with `high_availability`, behind a public Application Load Balancer.      |
+| Firecrawl                          | Web tools                     | Fargate, 2 vCPU and 4 GiB, `web_tools_desired_count` tasks (1).                                                               |
+| Chromium renderer                  | Web tools                     | Fargate, 1 vCPU and 4 GiB, `web_tools_chromium_desired_count` tasks (1).                                                      |
+| Internal Application Load Balancer | Model runtime                 | One, shared by the model gateway, Durable Streams, and web tools.                                                             |
+| NAT                                | Network                       | One `t4g.small` NAT instance and an Elastic IP while web tools are on; otherwise one NAT gateway and Elastic IP per zone (2). |
+| Observability fact stream          | Observability history         | One provisioned Kinesis shard, plus Firehose delivery to S3 Tables.                                                           |
+| ClickHouse node                    | Observability hot plane       | One `t4g.medium` instance in unlimited mode, 20 GiB gp3 data and root volumes, and daily backups and snapshots kept 7 days.   |
+| Hot-plane service                  | Observability hot plane       | Fargate ARM64, 0.25 vCPU and 0.5 GiB, 1 task.                                                                                 |
+| Console distribution               | Console                       | One CloudFront distribution.                                                                                                  |
+| KMS keys                           | Data, model runtime, identity | Customer managed keys for data, governance signing, model gateway tokens, and identity signing.                               |
+| WAF web ACL                        | Identity service              | One, with `web_application_firewall`.                                                                                         |
+
+Everything else bills by use: Lambda, DynamoDB on-demand tables, S3 and S3 Tables storage, SQS, SNS, EventBridge, API Gateway, SES, CloudWatch Logs, Athena queries, Bedrock tokens, and Lambda MicroVM sandbox time. Bedrock bills Cohere Embed v4 through AWS Marketplace.
+
+The OpenSearch domains and the Fargate services are the largest fixed costs. Container Insights on every ECS cluster and detailed metrics follow `enhanced_monitoring`.
+
+## Observability hot plane
+
+The hot plane's defaults are the smallest proven size. This table compares their monthly cost with the earlier defaults, at `us-east-2` On-Demand prices: 730 hours a month, `r7g.large` at $0.1071 an hour, `t4g.medium` at $0.0336 an hour, gp3 at $0.08 per GB-month with its 3,000 IOPS and 125 MiB/s baseline included, and Fargate ARM64 at $0.03238 per vCPU-hour and $0.00356 per GB-hour. Prices change, so check the AWS pricing pages.
+
+| Part            | Earlier default                                                    | Default                                                                 |
+| --------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| ClickHouse node | `r7g.large`: $0.1071 × 730 = $78.18                                | `t4g.medium`: $0.0336 × 730 = $24.53                                    |
+| Data volume     | 200 GiB × $0.08 = $16.00                                           | 20 GiB × $0.08 = $1.60                                                  |
+| Root volume     | 50 GiB × $0.08 = $4.00                                             | 20 GiB × $0.08 = $1.60                                                  |
+| Hot-plane task  | 0.5 vCPU and 1 GiB: (0.5 × $0.03238 + 1 × $0.00356) × 730 = $14.42 | 0.25 vCPU and 0.5 GiB: (0.25 × $0.03238 + 0.5 × $0.00356) × 730 = $7.21 |
+| **Total**       | **$112.60**                                                        | **$34.94**, $77.66 or 69 percent less                                   |
+
+The totals leave out what depends on use: backups, surplus CPU credits, the node's three custom CloudWatch metrics and its alarms, and data transfer.
+
+Backups depend on how much data ClickHouse holds. Each daily native backup is a full copy in S3, so the bucket holds about one copy per day of retention; at S3 Standard's $0.023 per GB-month, that is retention × data × $0.023. EBS snapshots are incremental at $0.05 per GB-month: one full copy when nothing changes, up to one copy per day of retention when merges rewrite every part daily. With 16 GiB of data, the point where the 20 GiB volume's usage alarm fires:
+
+| Backup retention                                     | Native backups            | Snapshots                                      | Total             |
+| ---------------------------------------------------- | ------------------------- | ---------------------------------------------- | ----------------- |
+| 7 days, the default                                  | 7 × 16 × $0.023 = $2.58   | 16 × $0.05 = $0.80 to 7 × 16 × $0.05 = $5.60   | $3.38 to $8.18    |
+| 90 days, the earlier default with the sample posture | 90 × 16 × $0.023 = $33.12 | 16 × $0.05 = $0.80 to 90 × 16 × $0.05 = $72.00 | $33.92 to $105.12 |
+
+A `t4g.medium` that runs above its 20 percent baseline for long enough pays for surplus CPU credits; [Sizing](/docs/operate/observability-clickhouse#sizing) shows what sustained load adds and how to scale up. Even both vCPUs at 100 percent all month, $24.53 + $46.72 = $71.25, cost less than the `r7g.large`.
+
+## Event analytics
+
+[Event analytics](/docs/operate/event-analytics) runs by default and costs about $0.60 a month while idle: six CloudWatch alarms at $0.10 each. Its projector Lambda, Firehose stream, S3 failure and result buckets, dead-letter queue, and Athena workgroup bill only by use. Each event costs one Lambda invocation and its bytes through Firehose into S3 Tables. Each operator query bills at least 10 MB scanned, and the workgroup stops any query past 10 GiB. The semantic event table exists in every installation whether or not the stack runs.
+
+## Price sandbox time
+
+By default the agent worker meters Lambda MicroVM sandbox time without a cost, so sandboxes add nothing to an organization's spend. To price them, set the `sandbox_usage_cost_policy` input of `module "platform"`. Each rate is a whole number of USD micros per hour, from 0 to 1,000,000,000. A USD micro is one millionth of a dollar.
+
+| Rate                         | Prices                                                               |
+| ---------------------------- | -------------------------------------------------------------------- |
+| `base_hour_usd_micros`       | Each hour a sandbox runs, the `sandbox_ms` meter.                    |
+| `vcpu_hour_usd_micros`       | Each reserved vCPU-hour, the `sandbox_vcpu_ms` meter.                |
+| `memory_gib_hour_usd_micros` | Each reserved GiB-hour of memory, the `sandbox_memory_mib_ms` meter. |
+
+This example passes on the Lambda MicroVM compute price in US East (N. Virginia) on Graviton, as AWS lists it in the [Lambda pricing examples](https://aws.amazon.com/lambda/pricing/). AWS charges $0.0000276944 per vCPU-second and $0.0000036667 per GB-second. Per hour, that is 99,700 USD micros per vCPU and 13,200 USD micros per GB, rounded to the micro.
+
+```hcl
+sandbox_usage_cost_policy = {
+  vcpu_hour_usd_micros       = 99700
+  memory_gib_hour_usd_micros = 13200
+}
+```
+
+A default sandbox reserves 1 vCPU and 2 GiB, so an hour of it costs 99,700 + 2 × 13,200 = 126,100 USD micros, about $0.13. The policy prices the reservation only. AWS also bills compute above the baseline, snapshot reads, writes, and storage, and data transfer. Raise the rates if they should cover those too. Prices change, so check the AWS pricing page for your region.
+
+OpenTofu rejects a rate outside that range at plan, and passes a set policy to the agent worker as `DEPLOYMENTS_AI_SANDBOX_USAGE_COST_POLICY`. Each priced meter event carries its `costUsdMicros` and `funding: operator`, and the usage materializer adds it to the organization's operator-funded [month spend](/docs/operate/organization-standing#read-month-spend). Sandbox time then counts toward the same [operator-funded spend ceiling](/docs/operate/organization-standing#set-the-default-model-spend-ceiling) as model usage on the installation's keys. The input is `null` by default, which leaves sandbox time unpriced and the worker environment unchanged.
+
+## Shrink a default installation
+
+| Lever                                                | Effect                                                                                                                                                                 |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `operations.shared_search_domain = true`             | One OpenSearch domain for memory and Brains instead of two.                                                                                                            |
+| `operations.compact_sizing = true`                   | Smaller Fargate tasks: worker 0.5 vCPU and 1 GiB, 1 to 4 tasks; model gateway 0.5 vCPU and 1 GiB; Durable Streams 0.25 vCPU and 0.5 GiB; Firecrawl 0.5 vCPU and 3 GiB. |
+| `operations.fargate_spot = true`                     | Fargate Spot for every ECS service except the model gateway.                                                                                                           |
+| `operations.high_availability = false`               | One stream gateway task instead of two.                                                                                                                                |
+| `operations.dedicated_public_load_balancers = false` | CloudFront in front of the shared internal load balancer instead of a public load balancer for the stream gateway.                                                     |
+| `operations.enhanced_monitoring = false`             | No Container Insights or detailed metrics.                                                                                                                             |
+| `web_tools_runtime_enabled = false`                  | No Firecrawl or Chromium tasks. Egress returns to NAT gateways unless you set `network_nat_mode = "instance"`.                                                         |
+| `network_single_nat_gateway = true`                  | In gateway mode, one NAT gateway for every zone.                                                                                                                       |
+| `agent_observability_hot_enabled = false`            | No ClickHouse node or hot-plane task. The observability API then answers `503 observability_unavailable`.                                                              |
+| `agent_observability_history_enabled = false`        | No Kinesis shard or Firehose streams. Needs `agent_observability_hot_enabled = false` too.                                                                             |
+| `agent_email_enable_runtime = false`                 | No agent email workers. The SES domain identity stays.                                                                                                                 |
+| `event_analytics_lifecycle = "absent"`               | No projector, Firehose stream, workgroup, or alarms. Only before the first deploy; later, see [Lifecycle](/docs/operate/event-analytics#lifecycle).                    |
+
+`compact_sizing`, `fargate_spot`, and turning `high_availability` off trade capacity and availability for cost. Keep the [production posture](/docs/operate/deployment#set-the-operational-posture) for an installation that serves real traffic.

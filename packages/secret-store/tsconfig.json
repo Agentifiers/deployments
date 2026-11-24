@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/secret-store",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/secret-store.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"]
+}

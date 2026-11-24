@@ -1,0 +1,167 @@
+---
+title: "Tenant limits"
+description: "The per-organization request rate, concurrent run, and active sandbox limits: where their defaults come from, how a grant changes them for one organization, how each one is enforced, and the metrics and alarms that show when organizations hit them."
+---
+
+Every organization in an installation runs under four limits. You set a default for each in OpenTofu, and an entitlement grant on the organization's standing changes them for one organization. This page covers the defaults, grants, what happens at each limit, and what to check when a tenant reports one. [Versioning and limits](/docs/api/versioning-and-limits#organization-limits) describes the limits from the API client's side.
+
+| Limit                  | Enforced by                                               | At the limit                                                                                                |
+| ---------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `apiRequestsPerSecond` | Every API Lambda function, right after authentication     | `429` with code `organization_rate_limited` and a `retry-after` header                                      |
+| `apiRequestBurst`      | The same check                                            | The same response                                                                                           |
+| `concurrentRuns`       | The agent worker, when it claims a run                    | The run stays `queued`. After 6 hours of waiting it fails with `organization_concurrency_wait_expired`.     |
+| `activeSandboxes`      | The sandbox manager, before it calls the sandbox provider | The tool call completes with an error result, code `organization_sandbox_limit_reached`. The run continues. |
+
+The API Gateway stage throttle sits in front of all four. It limits the whole installation, not one organization, and its `429` has no problem details `code`.
+
+## Set the defaults
+
+The defaults come from two fields of the root's `operations` object. The code has no built-in values, so every var file sets both. The sample var file, `infrastructure/environments/customer/tests/terraform.tfvars.json`, uses these:
+
+```json
+{
+  "operations": {
+    "public_api_throttle": { "rate_limit": 200, "burst_limit": 400 },
+    "tenant_limit_defaults": {
+      "api_requests_per_second": 50,
+      "api_request_burst": 100,
+      "concurrent_runs": 16,
+      "active_sandboxes": 16
+    }
+  }
+}
+```
+
+| Field                                           | Sets                                                                            |
+| ----------------------------------------------- | ------------------------------------------------------------------------------- |
+| `public_api_throttle.rate_limit`                | The stage throttle's steady rate, in requests per second                        |
+| `public_api_throttle.burst_limit`               | The stage throttle's burst                                                      |
+| `tenant_limit_defaults.api_requests_per_second` | The default `apiRequestsPerSecond`                                              |
+| `tenant_limit_defaults.api_request_burst`       | The default `apiRequestBurst`                                                   |
+| `tenant_limit_defaults.concurrent_runs`         | The default `concurrentRuns`                                                    |
+| `tenant_limit_defaults.active_sandboxes`        | The default `activeSandboxes`. `0` stops organizations from starting sandboxes. |
+
+`public_api_throttle` sets the default route throttle of the public API stage and of the agent runtime HTTP API stage. OpenTofu passes `tenant_limit_defaults` as JSON in the `DEPLOYMENTS_AI_TENANT_LIMIT_DEFAULTS` environment variable to the platform API functions, the runtime API, the memory API, the agent email API, and the agent worker task.
+
+The plan fails unless all of these hold:
+
+- Every value is a whole number.
+- `api_requests_per_second` is 1 to 500, `api_request_burst` 1 to 1000, `concurrent_runs` 1 to 256, and `active_sandboxes` 0 to 256.
+- `public_api_throttle.rate_limit` is at least 1.
+- Each burst is at least its rate, for both the stage throttle and the organization defaults.
+- `api_requests_per_second` does not exceed `public_api_throttle.rate_limit`.
+
+To change a default, edit the var file and deploy:
+
+```bash
+bun run deploy -- deploy --target acme.json
+```
+
+Each process reads `DEPLOYMENTS_AI_TENANT_LIMIT_DEFAULTS` once when it starts, and a process that finds it missing or invalid fails to start. New defaults take effect as Lambda functions start on the new configuration and as the agent worker service replaces its tasks.
+
+## Change one organization's limits
+
+An organization's effective limits come from its [standing](/docs/operate/organization-standing): each field from the operator grant, then a machine service's grant, such as a billing service's plan, then the default. A platform administrator sets the operator grant through the system operator API. Sign in with platform identity, because the system routes reject API keys. Copy the organization ID from `deployments system organizations`.
+
+```bash
+deployments system standing $ORGANIZATION_ID
+deployments system set-entitlements $ORGANIZATION_ID --tenant-limits '{"concurrentRuns":32}'
+deployments system clear-entitlements $ORGANIZATION_ID
+```
+
+- `standing` shows the install `defaults`, each source's grant, and the `effective` limits.
+- `set-entitlements` replaces the operator grant. A limit you leave out falls to the service grant, then the default.
+- `clear-entitlements` removes the operator grant. It asks for confirmation. Pass `--yes` in scripts or with `--json`.
+- A grant takes the same ranges as the defaults. When the merged burst ends up below the merged rate, the platform raises the burst to the rate.
+
+[Organization standing](/docs/operate/organization-standing#routes) describes the routes, the response fields, and every error code. The `deployments system limits`, `set-limits`, and `clear-limits` commands and their `/v1/system/organizations/{organizationId}/limits` routes are gone. The first deploy without them folds each organization's override into its operator grant once and deletes the override, as [Pipeline steps](/docs/operate/deployment#pipeline-steps) describes. A field the operator grant already sets keeps its value, and later changes to the grant stay.
+
+The API functions read standing once per request, cached for 5 seconds, and use it for both the hold check and the request rate. The agent worker caches each organization's limits for 30 seconds. A change reaches every process within that time. A lower limit stops nothing that is already running. The organization starts no new run or sandbox until its usage drops below the new value.
+
+## How tenants read their limits
+
+Any active member of an organization can read its effective limits:
+
+```bash
+deployments org limits $ORGANIZATION_ID
+```
+
+The command calls `GET /v1/organizations/{id}/limits`. Each limit has a `value` and a `source`: `override` when a grant sets it, otherwise `default`. The response shows no grants or usage.
+
+## How each limit is enforced
+
+### Request rate
+
+The API functions check the request rate right after authentication. Only a credential that selects exactly one organization is charged. A platform administrator acting across all organizations, a credential that spans several organizations, and an unauthenticated request meet only the stage throttle. An admitted request consumes capacity, and a refused one does not.
+
+The limiter uses the generic cell rate algorithm. It keeps one theoretical arrival time per organization in the `request-admission` DynamoDB table and advances it with a conditional write. A refused request gets `retry-after` set to the whole seconds until the organization's next admission, at least 1. Each function instance also remembers a refused organization until that time, so a client that ignores `retry-after` is refused without another table write.
+
+The limiter fails open:
+
+- When the table write fails or takes longer than 150 ms, the request is admitted and the function records `LimiterUnavailable`.
+- When the organization's standing cannot be read, the API functions use the last standing they read, or the defaults if they have none.
+
+### Concurrent runs
+
+A run holds an execution slot only while its status is `running`. A run that waits for an approval, a client tool, or a sub-agent holds none, and needs a slot again when it returns to `queued`.
+
+When the worker receives a queued run and every slot is taken, it changes nothing. It returns the message to the run queue with a visibility timeout chosen at random from 30 to 60 seconds and records `RunsDeferred`. The run queue is a FIFO queue with one message group per thread, so a deferred run also holds back later runs on its thread. Runs on other threads are not ordered against it.
+
+The worker fails a waiting run with `organization_concurrency_wait_expired`, and records `RunConcurrencyWaitExpired`, in either case:
+
+- The run entered `queued` more than 6 hours ago and the organization is still at its limit. A run past 6 hours that finds a free slot still starts.
+- The run's queue message has 150 receives left or fewer. The queue moves a message to its dead-letter queue after 900 receives, and the worker keeps the last 150 for the run's own retries and checkpoints. A message that waits from its first receive reaches this point only after 750 receives, which is later than the 6-hour limit.
+
+Retry a failed run once the organization has capacity. See [Threads and runs](/docs/capabilities/threads-and-runs#concurrent-run-limit).
+
+### Active sandboxes
+
+A sandbox lease holds a slot while its compute usage is active or its status is `resuming`. Creating or resuming a sandbox at the limit fails before any provider call. The worker turns the failure into a completed tool result with code `organization_sandbox_limit_reached` and the limit, records `SandboxCapacityRejected`, and lets the run continue.
+
+Some leases keep a slot after their work ends, such as a lease left in `error` after a failed destroy or a lease a crashed worker left behind. Before the sandbox manager refuses a create or resume, it looks through the organization's slot holders and destroys the first one that cannot still be in use, then tries the slot again once. It tries at most two holders per refusal and records `StaleCapacityRecovered` for the one it frees. A holder counts as stale when:
+
+- its provider lease has expired,
+- it is run-ephemeral and is in `error` because a provider destroy failed, or
+- it is run-ephemeral and its run holds no execution slot, so the run is no longer `running`.
+
+A thread-persistent lease whose provider lease has not expired is never destroyed, because that would lose the thread's workspace. A lease without a provider sandbox ID is skipped, and so is one whose destroy fails. Those leases keep their slots until you recover them. [Sandbox runtime](/docs/operate/sandbox-runtime#leases-and-lifecycle) describes the lease lifecycle.
+
+### How slots are held
+
+A slot is a uniqueness claim in the `control` table. The data layer adds the claim in the same transaction that moves a run or lease into its holding state, and deletes it in the transaction that moves the holder out of that state or deletes it. A slot therefore cannot outlive its holder, and nothing needs to sweep slots.
+
+A worker that crashes mid-run leaves the run `running`, still holding its slot. SQS delivers the message again, and the next worker reclaims the run in the slot it already holds. A slot that seems leaked always means a run or sandbox lease stuck in its holding state. Look for that record, not the claim.
+
+## Metrics and alarms
+
+All six metrics are in the CloudWatch namespace `DeploymentsAi/TenantLimits`. None has an organization dimension, which keeps the metric count bounded. The organization ID is in the log line next to each data point.
+
+| Metric                      | Published by                                                       | Counts                                                                                       |
+| --------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| `ApiRequestsLimited`        | API functions, as embedded metric format lines in their log groups | Requests refused with `organization_rate_limited`                                            |
+| `LimiterUnavailable`        | API functions, as embedded metric format lines                     | Requests admitted without a check because the table write failed                             |
+| `RunsDeferred`              | Agent worker                                                       | Deliveries returned to the queue at the limit. One waiting run counts every 30 to 60 seconds |
+| `RunConcurrencyWaitExpired` | Agent worker                                                       | Runs failed after the 6-hour wait or with too few receives left                              |
+| `SandboxCapacityRejected`   | Agent worker                                                       | Sandbox creates or resumes refused at the limit                                              |
+| `StaleCapacityRecovered`    | Agent worker                                                       | Stale sandbox holders destroyed at the limit to free a slot                                  |
+
+The API function metrics have two dimension sets: `Service`, the function name, and none, which gives the installation-wide total. The worker publishes its metrics with `PutMetricData`, without dimensions, and logs each hit as `tenant_limit.hit` with `organizationId`, `limit`, `inUse`, and `runId` in the `/ecs/agent-worker` log group.
+
+Two alarms notify the `ops-alerts` topic on `ALARM` and `OK`, judge one 5-minute period, and treat missing data as not breaching. `agent-runtime-run-concurrency-wait-expired` fires when the Sum is above 0. `tenant-limiter-unavailable` fires when it is 5 or more: an unavailable table fails every check, while a single check that misses the 150 ms budget is the designed fail-open. [Ops alerts](/docs/operate/ops-alerts) describes how notifications reach you.
+
+| Alarm                                        | Watches                     | What to do                                                                                                                                                               |
+| -------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tenant-limiter-unavailable`                 | `LimiterUnavailable`        | Request rate limits are not enforced. Check the `request-admission` table for throttling or errors.                                                                      |
+| `agent-runtime-run-concurrency-wait-expired` | `RunConcurrencyWaitExpired` | An organization lost runs to its concurrent run limit. Find it in the `tenant_limit.hit` log lines, then raise its `concurrentRuns` or look for runs stuck in `running`. |
+
+To find the organizations that hit the request rate limit, run a CloudWatch Logs Insights query over the API function log groups:
+
+```text
+filter ispresent(ApiRequestsLimited) | stats count() by organizationId
+```
+
+## Reference
+
+- API: [Get organization limits](/docs/api/reference/tenancy/get-organization-limits), [Get system organization standing](/docs/api/reference/system/get-system-organization-standing), [Replace entitlements](/docs/api/reference/system/replace-system-organization-entitlements), [Clear entitlements](/docs/api/reference/system/clear-system-organization-entitlements)
+- CLI: [`deployments system`](/docs/cli/reference/system), [`deployments org limits`](/docs/cli/reference/org#org-limits)
+- Related: [System operator](/docs/operate/system-operator), [Versioning and limits](/docs/api/versioning-and-limits), [Errors](/docs/api/errors#429-responses)

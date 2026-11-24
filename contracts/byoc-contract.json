@@ -1,0 +1,1544 @@
+{
+  "releaseManifestVersion": 4,
+  "artifacts": [
+    "agent-email-runtime",
+    "agent-runtime",
+    "app-domains",
+    "apps-database",
+    "channel-provider-runtime",
+    "console",
+    "document-extraction",
+    "event-analytics-projector",
+    "event-dispatcher",
+    "identity-api",
+    "identity-email-worker",
+    "memory-runtime",
+    "ops-alerts-notifier",
+    "platform-api"
+  ],
+  "assets": [
+    "console"
+  ],
+  "images": [
+    {
+      "name": "agent-worker",
+      "platform": "linux/arm64"
+    },
+    {
+      "name": "app-gateway",
+      "platform": "linux/arm64"
+    },
+    {
+      "name": "bifrost",
+      "platform": "linux/arm64"
+    },
+    {
+      "name": "durable-streams",
+      "platform": "linux/amd64"
+    },
+    {
+      "name": "firecrawl",
+      "platform": "linux/arm64"
+    },
+    {
+      "name": "model-gateway",
+      "platform": "linux/arm64"
+    },
+    {
+      "name": "observability-hot-plane",
+      "platform": "linux/arm64"
+    },
+    {
+      "name": "stream-gateway",
+      "platform": "linux/arm64"
+    },
+    {
+      "name": "web-tools-proxy",
+      "platform": "linux/arm64"
+    }
+  ],
+  "rootProfiles": [
+    {
+      "name": "platform-dev",
+      "allowMissingLambdas": false,
+      "images": [
+        "agent-worker",
+        "app-gateway",
+        "bifrost",
+        "durable-streams",
+        "firecrawl",
+        "model-gateway",
+        "observability-hot-plane",
+        "stream-gateway",
+        "web-tools-proxy"
+      ],
+      "lambdaMicrovm": true
+    },
+    {
+      "name": "platform-prod",
+      "allowMissingLambdas": true,
+      "images": [
+        "agent-worker",
+        "app-gateway",
+        "bifrost",
+        "durable-streams",
+        "firecrawl",
+        "model-gateway",
+        "observability-hot-plane",
+        "stream-gateway",
+        "web-tools-proxy"
+      ],
+      "lambdaMicrovm": true
+    },
+    {
+      "name": "platform-customer",
+      "allowMissingLambdas": true,
+      "images": [
+        "agent-worker",
+        "app-gateway",
+        "bifrost",
+        "durable-streams",
+        "firecrawl",
+        "model-gateway",
+        "observability-hot-plane",
+        "stream-gateway",
+        "web-tools-proxy"
+      ],
+      "lambdaMicrovm": true,
+      "terraformRoot": "infrastructure/environments/customer"
+    }
+  ],
+  "deployStages": [
+    {
+      "condition": null,
+      "id": "callerAccount",
+      "kind": "verify"
+    },
+    {
+      "condition": null,
+      "id": "init",
+      "kind": "terraform"
+    },
+    {
+      "condition": "OpenTofu state lacks the artifact bucket's versioning resource or an artifact store output",
+      "id": "apply:artifact-store",
+      "kind": "terraform"
+    },
+    {
+      "condition": null,
+      "id": "publishImages",
+      "kind": "publish"
+    },
+    {
+      "condition": "the profile enables Lambda MicroVM",
+      "id": "apply:lambda-microvm-prerequisites",
+      "kind": "terraform"
+    },
+    {
+      "condition": "the profile enables Lambda MicroVM",
+      "id": "publishMicrovmImage",
+      "kind": "publish"
+    },
+    {
+      "condition": null,
+      "id": "publishLambdaArtifacts",
+      "kind": "publish"
+    },
+    {
+      "condition": null,
+      "id": "apply:model-runtime-secrets",
+      "kind": "terraform"
+    },
+    {
+      "condition": null,
+      "id": "syncModelRuntime:prepare",
+      "kind": "configure"
+    },
+    {
+      "condition": null,
+      "id": "reconcileOrganizationGateLanes:prepare",
+      "kind": "configure"
+    },
+    {
+      "condition": null,
+      "id": "apply:deployment",
+      "kind": "terraform"
+    },
+    {
+      "condition": "the profile enables Lambda MicroVM",
+      "id": "verifyMicrovm",
+      "kind": "verify"
+    },
+    {
+      "condition": "the agent_runtime_worker output is set",
+      "id": "verifyWorkerRollout",
+      "kind": "verify"
+    },
+    {
+      "condition": "the model_runtime_secret_arns output is a non-empty object",
+      "id": "syncModelRuntime:full",
+      "kind": "configure"
+    },
+    {
+      "condition": "the app_runtime output is set",
+      "id": "bootstrapAppDatabase",
+      "kind": "configure"
+    },
+    {
+      "condition": "the platform_identity_bootstrap output is set",
+      "id": "bootstrapIdentity",
+      "kind": "configure"
+    },
+    {
+      "condition": "the console_assets_bucket output is set",
+      "id": "publishConsoleAssets",
+      "kind": "publish"
+    },
+    {
+      "condition": null,
+      "id": "deployLambdas",
+      "kind": "publish"
+    },
+    {
+      "condition": null,
+      "id": "reconcileOrganizationGateLanes:repair",
+      "kind": "configure"
+    },
+    {
+      "condition": null,
+      "id": "migrateOrganizationLimits",
+      "kind": "configure"
+    },
+    {
+      "condition": "the search_placement_functions output names a function",
+      "id": "activateSearchPlacements",
+      "kind": "configure"
+    },
+    {
+      "condition": "the identity domain was unpublished and platform_identity_bootstrap reports publication_ready",
+      "id": "apply:identity-domain",
+      "kind": "terraform"
+    },
+    {
+      "condition": "the platform_api_endpoint output is set",
+      "id": "verifyPublicSurface",
+      "kind": "verify"
+    },
+    {
+      "condition": "the console_url output is set",
+      "id": "verifyConsole",
+      "kind": "verify"
+    },
+    {
+      "condition": null,
+      "id": "reconcileOrganizationGateLanes:final",
+      "kind": "configure"
+    },
+    {
+      "condition": null,
+      "id": "migrateGovernanceInventoryShards",
+      "kind": "configure"
+    },
+    {
+      "condition": null,
+      "id": "migrateMeterEventWorkspaces",
+      "kind": "configure"
+    },
+    {
+      "condition": null,
+      "id": "migrateArtifactCreationIndex",
+      "kind": "configure"
+    },
+    {
+      "condition": null,
+      "id": "recordInstallation",
+      "kind": "record"
+    }
+  ],
+  "endpoints": [
+    "runtime-api",
+    "channel-provider-api",
+    "console",
+    "memory-api",
+    "platform-api",
+    "identity",
+    "stream-gateway"
+  ],
+  "observerRoutes": [
+    {
+      "method": "GET",
+      "path": "/v1/system/observer/installation"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/system/observer/deployments"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/system/observer/components"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/system/observer/alarms"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/system/observer/model-providers"
+    }
+  ],
+  "customerRootRequiredVariables": [
+    "agent_email_domain",
+    "billing_alert_email",
+    "deploying_role_name",
+    "environment_name",
+    "iam_permissions_boundary_arn",
+    "model_runtime_availability_zones",
+    "network_cidr_block",
+    "operations",
+    "platform_api_domain_name",
+    "platform_identity_application_origin",
+    "platform_identity_domain_name",
+    "platform_identity_email_sender",
+    "system_observer_role_arns"
+  ],
+  "schemas": {
+    "target": {
+      "dialect": "draft-2020-12",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "aws": {
+            "type": "object",
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "^\\d{12}$"
+                  }
+                ]
+              },
+              "region": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "^[a-z]{2}(-[a-z]+)+-\\d$"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "accountId",
+              "region"
+            ],
+            "additionalProperties": false
+          },
+          "ecrRepositories": {
+            "type": "object",
+            "properties": {
+              "agent-worker": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "\\S"
+                  }
+                ]
+              },
+              "app-gateway": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "\\S"
+                  }
+                ]
+              },
+              "bifrost": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "\\S"
+                  }
+                ]
+              },
+              "durable-streams": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "\\S"
+                  }
+                ]
+              },
+              "firecrawl": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "\\S"
+                  }
+                ]
+              },
+              "model-gateway": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "\\S"
+                  }
+                ]
+              },
+              "observability-hot-plane": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "\\S"
+                  }
+                ]
+              },
+              "stream-gateway": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "\\S"
+                  }
+                ]
+              },
+              "web-tools-proxy": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "\\S"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "lambdaMicrovm": {
+            "type": "boolean"
+          },
+          "lambdaMicrovmImage": {
+            "type": "string",
+            "enum": [
+              "sandbox",
+              "desktop"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^[a-z][a-z0-9-]{1,30}$"
+              }
+            ]
+          },
+          "profile": {
+            "type": "string",
+            "enum": [
+              "platform-dev",
+              "platform-prod",
+              "platform-customer"
+            ]
+          },
+          "terraform": {
+            "type": "object",
+            "properties": {
+              "root": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "\\S"
+                  }
+                ]
+              },
+              "stateBucket": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "\\S"
+                  }
+                ]
+              },
+              "stateKey": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "\\S"
+                  }
+                ]
+              },
+              "varFiles": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "\\S"
+                    }
+                  ]
+                }
+              }
+            },
+            "required": [
+              "stateBucket"
+            ],
+            "additionalProperties": false
+          },
+          "version": {
+            "type": "number",
+            "enum": [
+              1
+            ]
+          }
+        },
+        "required": [
+          "aws",
+          "name",
+          "profile",
+          "terraform",
+          "version"
+        ],
+        "additionalProperties": false
+      },
+      "definitions": {}
+    },
+    "releaseManifest": {
+      "dialect": "draft-2020-12",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "artifacts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "file": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^(?:images\\/)?[a-z0-9][a-z0-9.-]*$"
+                    }
+                  ]
+                },
+                "sha256": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "file",
+                "sha256"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "assets": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "file": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^(?:images\\/)?[a-z0-9][a-z0-9.-]*$"
+                    }
+                  ]
+                },
+                "sha256": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "file",
+                "sha256"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "consoleBuild": {
+            "type": "string",
+            "enum": [
+              "install"
+            ]
+          },
+          "images": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "digest": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^sha256:[0-9a-f]{64}$"
+                    }
+                  ]
+                },
+                "file": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^images\\/[a-z0-9][a-z0-9-]*\\.oci\\.tar$"
+                    }
+                  ]
+                },
+                "metadata": {
+                  "type": "object",
+                  "properties": {
+                    "file": {
+                      "type": "string",
+                      "allOf": [
+                        {
+                          "pattern": "^images\\/[a-z0-9][a-z0-9-]*\\.[a-z0-9][a-z0-9.-]*\\.json$"
+                        }
+                      ]
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "allOf": [
+                        {
+                          "pattern": "^[0-9a-f]{64}$"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "file",
+                    "sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                "platform": {
+                  "type": "string"
+                },
+                "sha256": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "digest",
+                "file",
+                "platform",
+                "sha256"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "sourceCommit": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^[0-9a-f]{40}$"
+              }
+            ]
+          },
+          "version": {
+            "type": "number",
+            "enum": [
+              4
+            ]
+          }
+        },
+        "required": [
+          "artifacts",
+          "assets",
+          "images",
+          "sourceCommit",
+          "version"
+        ],
+        "additionalProperties": false
+      },
+      "definitions": {}
+    },
+    "releaseRecord": {
+      "dialect": "draft-2020-12",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "builtAt": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+              }
+            ]
+          },
+          "ciRunId": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "allOf": [
+                  {
+                    "minimum": 1
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "compatibility": {
+            "type": "object",
+            "properties": {
+              "comparedWith": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^[0-9a-f]{64}$"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reasons": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "count": {
+                          "type": "integer",
+                          "allOf": [
+                            {
+                              "minimum": 1
+                            }
+                          ]
+                        },
+                        "file": {
+                          "type": "string",
+                          "allOf": [
+                            {
+                              "pattern": "^[^/\\s][^\\s]*$"
+                            }
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "terraform-moved"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "count",
+                        "file",
+                        "kind"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "file": {
+                          "type": "string",
+                          "allOf": [
+                            {
+                              "pattern": "^[^/\\s][^\\s]*$"
+                            }
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "record-schema"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "file",
+                        "kind"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "deploy-migration"
+                          ]
+                        },
+                        "name": {
+                          "type": "string",
+                          "allOf": [
+                            {
+                              "minLength": 1
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "rollbackBarrier": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "comparedWith",
+              "reasons",
+              "rollbackBarrier"
+            ],
+            "additionalProperties": false
+          },
+          "deployer": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "image": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^[^@\\s]+@sha256:[0-9a-f]{64}$"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "image"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "files": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "sha256": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  ]
+                },
+                "sizeBytes": {
+                  "type": "integer",
+                  "allOf": [
+                    {
+                      "minimum": 0
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "sha256",
+                "sizeBytes"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "label": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^\\d{4}\\.\\d{2}\\.\\d{2}-[0-9a-f]{7}$"
+              }
+            ]
+          },
+          "publishedAt": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+              }
+            ]
+          },
+          "releaseManifestSha256": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            ]
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "allOf": [
+              {
+                "minimum": 0
+              }
+            ]
+          },
+          "sourceCommit": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^[0-9a-f]{40}$"
+              }
+            ]
+          },
+          "version": {
+            "type": "number",
+            "enum": [
+              1
+            ]
+          }
+        },
+        "required": [
+          "builtAt",
+          "ciRunId",
+          "compatibility",
+          "deployer",
+          "files",
+          "label",
+          "publishedAt",
+          "releaseManifestSha256",
+          "sizeBytes",
+          "sourceCommit",
+          "version"
+        ],
+        "additionalProperties": false
+      },
+      "definitions": {}
+    },
+    "releaseRecordSignature": {
+      "dialect": "draft-2020-12",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "algorithm": {
+            "type": "string",
+            "enum": [
+              "ECDSA_SHA_256"
+            ]
+          },
+          "keyId": {
+            "type": "string",
+            "allOf": [
+              {
+                "minLength": 1
+              }
+            ]
+          },
+          "signature": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+              }
+            ]
+          },
+          "version": {
+            "type": "number",
+            "enum": [
+              1
+            ]
+          }
+        },
+        "required": [
+          "algorithm",
+          "keyId",
+          "signature",
+          "version"
+        ],
+        "additionalProperties": false
+      },
+      "definitions": {}
+    },
+    "deployEvent": {
+      "dialect": "draft-2020-12",
+      "schema": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "allOf": [
+                  {
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                  }
+                ]
+              },
+              "version": {
+                "type": "number",
+                "enum": [
+                  1
+                ]
+              },
+              "releaseManifestSha256": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                ]
+              },
+              "sourceCommit": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "^[0-9a-f]{40}$"
+                  }
+                ]
+              },
+              "target": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "started"
+                ]
+              }
+            },
+            "required": [
+              "at",
+              "version",
+              "releaseManifestSha256",
+              "sourceCommit",
+              "target",
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "allOf": [
+                  {
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                  }
+                ]
+              },
+              "version": {
+                "type": "number",
+                "enum": [
+                  1
+                ]
+              },
+              "stage": {
+                "type": "string",
+                "enum": [
+                  "callerAccount",
+                  "init",
+                  "apply:artifact-store",
+                  "publishImages",
+                  "apply:lambda-microvm-prerequisites",
+                  "publishMicrovmImage",
+                  "publishLambdaArtifacts",
+                  "apply:model-runtime-secrets",
+                  "syncModelRuntime:prepare",
+                  "reconcileOrganizationGateLanes:prepare",
+                  "apply:deployment",
+                  "verifyMicrovm",
+                  "verifyWorkerRollout",
+                  "syncModelRuntime:full",
+                  "bootstrapAppDatabase",
+                  "bootstrapIdentity",
+                  "publishConsoleAssets",
+                  "deployLambdas",
+                  "reconcileOrganizationGateLanes:repair",
+                  "migrateOrganizationLimits",
+                  "activateSearchPlacements",
+                  "apply:identity-domain",
+                  "verifyPublicSurface",
+                  "verifyConsole",
+                  "reconcileOrganizationGateLanes:final",
+                  "migrateGovernanceInventoryShards",
+                  "migrateMeterEventWorkspaces",
+                  "migrateArtifactCreationIndex",
+                  "recordInstallation"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "stage-started"
+                ]
+              }
+            },
+            "required": [
+              "at",
+              "version",
+              "stage",
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "allOf": [
+                  {
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                  }
+                ]
+              },
+              "version": {
+                "type": "number",
+                "enum": [
+                  1
+                ]
+              },
+              "detail": {
+                "type": "string"
+              },
+              "stage": {
+                "type": "string",
+                "enum": [
+                  "callerAccount",
+                  "init",
+                  "apply:artifact-store",
+                  "publishImages",
+                  "apply:lambda-microvm-prerequisites",
+                  "publishMicrovmImage",
+                  "publishLambdaArtifacts",
+                  "apply:model-runtime-secrets",
+                  "syncModelRuntime:prepare",
+                  "reconcileOrganizationGateLanes:prepare",
+                  "apply:deployment",
+                  "verifyMicrovm",
+                  "verifyWorkerRollout",
+                  "syncModelRuntime:full",
+                  "bootstrapAppDatabase",
+                  "bootstrapIdentity",
+                  "publishConsoleAssets",
+                  "deployLambdas",
+                  "reconcileOrganizationGateLanes:repair",
+                  "migrateOrganizationLimits",
+                  "activateSearchPlacements",
+                  "apply:identity-domain",
+                  "verifyPublicSurface",
+                  "verifyConsole",
+                  "reconcileOrganizationGateLanes:final",
+                  "migrateGovernanceInventoryShards",
+                  "migrateMeterEventWorkspaces",
+                  "migrateArtifactCreationIndex",
+                  "recordInstallation"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "stage-succeeded"
+                ]
+              }
+            },
+            "required": [
+              "at",
+              "version",
+              "stage",
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "allOf": [
+                  {
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                  }
+                ]
+              },
+              "version": {
+                "type": "number",
+                "enum": [
+                  1
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "stage": {
+                "type": "string",
+                "enum": [
+                  "callerAccount",
+                  "init",
+                  "apply:artifact-store",
+                  "publishImages",
+                  "apply:lambda-microvm-prerequisites",
+                  "publishMicrovmImage",
+                  "publishLambdaArtifacts",
+                  "apply:model-runtime-secrets",
+                  "syncModelRuntime:prepare",
+                  "reconcileOrganizationGateLanes:prepare",
+                  "apply:deployment",
+                  "verifyMicrovm",
+                  "verifyWorkerRollout",
+                  "syncModelRuntime:full",
+                  "bootstrapAppDatabase",
+                  "bootstrapIdentity",
+                  "publishConsoleAssets",
+                  "deployLambdas",
+                  "reconcileOrganizationGateLanes:repair",
+                  "migrateOrganizationLimits",
+                  "activateSearchPlacements",
+                  "apply:identity-domain",
+                  "verifyPublicSurface",
+                  "verifyConsole",
+                  "reconcileOrganizationGateLanes:final",
+                  "migrateGovernanceInventoryShards",
+                  "migrateMeterEventWorkspaces",
+                  "migrateArtifactCreationIndex",
+                  "recordInstallation"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "stage-failed"
+                ]
+              }
+            },
+            "required": [
+              "at",
+              "version",
+              "message",
+              "stage",
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "allOf": [
+                  {
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                  }
+                ]
+              },
+              "version": {
+                "type": "number",
+                "enum": [
+                  1
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "preflight-failed"
+                ]
+              }
+            },
+            "required": [
+              "at",
+              "version",
+              "message",
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "allOf": [
+                  {
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                  }
+                ]
+              },
+              "version": {
+                "type": "number",
+                "enum": [
+                  1
+                ]
+              },
+              "installation": {
+                "type": "object",
+                "properties": {
+                  "awsAccountId": {
+                    "type": "string"
+                  },
+                  "awsRegion": {
+                    "type": "string"
+                  },
+                  "deployedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "allOf": [
+                      {
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                      }
+                    ]
+                  },
+                  "deployedBy": {
+                    "type": "string"
+                  },
+                  "endpoints": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "url": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "url"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "images": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "imageId": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "uri": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "imageId",
+                        "name",
+                        "uri"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "lambdaArtifacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "functions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "codeSha256": {
+                                "type": "string",
+                                "allOf": [
+                                  {
+                                    "pattern": "^[0-9a-f]{64}$"
+                                  }
+                                ]
+                              },
+                              "name": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "codeSha256",
+                              "name"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "allOf": [
+                            {
+                              "pattern": "^[0-9a-f]{64}$"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "functions",
+                        "name",
+                        "sha256"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "profile": {
+                    "type": "string"
+                  },
+                  "releaseManifestSha256": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^[0-9a-f]{64}$"
+                      }
+                    ]
+                  },
+                  "sourceCommit": {
+                    "type": "string"
+                  },
+                  "targetName": {
+                    "type": "string"
+                  },
+                  "deploymentId": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$"
+                      },
+                      {
+                        "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+                      }
+                    ]
+                  },
+                  "updatedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "allOf": [
+                      {
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                      }
+                    ]
+                  },
+                  "version": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "string",
+                        "enum": [
+                          "NaN"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "enum": [
+                          "Infinity"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "enum": [
+                          "-Infinity"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "awsAccountId",
+                  "awsRegion",
+                  "deployedAt",
+                  "deployedBy",
+                  "endpoints",
+                  "images",
+                  "lambdaArtifacts",
+                  "profile",
+                  "releaseManifestSha256",
+                  "sourceCommit",
+                  "targetName",
+                  "deploymentId",
+                  "updatedAt",
+                  "version"
+                ],
+                "additionalProperties": false
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "recorded"
+                ]
+              }
+            },
+            "required": [
+              "at",
+              "version",
+              "installation",
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "allOf": [
+                  {
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                  }
+                ]
+              },
+              "version": {
+                "type": "number",
+                "enum": [
+                  1
+                ]
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "failed",
+                  "succeeded"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "finished"
+                ]
+              }
+            },
+            "required": [
+              "at",
+              "version",
+              "outcome",
+              "type"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "definitions": {}
+    }
+  }
+}

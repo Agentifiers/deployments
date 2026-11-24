@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "lib": ["ES2024"],
+    "noEmit": false,
+    "outDir": "../../dist/packages/brain-runtime",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/tsbuildinfo/brain-runtime.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../brains" },
+    { "path": "../db" },
+    { "path": "../model-gateway" },
+    { "path": "../model-usage" }
+  ]
+}

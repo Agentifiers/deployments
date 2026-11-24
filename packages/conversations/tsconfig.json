@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/conversations",
+    "rootDir": "src",
+    "tsBuildInfoFile": "../../dist/packages/conversations.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../agent-email" },
+    { "path": "../agent-manifest" },
+    { "path": "../db" },
+    { "path": "../events" },
+    { "path": "../observability" },
+    { "path": "../organization-admission" },
+    { "path": "../streaming" }
+  ]
+}

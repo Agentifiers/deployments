@@ -1,0 +1,133 @@
+---
+title: "CLI overview"
+description: "Install the deployments CLI, point it at an API host, and learn how its commands are organized."
+---
+
+The `deployments` CLI manages the platform from a terminal or a script. It has one command for every public API operation, plus commands for signing in, managing local context, chatting with an agent, and previewing a manifest. Use it when you work by hand or automate from a shell. For application code, use the [TypeScript SDK](/docs/sdk).
+
+<Callout type="warn" title="Availability">
+  The CLI is published to the public npm registry as `@agentifiers/deployments-cli`. The current
+  release is a prerelease on the `next` dist-tag. The CLI is a Bun program and needs Bun 1.3.14 or
+  later. It does not run on Node.js.
+</Callout>
+
+## Install the CLI
+
+<Steps>
+<Step>
+
+Install [Bun](https://bun.sh) 1.3.14 or later.
+
+</Step>
+<Step>
+
+Install the CLI globally from the `next` dist-tag:
+
+```bash
+npm i -g @agentifiers/deployments-cli@next
+```
+
+`bun add --global @agentifiers/deployments-cli@next` works too.
+
+</Step>
+<Step>
+
+Check the installed version:
+
+```bash
+deployments --version
+```
+
+The CLI prints its version, for example `0.1.0-alpha.1`.
+
+</Step>
+</Steps>
+
+## Choose the API host
+
+The CLI calls `https://api.us.deployments.ai` unless you configure another host. To use your install, set `DEPLOYMENTS_API_URL` or pass `--api-url` on each command. The examples use the placeholder `https://api.example.com`; [Hosts and environments](/docs/getting-started/hosts-and-environments) explains where your install's origin comes from.
+
+```bash
+export DEPLOYMENTS_API_URL=https://api.example.com
+deployments health
+```
+
+`deployments health` needs no credentials. It prints the `service` name and `status` `ok`, followed by a `request` line with the request ID. The API URL must be an HTTPS origin with no path. Plain HTTP works only for a loopback host such as `localhost`.
+
+To store the host in a profile instead of the environment, see [Configuration and context](/docs/cli/configuration). To sign in, see [Signing in](/docs/cli/authentication).
+
+## How commands are organized
+
+Resource commands follow one pattern. The first word names a resource, the second names an action, and an ID follows when the action targets one resource:
+
+```bash
+deployments agent list
+deployments agent show "$AGENT_DEFINITION_ID"
+deployments deployment show "$AGENT_DEPLOYMENT_ID"
+```
+
+Evaluation commands sit under one namespace and take one more word, for example `deployments eval dataset list`.
+
+Each resource command maps to one API operation. The [command reference](/docs/cli/reference) lists every command and links each one to its API operation. The [SDK function reference](/docs/sdk/reference) shows the same mapping from the SDK side.
+
+A few commands do not map to a single resource action:
+
+| Command                                             | What it does                                                                                                                           |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `deployments auth login`, `deployments auth logout` | Sign in to a profile, or remove its credentials. See [Signing in](/docs/cli/authentication).                                           |
+| `deployments context show`, `set`, `clear`          | Show or change the stored organization, project, environment, and workspace. See [Configuration and context](/docs/cli/configuration). |
+| `deployments whoami`                                | Show the identity behind the current credential.                                                                                       |
+| `deployments chat`                                  | Send a message to an agent deployment and start a run.                                                                                 |
+| `deployments run tail`                              | Print the events of one run from its thread stream.                                                                                    |
+| `deployments dev`                                   | Chat with a local agent manifest through a temporary preview. See [Local preview loop](/docs/cli/preview-loop).                        |
+| `deployments tool upload`                           | Upload hosted code and create or update its extension tool.                                                                            |
+| `deployments health`                                | Check that the API answers.                                                                                                            |
+| `deployments openapi`                               | Fetch the public OpenAPI document.                                                                                                     |
+| `deployments catalog`                               | Print every command with a one-line summary.                                                                                           |
+
+## Get help in the terminal
+
+Every command group and command prints its usage with `--help`:
+
+```bash
+deployments --help
+deployments agent --help
+deployments agent create --help
+```
+
+`deployments catalog` prints the full command list. Add `--json` to get an array of `{ "command", "summary" }` objects that a script can read:
+
+```bash
+deployments catalog --json
+```
+
+If you run `deployments` with no arguments in an interactive terminal, it opens a short menu of common tasks. In scripts and CI jobs, always name a command.
+
+## Context and credentials
+
+Most commands act inside an organization, project, or environment. A command that needs a scope you have not set stops before it calls the API, with a message such as `No environment context is configured. Pass --env or run deployments context set.` and exit code `7`.
+
+You can pass the scope on each command with `--org`, `--project`, and `--env`, or store it once:
+
+```bash
+deployments context set --org "$ORG_ID" --project "$PROJECT_ID" --env "$ENV_ID"
+```
+
+Live commands also need a bearer credential. [Signing in](/docs/cli/authentication) covers the browser device flow and API keys.
+
+## Try commands without an API
+
+The `--mock` flag swaps the network transport for a local one that returns fixed sample data. It needs no credentials and fills in a sample organization, project, and environment for any you did not set. Human-readable output starts with a `MOCK` banner so that you cannot mistake it for live data:
+
+```bash
+deployments project list --mock
+```
+
+Mock mode is for learning the command shapes and for tests. Live mode is the default.
+
+## Reference
+
+- [Command reference](/docs/cli/reference) and [global flags](/docs/cli/reference#global-flags)
+- [Output, scripting, and exit codes](/docs/cli/output-and-scripting)
+- [`deployments catalog`](/docs/cli/reference/catalog#catalog)
+- [`deployments health`](/docs/cli/reference/health#health)

@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/functions/workflow-runtime",
+    "rootDir": "src",
+    "tsBuildInfoFile": "../../dist/functions/workflow-runtime.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/api-contract" },
+    { "path": "../../packages/conversations" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/organization-admission" },
+    { "path": "../../packages/workflows" },
+    { "path": "../worker" }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/functions/identity-email-worker",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/functions/identity-email-worker.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/db" },
+    { "path": "../../packages/identity" },
+    { "path": "../../packages/identity-emails" }
+  ]
+}

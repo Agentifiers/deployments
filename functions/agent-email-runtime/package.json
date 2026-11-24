@@ -1,0 +1,39 @@
+{
+  "name": "@deployments-ai/agent-email-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts src/api-main.ts src/inbound-main.ts src/maintenance-main.ts src/provider-events-main.ts src/send-main.ts src/stream-dispatcher-main.ts --target=node --format=esm --outdir=dist",
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1090.0",
+    "@aws-sdk/client-lambda": "3.1090.0",
+    "@aws-sdk/client-s3": "3.1090.0",
+    "@aws-sdk/client-sqs": "3.1090.0",
+    "@aws-sdk/client-sts": "3.1090.0",
+    "@aws-sdk/lib-dynamodb": "3.1090.0",
+    "@deployments-ai/agent-email": "workspace:*",
+    "@deployments-ai/agent-manifest": "workspace:*",
+    "@deployments-ai/api": "workspace:*",
+    "@deployments-ai/api-contract": "workspace:*",
+    "@deployments-ai/conversations": "workspace:*",
+    "@deployments-ai/credential-vault": "workspace:*",
+    "@deployments-ai/db": "workspace:*",
+    "@deployments-ai/file-text": "workspace:*",
+    "@deployments-ai/ingress-media": "workspace:*",
+    "@deployments-ai/organization-admission": "workspace:*",
+    "@deployments-ai/secret-store": "workspace:*",
+    "@deployments-ai/tenant-limits": "workspace:*",
+    "effect": "4.0.0-beta.92"
+  },
+  "devDependencies": {
+    "@deployments-ai/worker": "workspace:*"
+  }
+}

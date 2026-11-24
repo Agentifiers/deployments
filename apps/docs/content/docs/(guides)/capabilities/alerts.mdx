@@ -1,0 +1,135 @@
+---
+title: "Alerts"
+description: "Monitor runs, tools, approvals, schedules, webhooks, spend, and trace metrics, and get email and webhook alerts when something needs attention."
+---
+
+A monitor watches one signal and tells people when it needs attention. It belongs to one environment, or to the organization for spend signals. When its condition starts to hold, the platform opens an alert incident and emails the members the monitor names. It can also send an `alert.fired` webhook event. When the condition clears, the platform resolves the incident and sends one all-clear. Each incident keeps a timeline, so you can review what fired, when, and who was told.
+
+## Monitor kinds
+
+Each monitor has one kind. The kind decides what the monitor watches and which fields its condition takes.
+
+| Kind                       | Scope        | Fires when                                                                                                                                                                                 | Condition fields                                                                 |
+| -------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| `run-failures`             | Environment  | At least `threshold` runs failed in the last `windowMinutes`. Set `agentDeploymentId` to count one deployment's runs only.                                                                 | `threshold`, `windowMinutes`, optional `agentDeploymentId`                       |
+| `tool-failures`            | Environment  | At least `threshold` tool calls failed in the last `windowMinutes`. Set `toolName` to count one tool only.                                                                                 | `threshold`, `windowMinutes`, optional `toolName`                                |
+| `schedule-problems`        | Environment  | At least `threshold` schedule fires were skipped, or schedules expired, in the last `windowMinutes`. Set `scheduleId` to watch one schedule.                                               | `threshold`, `windowMinutes`, optional `scheduleId`                              |
+| `approval-wait`            | Environment  | An approval has been pending for longer than `waitMinutes`.                                                                                                                                | `waitMinutes`                                                                    |
+| `webhook-endpoint-health`  | Environment  | A webhook subscription was disabled after repeated failures. With `consecutiveFailures`, it also fires when an active subscription has that many failed deliveries in a row.               | optional `webhookEndpointId`, optional `consecutiveFailures`                     |
+| `budget-threshold`         | Organization | A budget's spend reached one of its thresholds, at or above `minimumThreshold` percent. Set `budgetId` to watch one budget.                                                                | `minimumThreshold`, optional `budgetId`                                          |
+| `operator-spend-exhausted` | Organization | The model spend the installation pays for this month is used up.                                                                                                                           | none                                                                             |
+| `trace-error-rate`         | Environment  | At least `thresholdPercent` percent of finalized traces ended in error over the last `windowHours`, once at least `minimumTraces` traces exist.                                            | `thresholdPercent`, `windowHours`, `minimumTraces`, optional `agentDeploymentId` |
+| `trace-latency`            | Environment  | The p95 trace duration reached `p95Milliseconds` in the last `windowHours`, once at least `minimumTraces` traces exist. The slowest hourly p95 in the window stands in for the window p95. | `p95Milliseconds`, `windowHours`, `minimumTraces`, optional `agentDeploymentId`  |
+
+Counting windows run from 5 minutes to 24 hours. Trace windows run from 1 to 24 hours. A monitor's kind cannot change after you create it.
+
+The two trace kinds read the [observability](/docs/capabilities/observability) metrics service. On an installation without that service, trace monitors never fire.
+
+### Budget alerts
+
+Every organization gets two monitors the first time a spend alert arrives: **Budget alerts** (`budget-threshold` at any threshold) and **Included model spend exhausted** (`operator-spend-exhausted`). Both email the organization's owners, admins, and billing members, and neither sends webhook events. Edit, mute, or archive them like any other monitor. Budget alerts appear in the same alert history as every other incident, and a budget incident resolves when the budget period ends.
+
+The `budget.threshold-crossed` and `organization.operator-funded-spend-exhausted` webhook events still reach subscriptions that list them, as described in [Usage and budgets](/docs/capabilities/usage-and-budgets#alerts).
+
+## How a monitor decides
+
+A monitor is either `ok` or `firing`. One incident covers one stretch of `firing`.
+
+- **Fire.** When the condition starts to hold, the platform opens an incident, emails the recipients, and records `alert.fired`.
+- **Repeat.** While the incident stays open, nothing more is sent unless the monitor sets `renotifyMinutes`. Then the platform repeats the alert at that interval with `alert.renotified`. A budget that crosses a higher threshold during an open incident repeats the alert once with the new threshold.
+- **Resolve.** When the condition clears, the platform resolves the incident and records `alert.resolved`. It emails the all-clear only if the fired alert reached someone.
+
+Monitors are evaluated when a matching platform event arrives and again every five minutes. The five-minute pass resolves counting monitors whose window emptied, checks pending approvals and webhook subscriptions, and reads trace metrics. Every evaluation reads the monitor's current state and commits at most one change on that state's version. A retried or duplicated event, and two evaluations at the same moment, therefore open one incident and send one alert.
+
+### Mute and archive
+
+A muted monitor still opens and resolves incidents, so its history stays complete, but it tells nobody. Mute until you unmute, or until a time. Archiving a monitor resolves any open incident at once, without an email or webhook delivery, and stops evaluation for good. The incidents stay readable.
+
+## Who is notified
+
+A monitor names its recipients in `notify`:
+
+| Field               | Meaning                                                                                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `emailRoles`        | Email every active member with one of these organization roles: `owner`, `admin`, `billing`, `member`, `viewer`. |
+| `emailPrincipalIds` | Email these members, up to 50.                                                                                   |
+| `webhooks`          | Also record alert events for webhook subscriptions.                                                              |
+
+Alert email goes only to members of the organization, so a monitor cannot be used to send mail to outside addresses. To reach a team inbox or a paging tool, use a webhook subscription.
+
+### Email settings
+
+Each member controls their own alert email in the console under **Alerts**, **Email settings**. A member can stop all alert email for the organization or mute individual monitors. Every alert email links to these settings and carries a `List-Unsubscribe` header that opens them. These settings are per person, so they do not change what other members receive.
+
+### Webhook events
+
+With `webhooks: true`, the monitor's incidents record these events:
+
+| Event type         | When                                  |
+| ------------------ | ------------------------------------- |
+| `alert.fired`      | An incident opened.                   |
+| `alert.renotified` | An open incident repeated its alert.  |
+| `alert.resolved`   | An incident resolved.                 |
+| `alert.test`       | Someone sent a test from the monitor. |
+
+The payload has `incidentId` (except for `alert.test`), `monitorId`, `monitorName`, `kind`, `status`, `summary`, `openedAt`, and `resolvedAt` once resolved. An environment monitor's events reach that environment's subscriptions. An organization monitor's events reach every subscription in the organization that lists the event type by name, like [organization billing alerts](/docs/capabilities/webhooks#organization-and-project-billing-alerts). A monitor with `webhooks: false`, or a muted monitor, sends no webhook events.
+
+### Test a monitor
+
+A test sends one `alert.test` email to the member who asked and, if the monitor sends webhooks, one `alert.test` webhook event. A test never opens an incident.
+
+## Who can manage monitors
+
+Reads need `monitors:read` and changes need `monitors:write`. A person also needs the organization `owner` or `admin` role to create, change, mute, test, or archive a monitor. Every member can read monitors and incidents and change their own email settings. A credential limited to particular projects or environments sees only those monitors and incidents, and never sees organization monitors.
+
+## Installation settings
+
+Alerts run on installations that deploy the console, because every alert email links to it. The platform module's `alerts` variable controls them:
+
+| Field          | Default                          | Meaning                                                                                      |
+| -------------- | -------------------------------- | -------------------------------------------------------------------------------------------- |
+| `enabled`      | `true`                           | Turns monitor evaluation and alert email on.                                                 |
+| `email_sender` | `platform_identity_email_sender` | The address alert email comes from. It must be on an SES identity the installation verified. |
+| `product_name` | `Deployments.ai`                 | The name that heads every alert email.                                                       |
+
+A self-hosted installation sets `email_sender` and `product_name` to its own.
+
+## Use it
+
+In the management console, **Alerts** in the organization menu shows open and past incidents, the organization's monitors, and your email settings. See [Management console](/docs/getting-started/console#manage-alerts).
+
+These steps use the CLI and assume your CLI context names the organization. See [Configuration and context](/docs/cli/configuration).
+
+1. Create a monitor that emails owners and admins when three runs fail within 15 minutes in an environment:
+
+   ```sh
+   deployments monitor create --name "Failing runs" \
+     --project-id "$PROJECT_ID" --environment-id "$ENVIRONMENT_ID" \
+     --condition '{"kind":"run-failures","threshold":3,"windowMinutes":15}' \
+     --notify '{"emailRoles":["owner","admin"],"emailPrincipalIds":[],"webhooks":true}'
+   ```
+
+2. Send a test alert to yourself:
+
+   ```sh
+   deployments monitor test "$MONITOR_ID"
+   ```
+
+3. Review incidents, newest first, and one incident's timeline:
+
+   ```sh
+   deployments monitor incidents
+   deployments monitor incident "$MONITOR_ID" "$INCIDENT_ID"
+   ```
+
+4. Mute the monitor until you unmute it:
+
+   ```sh
+   deployments monitor update "$MONITOR_ID" --mute '{}'
+   ```
+
+## Reference
+
+- API: [listMonitors](/docs/api/reference/alerts/list-monitors), [createMonitor](/docs/api/reference/alerts/create-monitor), [updateMonitor](/docs/api/reference/alerts/update-monitor), [archiveMonitor](/docs/api/reference/alerts/archive-monitor), [testMonitor](/docs/api/reference/alerts/test-monitor), [listAlertIncidents](/docs/api/reference/alerts/list-alert-incidents), [getAlertIncident](/docs/api/reference/alerts/get-alert-incident), and [putAlertNotificationPreferences](/docs/api/reference/alerts/put-alert-notification-preferences).
+- CLI: [`deployments monitor`](/docs/cli/reference/monitor)
+- Related: [Webhooks](/docs/capabilities/webhooks), [Usage and budgets](/docs/capabilities/usage-and-budgets), [Observability](/docs/capabilities/observability)

@@ -1,0 +1,178 @@
+---
+title: "Schedules and heartbeats"
+description: "Start runs of a deployed agent on a schedule expression or a recurring heartbeat, fire them by hand, and inspect each fire."
+---
+
+Schedules and heartbeats start runs of a deployed agent without a caller. A schedule fires on a schedule expression and sends a fixed prompt. A heartbeat fires on a fixed interval with standing instructions, and it can skip a fire while the agent is busy or outside an active window. Use a schedule for work at known times, such as a weekday digest, and a heartbeat for periodic check-ins.
+
+## Two kinds of automation
+
+|             | Schedule                                    | Heartbeat                                |
+| ----------- | ------------------------------------------- | ---------------------------------------- |
+| Fires on    | An `at()`, `cron()`, or `rate()` expression | A fixed interval in whole minutes        |
+| Run input   | `prompt`, up to 40,000 characters           | `instructions`, up to 32,000 characters  |
+| Run trigger | `schedule`                                  | `heartbeat`                              |
+| Fire record | A schedule fire, `accepted` or `failed`     | A heartbeat run, `accepted` or `skipped` |
+
+Each automation belongs to one agent deployment. Creating or resuming one checks that:
+
+- The deployment is `ready` and its desired state is `running`. Otherwise the request fails with `deployment_unavailable`.
+- The deployment's release is active and its manifest allows the `schedule` or `heartbeat` trigger. Otherwise it fails with `release_unavailable` or `trigger_not_allowed`. See the `spec.triggers` field in [Agent manifests](/docs/capabilities/agent-manifests).
+
+An automation can name a `threadId`, which must be a thread of the same deployment. Every run then continues that thread. Without one, each fire starts a new thread. An optional `workspaceId` scopes the runs to a workspace. If you name a thread in a workspace, the automation takes that workspace.
+
+Schedule and heartbeat runs do not stream assistant text, and their output stays transient until a client publishes or releases it. See [Threads and runs](/docs/capabilities/threads-and-runs) and [Streaming](/docs/capabilities/streaming).
+
+Reads need the `schedules:read` scope and writes need `schedules:write`. Creating a schedule or a heartbeat requires an `Idempotency-Key` header. Repeating the request with the same key returns the automation it created, and reusing the key with a different request fails with `idempotency_conflict`.
+
+## Write a schedule expression
+
+The platform runs schedules on Amazon EventBridge Scheduler and accepts its three expression forms, up to 256 characters:
+
+| Form     | Syntax                                                    | Example                   |
+| -------- | --------------------------------------------------------- | ------------------------- |
+| One time | `at(yyyy-mm-ddThh:mm:ss)`                                 | `at(2026-11-02T09:00:00)` |
+| Calendar | `cron(minutes hours day-of-month month day-of-week year)` | `cron(0 9 ? * MON-FRI *)` |
+| Interval | `rate(value unit)`                                        | `rate(15 minutes)`        |
+
+- A `cron()` expression has exactly six fields. Exactly one of day-of-month and day-of-week must be `?`.
+- A `rate()` unit is `minute`, `minutes`, `hour`, `hours`, `day`, or `days`. Use the singular unit only with a value of 1.
+- `timezone` takes an IANA time zone name of at most 50 characters, for example `America/New_York`. EventBridge evaluates the expression in that zone.
+- An `at()` schedule fires once and then archives itself.
+
+An expression in any other form fails with `invalid_schedule`, and an unknown zone fails with `invalid_timezone`.
+
+## Configure a heartbeat
+
+| Field          | Rules                                                                                                                                              | Default                |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| `intervalMs`   | A whole number of minutes in milliseconds, from 60,000 (1 minute) to 2,592,000,000 (30 days). Otherwise the request fails with `invalid_interval`. | 1,800,000 (30 minutes) |
+| `skipWhenBusy` | When `true`, a fire is skipped while the deployment has another active run.                                                                        | `true`                 |
+| `activeWindow` | `startMinuteOfDay` from 0 to 1439, `endMinuteOfDay` from 0 to 1440, and optional unique `daysOfWeek` from 0 (Sunday) to 6 (Saturday).              | None, always active    |
+| `timezone`     | The IANA time zone in which the platform evaluates `activeWindow`.                                                                                 | `UTC`                  |
+
+Fires outside the active window are skipped. A window whose start is later than its end crosses midnight. In that case, `daysOfWeek` refers to the day on which the window starts. A window outside these ranges fails with `invalid_heartbeat`.
+
+## Lifecycle
+
+| Status         | Meaning                                                                                                   |
+| -------------- | --------------------------------------------------------------------------------------------------------- |
+| `provisioning` | The automation exists and the platform is still creating its timer. Resuming it retries the provisioning. |
+| `active`       | The timer fires.                                                                                          |
+| `paused`       | The timer is disabled. Resume returns it to `active`.                                                     |
+| `archived`     | Final. The automation no longer fires.                                                                    |
+| `disabled`     | Heartbeats only. The platform treats it like `archived`.                                                  |
+
+- Pausing a paused automation, resuming an active one, and archiving an archived one return it unchanged.
+- Resuming a paused automation runs the same deployment, release, thread, and workspace checks as creation.
+- An archived automation rejects updates, pauses, and resumes with `automation_archived`.
+- An automation bound to a thread archives itself on its next fire after that thread is archived.
+
+You can update a schedule's `name`, `prompt`, `expression`, and `timezone`, and a heartbeat's `instructions`, `intervalMs`, `skipWhenBusy`, `activeWindow`, and `timezone`. Send `null` to clear `timezone` or `activeWindow`.
+
+## Fires
+
+Each fire records whether it started a run. You can also fire an automation by hand, for example to test it.
+
+`POST /v1/schedules/{scheduleId}/fire` and `POST /v1/heartbeats/{heartbeatId}/fire` answer `202` with `duplicate`, the fire record, and `run` (`runId` and `threadId`) when a run started. The heartbeat request also takes the heartbeat's `agentDeploymentId`. The fire key comes from `fireKey` in the body, or from the `Idempotency-Key` header when the body has none. It holds at most 256 UTF-8 bytes, with no control characters and no surrounding whitespace. A second fire with the same key starts nothing and returns the recorded fire with `duplicate: true`.
+
+A schedule fire has status `accepted` when it started a run and `failed` when it did not. A fire starts no run in these cases:
+
+- The schedule is not `active`.
+- The timer fired for an earlier version of the schedule.
+- The schedule's thread or workspace is unavailable.
+- A [spend budget](/docs/capabilities/usage-and-budgets) refused the run.
+
+A heartbeat fire has status `accepted` or `skipped`. Every heartbeat fire, accepted or skipped, sets `lastRunAt` to the fire time and `nextRunAt` to the fire time plus the interval.
+
+### Heartbeat skip reasons
+
+| `skipReason`             | Cause                                                                   |
+| ------------------------ | ----------------------------------------------------------------------- |
+| `stale-schedule-version` | The timer fired for an earlier version of the heartbeat.                |
+| `not-active`             | The heartbeat is not `active`.                                          |
+| `workspace-unavailable`  | The heartbeat's workspace is not active.                                |
+| `thread-unavailable`     | The heartbeat's thread is archived or no longer exists.                 |
+| `outside-active-window`  | The fire time is outside `activeWindow`.                                |
+| `busy`                   | `skipWhenBusy` is `true` and the deployment already has an active run.  |
+| `budget-exhausted`       | A [spend budget](/docs/capabilities/usage-and-budgets) refused the run. |
+| `organization-suspended` | The organization is suspended. The heartbeat stays enabled.             |
+
+## Let the agent schedule its own work
+
+A deployed agent can manage schedules during a run with the built-in tools `agent.schedule.create`, `agent.schedule.remind`, `agent.schedule.list`, and `agent.schedule.archive`. `agent.schedule.remind` creates a one-time schedule from 1 to 43,200 minutes after the tool call. Previews and evaluations refuse the create, remind, and archive tools, because their runs belong to no deployment. See [Tools and tool policies](/docs/capabilities/tools) and [Preview runs](/docs/capabilities/previews).
+
+## Trace an automation to its creator and its runs
+
+Schedules and heartbeats record `createdBy`, the actor that created them. An API, CLI, or SDK caller is recorded as a `principal` or a `service-account` with its ID. The built-in tools record an `agent` whose ID is the deployment. A schedule that `agent.schedule.create` or `agent.schedule.remind` created also records `createdFrom`, the tool call it came from: `runId`, `threadId`, `toolCallId`, and `toolName`. Neither field takes part in the idempotency check, so a repeated create request returns the stored automation unchanged.
+
+A schedule or heartbeat created before the platform recorded these fields has neither of them, and later changes do not add them.
+
+A run that a fire started carries `automation`, with `kind` (`schedule` or `heartbeat`), the automation's `id`, and `fireId`, the ID of the fire record that lists the run. A replay of such a run keeps its trigger but has no `automation`.
+
+## Use it
+
+1. Allow the triggers in the agent manifest, for example `"triggers": ["api", "schedule", "heartbeat"]`, then publish and deploy the release. See [Agents, releases, and deployments](/docs/capabilities/agents).
+
+2. Create a schedule that runs on weekday mornings.
+
+   ```bash
+   deployments schedule create --name "Weekday digest" --agent-deployment-id $AGENT_DEPLOYMENT_ID --expression "cron(0 9 ? * MON-FRI *)" --timezone America/New_York --prompt "Summarize the tickets opened yesterday."
+   ```
+
+3. Check that the schedule moved from `provisioning` to `active`.
+
+   ```bash
+   deployments schedule show $SCHEDULE_ID
+   ```
+
+4. Fire it once by hand with a stable key, then list its fires. Running the fire command again with the same key returns `duplicate: true`.
+
+   ```bash
+   deployments schedule fire $SCHEDULE_ID --fire-key manual-test-1
+   deployments schedule fires $SCHEDULE_ID
+   ```
+
+5. Create a heartbeat that checks in every 15 minutes during weekday working hours in Berlin.
+
+   ```bash
+   deployments heartbeat create --agent-deployment-id $AGENT_DEPLOYMENT_ID --instructions "Check the queue and report items older than one hour." --interval-ms 900000 --active-window '{"startMinuteOfDay":540,"endMinuteOfDay":1020,"daysOfWeek":[1,2,3,4,5]}' --timezone Europe/Berlin
+   ```
+
+6. Pause the heartbeat, or archive it when you no longer need it.
+
+   ```bash
+   deployments heartbeat pause $HEARTBEAT_ID
+   deployments heartbeat archive $HEARTBEAT_ID --yes
+   ```
+
+The same schedule through the SDK:
+
+```ts
+import { createClient, createConfig, createSchedule } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data, error } = await createSchedule({
+  client,
+  headers: { "idempotency-key": crypto.randomUUID() },
+  body: {
+    agentDeploymentId: process.env.AGENT_DEPLOYMENT_ID!,
+    name: "Weekday digest",
+    expression: "cron(0 9 ? * MON-FRI *)",
+    timezone: "America/New_York",
+    prompt: "Summarize the tickets opened yesterday.",
+  },
+});
+```
+
+## Reference
+
+- API: [create schedule](/docs/api/reference/automations/create-schedule), [update schedule](/docs/api/reference/automations/update-schedule), [fire schedule](/docs/api/reference/automations/fire-schedule), [list schedule fires](/docs/api/reference/automations/list-schedule-fires), [create heartbeat](/docs/api/reference/automations/create-heartbeat), [update heartbeat](/docs/api/reference/automations/update-heartbeat), [fire heartbeat](/docs/api/reference/automations/fire-heartbeat), [list heartbeat fires](/docs/api/reference/automations/list-heartbeat-fires)
+- CLI: [`deployments schedule`](/docs/cli/reference/schedule), [`deployments heartbeat`](/docs/cli/reference/heartbeat)
+- SDK: [Automations functions](/docs/sdk/reference#automations)

@@ -1,0 +1,101 @@
+---
+title: "API overview"
+description: "Base URLs, authentication, request conventions, and how the API reference is organized."
+---
+
+The Deployments.ai API is a JSON-over-HTTPS API under the `/v1` path. Every capability on the platform is an operation in one OpenAPI 3.1 document. The TypeScript SDK is generated from that document, and the CLI is tested to cover every operation in it, so each operation has one SDK function and at least one CLI command.
+
+## Base URL
+
+Send requests to your install's API origin. These docs write it as the placeholder `https://api.example.com`; [Hosts and environments](/docs/getting-started/hosts-and-environments) explains where your install's origin comes from. Shell examples in these docs read it from `DEPLOYMENTS_API_URL`.
+
+```sh
+curl "$DEPLOYMENTS_API_URL/health"
+```
+
+The health check needs no credential and returns `{"status":"ok","service":"deployments-ai-api"}`. Reading a thread stream is the one operation served from another origin. Use the `streamUrl` the API returns. [Hosts and environments](/docs/getting-started/hosts-and-environments) lists every origin.
+
+Fetch the live contract from `GET /v1/openapi.json`, or run:
+
+```sh
+deployments openapi --json
+```
+
+## Authenticate every request
+
+Send a bearer credential in the `Authorization` header. A person uses a platform access token from sign-in. A service uses an API key that starts with `dpl_`. Most operations also need tenant headers that select the organization, project, or environment.
+
+```sh
+curl "$DEPLOYMENTS_API_URL/v1/agent-deployments" \
+  --header "authorization: Bearer $DEPLOYMENTS_API_KEY" \
+  --header "x-deployments-environment: $ENV_ID"
+```
+
+[Authentication](/docs/getting-started/authentication) explains the schemes, the device sign-in flow, and the tenant header rules.
+
+## Request conventions
+
+| Convention             | Rule                                                                                                                                                                                    |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bodies                 | Request and response bodies are JSON. A few operations stream bytes or Server-Sent Events, and their pages say so.                                                                      |
+| IDs                    | Resource IDs are 26-character ULIDs in canonical uppercase Crockford base32.                                                                                                            |
+| Timestamps             | Timestamps are UTC with millisecond precision, for example `2026-10-01T12:00:00.000Z`.                                                                                                  |
+| Tenant headers         | `x-deployments-organization`, `x-deployments-project`, and `x-deployments-environment` select the tenant.                                                                               |
+| Idempotency            | Most mutations take an `idempotency-key` header. See [Idempotency](/docs/api/idempotency).                                                                                              |
+| Lists                  | Lists use `cursor` and `limit` query parameters and return `nextCursor`. See [Pagination](/docs/api/pagination).                                                                        |
+| Optimistic concurrency | Updates to versioned resources, such as agent definitions and deployments, take the `expectedVersion` you last read. A stale version fails with status 409 and code `version_conflict`. |
+
+## Response conventions
+
+Successful responses return 200, 201, or 202. Each operation's page lists which one. A 202 means the platform accepted work that continues after the response, such as a run.
+
+Failed responses use the problem details format with the `application/problem+json` media type. Problem responses carry an `x-request-id` header and repeat it in the body as `requestId`. Runtime, artifact, automation, and workflow execution operations are the exception. Their problem body includes `requestId` only when your request sent an `x-request-id` header. [Errors](/docs/api/errors) describes the format and common codes.
+
+## How the reference is organized
+
+Operations are grouped by tag. Each operation page shows the method and path, the security schemes, the headers and parameters, the request and response schemas, every error status, and SDK and CLI samples.
+
+| Tag            | Covers                                                                                                                           | Start with                                                                                   |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Tenancy        | Organizations, standing, spend, limits, members, invitations, projects, environments, workspaces, service accounts, and API keys | [List organizations](/docs/api/reference/tenancy/list-organizations)                         |
+| Security       | Device sign-in, identity, login domains, identity providers, directory sync, and the credential inventory                        | [Show the authenticated identity](/docs/api/reference/security/get-identity)                 |
+| Apps           | Agent-built apps, member grants, releases, publication, and custom domains                                                       | [List apps](/docs/api/reference/apps/list-apps)                                              |
+| Agents         | Agent definitions, releases, deployments, and canaries                                                                           | [List agent definitions](/docs/api/reference/agents/list-agent-definitions)                  |
+| Runtime        | Threads, messages, runs, approvals, tool calls, channels, webhooks, previews, and streams                                        | [Submit an agent run](/docs/api/reference/runtime/submit-agent-run)                          |
+| Automations    | Schedules and heartbeats                                                                                                         | [List schedules](/docs/api/reference/automations/list-schedules)                             |
+| Artifacts      | Run and thread artifacts                                                                                                         | [List artifacts](/docs/api/reference/artifacts/list-artifacts)                               |
+| Workflows      | Workflow definitions, releases, and executions                                                                                   | [List workflow definitions](/docs/api/reference/workflows/list-workflow-definitions)         |
+| Managed Skills | Skill sources, releases, and installations                                                                                       | [List skill sources](/docs/api/reference/managed-skills/list-managed-skill-sources)          |
+| Tools          | Tool catalog and tool policies                                                                                                   | [List tool policies](/docs/api/reference/tools/list-tool-policies)                           |
+| Extensions     | MCP servers, MCP connections, extensions, and hosted code                                                                        | [List MCP servers](/docs/api/reference/extensions/list-mcp-servers)                          |
+| Providers      | Providers, OAuth apps, credentials, connections, and grants                                                                      | [List providers](/docs/api/reference/providers/list-providers)                               |
+| Models         | Model catalog and model policies                                                                                                 | [List models](/docs/api/reference/models/list-models)                                        |
+| Memory         | Memory spaces, grants, policies, search, and recall                                                                              | [List memory spaces](/docs/api/reference/memory/list-memory-spaces)                          |
+| Brains         | Organization knowledge, sources, documents, search, and ask                                                                      | [Search Brains](/docs/api/reference/brains/search-brains)                                    |
+| Agent Email    | Agent inboxes, messages, drafts, and domains                                                                                     | [List inboxes](/docs/api/reference/agent-email/list-agent-email-inboxes)                     |
+| Email          | Send-only email tenants, domains, and messages                                                                                   | [Create an email tenant](/docs/api/reference/email/create-email-tenant)                      |
+| Evaluations    | Score definitions, datasets, evaluation runs, and release comparisons                                                            | [List score definitions](/docs/api/reference/evaluations/list-score-definitions)             |
+| Observability  | Traces, spans, metrics, and exports                                                                                              | [List traces](/docs/api/reference/observability/list-observability-traces)                   |
+| Operations     | Usage, cost, spend, API key usage, and audit events                                                                              | [List usage records](/docs/api/reference/operations/list-usage-records)                      |
+| Budgets        | Spend budgets and budget periods                                                                                                 | [List budgets](/docs/api/reference/budgets/list-budgets)                                     |
+| Governance     | Retention, data export, erasure, and audit export                                                                                | [Get the retention policy](/docs/api/reference/governance/get-organization-retention-policy) |
+| System         | Health, install operator reads, organization standing and spend, and principal status                                            | [Check API health](/docs/api/reference/system/get-health)                                    |
+
+The [SDK function index](/docs/sdk/reference) lists every function by the same tags.
+
+## Next
+
+<Cards>
+  <Card title="Errors" href="/docs/api/errors">
+    The problem details format and how to handle failures.
+  </Card>
+  <Card title="Pagination" href="/docs/api/pagination">
+    Walk long lists with cursors.
+  </Card>
+  <Card title="Idempotency" href="/docs/api/idempotency">
+    Retry mutations without doing the work twice.
+  </Card>
+  <Card title="Versioning and limits" href="/docs/api/versioning-and-limits">
+    The contract version, request rates, organization limits, and size limits.
+  </Card>
+</Cards>

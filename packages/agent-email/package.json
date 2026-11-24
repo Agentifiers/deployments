@@ -1,0 +1,34 @@
+{
+  "name": "@deployments-ai/agent-email",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/core/index.ts",
+    "./contracts": "./src/core/contracts.ts",
+    "./events": "./src/core/events.ts",
+    "./models": "./src/core/models.ts",
+    "./ports": "./src/core/ports.ts",
+    "./product": "./src/core/product.ts",
+    "./service": "./src/core/service.ts",
+    "./aws": "./src/adapters/aws/index.ts",
+    "./aws/domain-provisioner": "./src/adapters/aws/domain-provisioner.ts",
+    "./aws/placement-provisioner": "./src/adapters/aws/placement-provisioner.ts",
+    "./aws/runtime": "./src/adapters/aws/runtime.ts",
+    "./aws/tenant-provisioner": "./src/adapters/aws/tenant-provisioner.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1090.0",
+    "@aws-sdk/client-sesv2": "3.1090.0",
+    "@aws-sdk/client-sns": "3.1090.0",
+    "@aws-sdk/client-sqs": "3.1090.0",
+    "@aws-sdk/s3-request-presigner": "3.1090.0",
+    "effect": "4.0.0-beta.92",
+    "postal-mime": "2.7.5"
+  }
+}

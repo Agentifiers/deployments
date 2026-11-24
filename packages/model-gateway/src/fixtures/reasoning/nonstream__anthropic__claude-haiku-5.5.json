@@ -1,0 +1,59 @@
+{
+  "id": "gen-1791811517-J58x1CU6nKHhbJyboeGw",
+  "object": "chat.completion",
+  "created": 1791811517,
+  "model": "anthropic/claude-haiku-5.5",
+  "provider": "Claude Platform on AWS",
+  "system_fingerprint": null,
+  "service_tier": "default",
+  "choices": [
+    {
+      "index": 0,
+      "logprobs": null,
+      "finish_reason": "tool_calls",
+      "native_finish_reason": "tool_use",
+      "message": {
+        "role": "assistant",
+        "content": "The capitals are Berlin (6 letters), Tokyo (5), Canberra (8), and Ottawa (6). Canberra has the most letters, so I'll check its weather.",
+        "refusal": null,
+        "reasoning": "Comparing the capital city names by letter count: Berlin, Tokyo, Canberra, Ottawa. Canberra is the longest at 8 letters, so I'll fetch its weather.",
+        "tool_calls": [
+          {
+            "type": "function",
+            "index": 0,
+            "id": "toolu_01CjKHfgihfyaXvookjNRQtw",
+            "function": { "name": "get_weather", "arguments": "{\"city\": \"Canberra\"}" }
+          }
+        ],
+        "reasoning_details": [
+          {
+            "type": "reasoning.text",
+            "text": "Comparing the capital city names by letter count: Berlin, Tokyo, Canberra, Ottawa. Canberra is the longest at 8 letters, so I'll fetch its weather.",
+            "format": "anthropic-claude-v1",
+            "index": 0,
+            "signature": "CAQS8QUKEAgSGAI4AUIIdGhpbmtpbmcSDHEPyZR7bs/sUZXHcxoMI8FMJ9P3CwCUxpvwIjCYejGUO0//jCYSYzxJ2pPSMwqEyQ3Ii/oHgY7nz+txCBE5AHW+EOU/YOnZ+AZpJD4qjgXrbyvUXBYzkHFT9NYXWpK266RkAevhbSN3Ozmt/NCB85n4xlde7vVJBqxQCYL2KNfxljTwe3zJajC2jLvhl3KGiP8GRMPQkGltIeioiUA6SWi/o3KI5SvjutlzkoVjrr5OGotpokwatV1+KY5jwXNmzPobMcqxQRwIcvXcCI7YpewHNy4fb3gLLRXPbJ0ruACzMZDwIkHzzwWLH0thydMKA8eYMuy6nF6lT/keGTFKzX3E3cE+n2GKkC0hAnY1WRrSWKqIjUZ/goKItQKbA0KUVPcS30hQpHc42V1C1gBfI/y8sdDnYUxcLZx/0agG/BSNaCpjQyJELeWcN9iEymqlyQqlvG6VTaoFNIcoTxoDXMJ3HU2vTLg+HYzov2YA8YHy9KuZE0cFJzc6ZE/pVRC/sGY22A6wX7fHSTskDXE04ld83zar6QTyBX07E4LRMugoAy3gw8rxx90os4poU08/BJIg1fHYd9BRnRZ4mWHMNXPm65frxkRsqcG3WPoFJwtooisTLrMUvGuJAUhQb+V/Vb5nxfea9zKUmdNtNoxFF0LrzmxxtVpRW+lG7uLW218j7rxtHkjZ7v3OW2bCzAm+/64rnInTDOr0qR42Ex41HCri1x8qO8cRKSAGBNcusAIXU9W3FKu5+ggwVGGzGkd4UzTuK4zNjOOg/MVdZqvwOS5smIulc9wE+1Bx5N3MjWzsktfMTo40/t7zI8nCA3hByS7/8CqJK/RNk3DDcYUZGp9AuwpopkLSLzxI7dsZibP+TlOm7+sT6qsa487kN9e+GMBMMN4kEsRZj9y4y+ATYhKqLcNeT1KHv/zp8rsekm7l0uZVIgMuWbECgKjcl4vgzHd5rJ14+QH8LMp24oUYAQ==.eyJlbmRwb2ludF9zbHVnIjoiYW50aHJvcGljL2NsYXVkZS1oYWlrdS01LjUtMjAyNjEwMDd8Y2xhdWRlLW9uLWF3cyJ9"
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 479,
+    "completion_tokens": 189,
+    "total_tokens": 668,
+    "cost": 0.0001424,
+    "is_byok": false,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0,
+      "audio_tokens": 0,
+      "video_tokens": 0
+    },
+    "cost_details": {
+      "upstream_inference_cost": 0.0001424,
+      "upstream_inference_prompt_cost": 0.0000479,
+      "upstream_inference_completions_cost": 0.0000945
+    },
+    "completion_tokens_details": { "reasoning_tokens": 79, "image_tokens": 0, "audio_tokens": 0 }
+  }
+}

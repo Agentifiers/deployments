@@ -1,0 +1,146 @@
+---
+title: "Sandbox runtime"
+description: "The Lambda MicroVM provider that runs sandboxed code, how you enable and publish it, and how sandbox leases, limits, and usage work."
+---
+
+The sandbox runtime runs the code that agents execute, such as `code.execute` calls, browser tools, and hosted code tools, inside short-lived MicroVMs. The agent worker allocates a sandbox through a provider, runs commands and moves files through the sandbox's control API, and destroys the sandbox when the work ends. This page is for operators who enable and run the provider. For what agents can do in a sandbox, see [Code sandbox](/docs/capabilities/sandbox).
+
+<Callout type="warn" title="Availability">
+  The customer root in `infrastructure/environments/customer` turns on the Lambda MicroVM provider
+  by default (`sandbox_lambda_microvm_enabled = true`), and its `platform-customer` profile
+  publishes and verifies the image on every deploy. The installation region must offer Lambda
+  MicroVMs; see [Regions and quotas](/docs/operate/regions-and-quotas). The `platform` module sets
+  `sandbox_lambda_microvm_enabled` to `false` by default, and without it every sandbox call on the
+  worker fails with "Lambda MicroVM provider is not configured".
+</Callout>
+
+## Provider
+
+| Provider             | Runs on                                               | Isolation modes                         | Enable with                      |
+| -------------------- | ----------------------------------------------------- | --------------------------------------- | -------------------------------- |
+| `aws_lambda_microvm` | AWS Lambda MicroVMs started from an image you publish | `run-ephemeral` and `thread-persistent` | `sandbox_lambda_microvm_enabled` |
+
+OpenTofu passes the provider's configuration to the agent worker as environment variables.
+
+## Lambda MicroVM provider
+
+When you set `sandbox_lambda_microvm_enabled = true`, OpenTofu creates these resources:
+
+- A private, versioned S3 bucket for image build inputs. The inputs come from repository files, so the bucket holds no customer data. Its policy denies requests without TLS, and OpenTofu deletes every object version when you turn the provider off.
+- The CloudWatch log group `/aws/lambda-microvms/deployments-ai-sandbox`. Every image the publisher creates sends its build and runtime logs there. The group keeps logs for `operations.log_retention_days`.
+- An IAM role that Lambda uses to build the image. The role can create log streams in, and write to, only that log group. It cannot create log groups.
+- An IAM execution role, `microvm-execution`, that each sandbox MicroVM runs as. Lambda forwards a MicroVM's stdout and stderr to CloudWatch only under an execution role. This role can create log streams in, and write to, only the sandbox log group, so code in a sandbox that reads the role's credentials gets no other AWS access. The worker sends each MicroVM's runtime logs to the sandbox log group, in a stream named for the MicroVM. To use a role of your own, set `lambda_microvm_execution_role_arn`; OpenTofu then creates no execution role, and your role needs the same log permissions to keep the logs.
+- A worker IAM policy that allows `lambda:RunMicrovm`, `lambda:CreateMicrovmAuthToken`, `lambda:GetMicrovm`, `lambda:SuspendMicrovm`, `lambda:ResumeMicrovm`, and `lambda:TerminateMicrovm` on the configured image and on MicroVMs in the account and region. Before you set the image, the image scope covers every MicroVM image in the account and region. The policy also allows `lambda:PassNetworkConnector`, which has no resource-level scope, and `iam:PassRole` for the execution role only.
+
+### Publish the MicroVM image
+
+Image creation is an AWS SDK call, not an OpenTofu resource, so bootstrap takes two applies:
+
+1. Apply with `sandbox_lambda_microvm_enabled = true` to create the bucket, log group, build role, and worker policy.
+2. Publish the image with the credentials of the target account:
+
+   ```bash
+   bun run sandbox:lambda-microvm:image -- --publish --region <region>
+   ```
+
+   `AWS_REGION` or `AWS_DEFAULT_REGION` can supply the region instead. After it checks that the image version is `ACTIVE`, the publisher prints `imageArn` and `imageVersion` as JSON.
+
+3. Set `lambda_microvm_image_identifier` and `lambda_microvm_image_version` to the published values and apply again.
+
+The image is content-addressed. Its hash covers every input under `apps/sandbox-microvm`, the build settings, and the current version of the AWS managed base image. A base image patch therefore produces a new image even when the repository inputs are unchanged. Publishing the same inputs again reuses the existing image.
+
+Every deploy profile runs these steps on every deploy: it applies the prerequisites, publishes the image, and passes `lambda_microvm_image_identifier` and `lambda_microvm_image_version` to OpenTofu. See [Deploying the platform](/docs/operate/deployment#choose-a-profile).
+
+A deployment target sets `"lambdaMicrovmImage": "desktop"` to publish the desktop variant instead, which adds Xvfb, a window manager, Firefox, xterm, and Cua Driver for the `computer.*` tools. The deploy tool then passes `lambda_microvm_image_capacity` so the worker reserves and meters 4,096 MiB and 2 vCPU per sandbox.
+
+A deployment target in a region without Lambda MicroVMs sets `"lambdaMicrovm": false`. The deploy tool then skips the prerequisites, publication, and live verification, and passes `sandbox_lambda_microvm_enabled = false`, so the installation runs no sandbox provider. See [Write a deployment target](/docs/operate/deployment#write-a-deployment-target).
+
+### Live verification on each deploy
+
+For a profile with Lambda MicroVM enabled, the deploy tool proves the published image works after the OpenTofu apply. It creates a MicroVM with the image variant's capacity, 1 vCPU and 2,048 MiB for `sandbox` or 2 vCPU and 4,096 MiB for `desktop`, and runs these checks:
+
+1. Run a shell command and compare its output.
+2. Run a command with network isolation and check that it sees only the `lo` interface.
+3. Upload a file and download it again.
+4. Checkpoint the MicroVM, resume it, and check that the file survived.
+
+The tool destroys the MicroVM afterward. Any failed check fails the deploy.
+
+### Capacity and guest limits
+
+| Setting                    | Value                                                                               |
+| -------------------------- | ----------------------------------------------------------------------------------- |
+| Default image capacity     | 1 vCPU and 2,048 MiB                                                                |
+| Supported image capacities | 0.25 vCPU with 512 MiB, 0.5 with 1,024, 1 with 2,048, 2 with 4,096, or 4 with 8,192 |
+| Maximum MicroVM lifetime   | 8 hours                                                                             |
+| Network connectors         | `HTTP_INGRESS` and `INTERNET_EGRESS`                                                |
+| Control port               | 8080                                                                                |
+| Control API auth token     | Scoped to the control port, valid for 15 minutes                                    |
+| Provider request timeout   | 60 seconds per AWS or control API call                                              |
+
+The image capacity is a fixed reservation. The provider rejects a request whose `minVcpu` or `minMemoryMiB` exceeds it before it calls AWS, and usage records meter the reserved capacity.
+
+The control server inside the guest enforces its own limits, so they hold even when a caller sends no timeout:
+
+| Limit                                  | Value                             |
+| -------------------------------------- | --------------------------------- |
+| Command timeout                        | 50 seconds, which is also the cap |
+| Combined stdout and stderr per command | 8 MiB                             |
+| File upload or download                | 64 MiB                            |
+| JSON request body                      | 1 MiB                             |
+
+When a command times out, the server sends `SIGTERM` to its whole process group, then `SIGKILL`.
+
+### Network isolation for hosted code
+
+A hosted code tool with `network: none` runs in a new network namespace that has only loopback. The guest creates the namespace together with a new user namespace, because Lambda MicroVM guests run without `CAP_SYS_ADMIN`. Before it runs the command, the guest checks that `lo` is the only interface and refuses to run otherwise, so `none` fails closed. See [Extensions and hosted code](/docs/capabilities/extensions-and-hosted-code).
+
+### Thread-persistent workspaces
+
+A thread-persistent workspace lives as a gzip-compressed tar snapshot in the platform artifact bucket, under the organization's prefix, encrypted with the shared platform data key. A MicroVM is only a per-run copy. The MicroVM uploads and downloads snapshots straight to S3 through presigned URLs that the worker creates, so the MicroVM needs outbound HTTPS to the regional S3 endpoint. The default `INTERNET_EGRESS` connector provides it. A snapshot larger than 5 GiB compressed fails with `archive-too-large`.
+
+## Leases and lifecycle
+
+The worker never calls a provider directly. It goes through the sandbox manager, which keeps a `sandbox-lease` record in the execution table. Each transition writes the lease record and a semantic event in one DynamoDB transaction.
+
+| Lease status    | Meaning                                                           |
+| --------------- | ----------------------------------------------------------------- |
+| `creating`      | Allocation started, or its provider outcome is not yet known.     |
+| `ready`         | The sandbox accepts commands and file operations.                 |
+| `checkpointing` | A suspend is in progress.                                         |
+| `suspended`     | The sandbox is checkpointed. Compute usage stops.                 |
+| `resuming`      | A resume is in progress.                                          |
+| `releasing`     | Destroy is in progress.                                           |
+| `destroyed`     | The provider confirmed the sandbox is gone.                       |
+| `error`         | A provider action failed and the lease needs recovery or cleanup. |
+
+The events are `sandbox.provisioning-started`, `sandbox.allocated`, `sandbox.ready`, `sandbox.checkpointing`, `sandbox.suspended`, `sandbox.resuming`, `sandbox.resumed`, `sandbox.releasing`, `sandbox.destroy-completed`, `sandbox.destroyed`, `sandbox.failed`, and `sandbox.usage-recorded`.
+
+When a provider call times out or its outcome is otherwise unknown, the manager does not guess. It leaves the lease in `creating`, `checkpointing`, or `resuming` until one of its reconcile operations settles it. These operations are methods of the sandbox manager in `packages/sandbox-hosts`. No API route or CLI command exposes them.
+
+| Operation                                              | Use it when                                                                            |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| `reconcileCreate`                                      | A Lambda allocation outcome is unknown. Replays the allocation with the same lease ID. |
+| `reconcileCreateWithLease`                             | You found the ready allocation and want to attach it without another create call.      |
+| `reconcileCreateWithCleanup`                           | You found the allocation and want to destroy and meter it.                             |
+| `resolveCreateAsNotAllocated`                          | You confirmed that no allocation exists. Usage stops at the time you supply.           |
+| `reconcileCheckpoint`, `reconcileCheckpointWithResult` | A checkpoint outcome is unknown.                                                       |
+| `reconcileResume`, `reconcileResumeWithLease`          | A resume outcome is unknown.                                                           |
+
+`reconcileCreate` can replay a Lambda allocation only when `DEPLOYMENTS_AI_LAMBDA_MICROVM_RECONCILIATION_TARGET` is set on the worker. Without it, settle an unknown allocation with one of the other create operations.
+
+## Usage metering
+
+Every terminal lifecycle path writes three meter records in the same transaction as the lease change:
+
+| Metric                  | Unit      | Measures                  |
+| ----------------------- | --------- | ------------------------- |
+| `sandbox_ms`            | `ms`      | Elapsed sandbox time      |
+| `sandbox_vcpu_ms`       | `vcpu-ms` | Reserved vCPU over time   |
+| `sandbox_memory_mib_ms` | `MiB-ms`  | Reserved memory over time |
+
+Each record's idempotency key combines the lease ID, the metric, and the lease version, so retries never count a segment twice. Checkpointing closes the active segment, so suspended time is not metered. A segment never extends past the provider's lease expiry, and an active interval longer than 90 days is committed in 90-day segments. The install's optional `sandbox_usage_cost_policy` sets USD-micro rates per hour for the base, per vCPU, and per GiB of memory, and the records then carry the cost as operator-funded spend. See [Price sandbox time](/docs/operate/costs#price-sandbox-time) and [Usage and budgets](/docs/capabilities/usage-and-budgets).
+
+## Reference
+
+- Related: [Code sandbox](/docs/capabilities/sandbox), [Extensions and hosted code](/docs/capabilities/extensions-and-hosted-code), [Deploying the platform](/docs/operate/deployment), [Security model](/docs/operate/security)

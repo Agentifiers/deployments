@@ -1,0 +1,91 @@
+---
+title: "Ops alerts"
+description: "How CloudWatch alarms reach your Slack channel, and how you connect the ops alerts Slack app."
+---
+
+Every CloudWatch alarm that the platform stack creates notifies one SNS topic, `ops-alerts`, when it enters `ALARM` and again when it returns to `OK`. A Lambda function subscribed to the topic posts each change to a Slack channel through a Slack app that you create for operations. This page is for operators who run an installation. The app is separate from any Slack app that agents use as a channel.
+
+<Callout type="warn" title="Availability">
+  Every deploy creates the topic, the notifier, and the token parameter. Nothing reaches Slack until
+  you store a bot token and set a channel ID. Until then the notifier logs one warning per
+  notification and drops it. While both `operations.ops_alerts_slack_channel_id` and
+  `operations.ops_alerts_email` are empty, the stack creates no CloudWatch alarms, because none
+  would reach anyone. Setting either one creates every alarm at the next deploy.
+</Callout>
+
+## How an alarm reaches Slack
+
+1. An alarm changes state. CloudWatch publishes the alarm JSON to the `ops-alerts` topic. A key policy statement on the shared `platform-data` KMS key lets CloudWatch encrypt messages for this topic only.
+2. SNS invokes the `ops-alerts-notifier` Lambda function asynchronously. SNS also emails `operations.ops_alerts_email` when you set it.
+3. The notifier reads the bot token from SSM Parameter Store on every invocation. It then calls Slack's `chat.postMessage` with the channel ID from `operations.ops_alerts_slack_channel_id`.
+4. The message shows the environment, the alarm name and description, the new and previous state, the change time, the metric, the state reason, and a link that opens the alarm in the CloudWatch console. The color bar is red for `ALARM`, green for `OK`, and yellow for `INSUFFICIENT_DATA`.
+
+A message on the topic that is not CloudWatch alarm JSON still posts, as an unrecognized notification with its subject and raw text.
+
+## Components
+
+| Component                     | What it is                                                                                                                                         |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ops-alerts` topic            | An SNS topic encrypted with the `platform-data` KMS key. Its policy lets CloudWatch publish from the same account.                                 |
+| `ops-alerts-notifier`         | A Node.js 26 Lambda function on ARM64. Its role may read one SSM parameter, write its own log group, and send to its failure queue.                |
+| `/ops-alerts/slack-bot-token` | A SecureString parameter. OpenTofu creates it with the value `pending` and never writes it again.                                                  |
+| Failure queue                 | The SQS queue `ops-alerts-notifier-failures`. It keeps notifications that failed every attempt for 14 days.                                        |
+| Log group                     | `/aws/lambda/ops-alerts-notifier`, kept for `operations.log_retention_days`.                                                                       |
+| Email subscription            | Present only when `operations.ops_alerts_email` is set. AWS sends a confirmation email first, and delivery starts after the recipient confirms it. |
+
+The root outputs `ops_alerts_topic_arn` and `ops_alerts_slack_bot_token_parameter_name` name the topic and the parameter.
+
+## Connect the Slack app
+
+The app manifest is [`infrastructure/modules/ops-alerts/slack-app-manifest.yaml`](https://github.com/Agentifiers/deployments/blob/main/infrastructure/modules/ops-alerts/slack-app-manifest.yaml) in the platform repository. It asks for the `chat:write` bot scope only. It has no events, no slash commands, and no interactivity, and it turns off token rotation so the bot token does not expire.
+
+1. In Slack, open **Your Apps**, choose **Create New App**, then **From a manifest**. Pick your workspace and paste the manifest.
+2. Choose **Install to Workspace** and approve the `chat:write` scope.
+3. Copy the **Bot User OAuth Token** from **OAuth & Permissions**. It starts with `xoxb-`.
+4. In the alerts channel, run `/invite @ops-alerts`. Without the invite, Slack rejects each post with `not_in_channel`.
+5. Copy the channel ID. In Slack, open the channel details. The ID is at the bottom and starts with `C`.
+6. Store the token in the installation's account and region:
+
+   ```bash
+   aws ssm put-parameter --name /ops-alerts/slack-bot-token --type SecureString --overwrite --value <xoxb-token>
+   ```
+
+7. Set the channel ID in the `operations` object of the root's var file, for example `"ops_alerts_slack_channel_id": "C0123456789"`.
+8. Deploy the root. OpenTofu writes the channel ID to the notifier's environment.
+
+The notifier reads the token on every invocation. To rotate the token, overwrite the parameter. You do not need to deploy.
+
+## Add an email backstop
+
+Set `operations.ops_alerts_email` to an address and deploy. The email subscription reaches the recipient even when the notifier or Slack is down, because SNS sends it directly. An empty string means no email subscription.
+
+## Test the route
+
+Publish a test message to the topic:
+
+```bash
+aws sns publish --topic-arn <ops_alerts_topic_arn> --subject "Ops alerts test" --message "hello"
+```
+
+Slack shows an unrecognized notification with the subject `Ops alerts test`. To test a real alarm message, force an alarm into `ALARM`. CloudWatch then posts its recovery to `OK` at the next evaluation:
+
+```bash
+aws cloudwatch set-alarm-state --alarm-name ops-alerts-notifier-failures-visible --state-value ALARM --state-reason "Ops alerts drill"
+```
+
+## When delivery fails
+
+The notifier fails the invocation when Slack is unreachable, returns an HTTP error, or answers `ok: false`. Lambda retries the invocation twice. After the last attempt, the notification goes to `ops-alerts-notifier-failures`. Two alarms watch this path:
+
+| Alarm                                  | Fires when                                    |
+| -------------------------------------- | --------------------------------------------- |
+| `ops-alerts-notifier-errors`           | The notifier fails any invocation in a minute |
+| `ops-alerts-notifier-failures-visible` | The failure queue holds at least one message  |
+
+Both alarms notify the same topic. If Slack itself is down, only the email subscription delivers them. The Slack error code appears in the notifier's log, for example `Slack chat.postMessage failed with not_in_channel.`
+
+While the channel ID is empty or the token is `pending`, the notifier logs a warning with the reason `slack-channel-unset` or `slack-bot-token-pending` and returns success. These notifications are not retried and do not reach the failure queue.
+
+## Which alarms notify
+
+Every metric alarm in the platform stack sends to `ops-alerts` on `ALARM` and `OK`. A repository test, `tests/alarm-notification-infrastructure.test.ts`, fails when an alarm or a module skips the topic. The `deployments system alarms` command and the console's **System** page list the same alarms; see [System operator](/docs/operate/system-operator).

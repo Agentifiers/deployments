@@ -1,0 +1,169 @@
+---
+title: "Error handling"
+description: "Read the problem details an SDK call returns, turn them into errors your code can handle, and decide when to retry."
+---
+
+A failed SDK call does not throw. It resolves with `error` set and `data` undefined. Read the status and the problem details in `error`, then decide whether to fix the request, renew the credential, or retry. This page shows what `error` holds and how to act on it.
+
+## What `error` holds
+
+The value depends on how far the request got:
+
+| Situation                                                                                                                   | `error`                                                                     | `response`     |
+| --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | -------------- |
+| The API answered with an error status                                                                                       | The parsed JSON body, normally a problem details object                     | The `Response` |
+| The API answered with a body that is not JSON                                                                               | The body as a string                                                        | The `Response` |
+| No response arrived, for example a network failure, an aborted signal, a blocked redirect, or a request to the wrong origin | The error that stopped the request, usually a `TypeError` or an abort error | `undefined`    |
+
+The API sends errors as problem details with the content type `application/problem+json`:
+
+| Field       | Type    | Meaning                                                                                                                               |
+| ----------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `title`     | string  | A short summary of the problem. Always present.                                                                                       |
+| `status`    | integer | The HTTP status, from `400` to `599`. Always present.                                                                                 |
+| `code`      | string  | A stable, lowercase `snake_case` code, such as `missing_scope` or `idempotency_conflict`. Branch on this, not on `title` or `detail`. |
+| `detail`    | string  | A human-readable explanation of this occurrence.                                                                                      |
+| `type`      | string  | A URI that identifies the problem type.                                                                                               |
+| `instance`  | string  | A reference to this occurrence of the problem.                                                                                        |
+| `requestId` | string  | The ID of the request, when the service includes it.                                                                                  |
+
+Use `response.status` as the status of record. Each operation's API reference page lists the error statuses it can return.
+
+## Turn a result into data or an exception
+
+Most code reads better when a failure becomes an exception. This helper returns `data` or throws an `Error` that carries the status, code, and request ID:
+
+```ts
+import { createClient, createConfig, getAgentDefinition } from "@agentifiers/deployments-sdk";
+
+interface Problem {
+  readonly title: string;
+  readonly status: number;
+  readonly code?: string;
+  readonly detail?: string;
+  readonly requestId?: string;
+}
+
+function isProblem(value: unknown): value is Problem {
+  return typeof value === "object" && value !== null && "title" in value && "status" in value;
+}
+
+export class PlatformError extends Error {
+  constructor(
+    message: string,
+    readonly status: number | undefined,
+    readonly code: string | undefined,
+    readonly requestId: string | undefined,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "PlatformError";
+  }
+}
+
+export function unwrap<T>(result: { data?: T; error?: unknown; response?: Response }): T {
+  const { data, error, response } = result;
+  if (error === undefined && data !== undefined) return data;
+  const problem = isProblem(error) ? error : undefined;
+  const requestId = problem?.requestId ?? response?.headers.get("x-request-id") ?? undefined;
+  const message = problem
+    ? `${problem.title}${problem.detail ? `: ${problem.detail}` : ""}`
+    : response
+      ? `The API returned status ${response.status}.`
+      : "The request did not reach the API.";
+  throw new PlatformError(message, response?.status ?? problem?.status, problem?.code, requestId, {
+    cause: error,
+  });
+}
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const definition = unwrap(
+  await getAgentDefinition({
+    client,
+    path: { id: "<agent-definition-id>" },
+    headers: { "x-deployments-environment": "<environment-id>" },
+  }),
+);
+```
+
+You can also pass `throwOnError: true` on a call. The call then throws the same value it would have put in `error`. For an error status, that value is the parsed problem details object, not an `Error` instance, so it has no stack trace. Wrap it as above if your logging expects `Error` objects.
+
+## Decide what to do
+
+| Status         | What it means                                                                                                           | What to do                                                                                                                                                                                     |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400`, `422`   | The request is invalid. `code` and `detail` say what is wrong, for example a missing tenant header.                     | Fix the request. Retrying it unchanged fails the same way.                                                                                                                                     |
+| `401`          | The credential is missing, invalid, or expired.                                                                         | Renew or replace the credential, then retry once.                                                                                                                                              |
+| `403`          | The credential lacks a scope or role, or cannot reach the requested organization, project, or environment.              | Use a credential with the right access. Do not retry.                                                                                                                                          |
+| `404`          | The resource does not exist, or the credential cannot see it.                                                           | Check the ID and the tenant headers. Do not retry.                                                                                                                                             |
+| `409`          | The request conflicts with the resource's current state, or with an earlier request that used the same idempotency key. | Read `code`. For `idempotency_in_progress`, wait and retry with the same key. For `idempotency_conflict`, the key was used for different input. Otherwise, read the resource again and decide. |
+| `413`          | The request body is too large.                                                                                          | Send less data.                                                                                                                                                                                |
+| `429`          | You sent too many requests, or a spend budget refused new work.                                                         | Read `code`. For `organization_rate_limited`, wait the seconds in the `retry-after` header, then retry. For `budget_exhausted`, do not retry. Otherwise, retry later with backoff.             |
+| `500` to `599` | The service failed or is unavailable.                                                                                   | Retry with backoff.                                                                                                                                                                            |
+| No response    | The request did not complete.                                                                                           | Retry with backoff.                                                                                                                                                                            |
+
+[Errors](/docs/api/errors) in the API guide describes the codes in more detail.
+
+The client resends a request that the API gateway throttled. The gateway answers such a request itself, so the platform never ran it, and a resend is safe for a write too. The client waits 0.25, 0.5, 1, 2, and 4 seconds between attempts, and then returns the last answer. A `429` from the platform, such as `organization_rate_limited` or `budget_exhausted`, comes back to you without a resend. An abort through the request's `signal` stops the wait.
+
+## Retry without doing the work twice
+
+A retry is safe when repeating the request cannot repeat its effect:
+
+- Reads, such as `get` and `list` operations, are safe to retry.
+- A write is safe to retry only if you send the same `idempotency-key` on every attempt. The API then returns the stored result of the first attempt that completed. [Making requests](/docs/sdk/making-requests#send-an-idempotency-key-with-every-write) shows how to keep the key.
+- A write without an idempotency key, such as `createWebhook`, can run twice if the first attempt succeeded but its response was lost. Before you retry it, list the resources and check whether the first attempt took effect.
+
+This helper retries a call on `429`, on `5xx`, and when no response arrived. It waits longer after each attempt and adds jitter so many clients do not retry at once. Choose limits that fit your workload:
+
+```ts continues
+export async function withRetry<T extends { error?: unknown; response?: Response }>(
+  call: () => Promise<T>,
+  maxAttempts = 4,
+  baseDelayMs = 500,
+): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    const result = await call();
+    const status = result.response?.status;
+    const retryable =
+      result.error !== undefined && (status === undefined || status === 429 || status >= 500);
+    if (!retryable || attempt === maxAttempts) return result;
+    const delay = baseDelayMs * 2 ** (attempt - 1);
+    await new Promise((resolve) => setTimeout(resolve, delay / 2 + Math.random() * (delay / 2)));
+  }
+}
+```
+
+Create the idempotency key outside the callback, so every attempt sends the same key. This example reuses `client` and `unwrap` from the first example and `withRetry` from the one above:
+
+```ts continues
+import { submitAgentRun } from "@agentifiers/deployments-sdk";
+
+const idempotencyKey = crypto.randomUUID();
+const run = unwrap(
+  await withRetry(() =>
+    submitAgentRun({
+      client,
+      path: { agentDeploymentId: "<agent-deployment-id>" },
+      headers: { "idempotency-key": idempotencyKey },
+      body: { content: "Summarize the latest release notes." },
+    }),
+  ),
+);
+```
+
+## Log the request ID
+
+Log `requestId` from the problem details, or the `x-request-id` response header when the body has none, with every failure. The ID lets the platform operator find the request. The `deployments` CLI prints the same ID after its error message, as `(request <request-id>)`.
+
+## Reference
+
+- [Errors](/docs/api/errors) and [Idempotency](/docs/api/idempotency) in the API guide
+- [Making requests](/docs/sdk/making-requests)
+- [Output, scripting, and exit codes](/docs/cli/output-and-scripting) for how the CLI maps the same statuses to exit codes

@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/api-contract",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/api-contract.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../agent-manifest" },
+    { "path": "../observability" },
+    { "path": "../tenant-limits" }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/functions/channel-provider-runtime",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/functions/channel-provider-runtime.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/agent-manifest" },
+    { "path": "../../packages/channel-adapters" },
+    { "path": "../../packages/credential-vault" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/events" },
+    { "path": "../../packages/file-text" },
+    { "path": "../../packages/ingress-media" },
+    { "path": "../../packages/net-security" },
+    { "path": "../../packages/organization-admission" },
+    { "path": "../../packages/providers" },
+    { "path": "../../packages/secret-store" },
+    { "path": "../../packages/streaming" },
+    { "path": "../../packages/tools" }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/event-analytics-operator",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/event-analytics-operator.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"]
+}

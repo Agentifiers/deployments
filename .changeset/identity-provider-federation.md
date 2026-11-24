@@ -1,0 +1,6 @@
+---
+"@deployments-ai/cli": minor
+"@deployments-ai/sdk": minor
+---
+
+Add sign-in through an organization's own OIDC identity provider. Organizations prove email domains with a DNS TXT record through `listLoginDomains`, `addLoginDomain`, `verifyLoginDomain`, and `removeLoginDomain` (`/v1/login-domains`), and configure one provider through `getIdentityProvider`, `putIdentityProvider`, `setIdentityProviderState`, and `deleteIdentityProvider` (`/v1/identity-provider`). `listIdentityProviderLinks` and `deleteIdentityProviderLink` list and remove federated account links. These operations take the `x-deployments-organization` header and need the owner or admin role, with `members:read` for reads and `members:write` for changes. Only an owner who signed in through the provider can set its enforcement to `required`. While enforcement is required, a member who is not an owner can use the organization only with tokens from a sign-in through the provider in the last 12 hours, and other tokens get 403 `organization_sso_required` from the platform, runtime, and memory APIs. The CLI adds `deployments login-domain list`, `add`, `verify`, and `remove`, and `deployments identity-provider show`, `set`, `set-state`, `delete`, `links`, and `unlink`.

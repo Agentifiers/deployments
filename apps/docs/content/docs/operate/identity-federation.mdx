@@ -1,0 +1,540 @@
+---
+title: "Identity federation"
+description: "Let an organization's members sign in through its own OpenID Connect or SAML 2.0 identity provider: login domain verification, provider setup, IdP-initiated sign-in, account linking, just-in-time membership, SSO enforcement, recovery, and the infrastructure behind it."
+---
+
+An organization can let its members sign in through its own identity provider, such as Microsoft Entra ID, Google Workspace, or Okta. The provider speaks either OpenID Connect (OIDC) or SAML 2.0. Each organization has at most one provider, so it uses one protocol at a time. The organization first proves with a DNS TXT record that it controls the email domains the provider may assert. An owner can then require sign-in through the provider for every human access path.
+
+<Callout type="warn" title="Availability">
+  Federation is part of platform identity, which runs when `platform_identity_enabled` is `true`.
+  The customer root defaults it to `true`, and the deploy tool also sets it to `true` in the
+  variables it generates, so every deploy-tool installation runs platform identity. Without platform
+  identity, the API does not serve the login domain and identity provider routes.
+</Callout>
+
+## Who can administer federation
+
+| Action                                        | Organization role | Token scope     |
+| --------------------------------------------- | ----------------- | --------------- |
+| Read login domains, the provider, and links   | Owner or admin    | `members:read`  |
+| Change login domains, the provider, and links | Owner or admin    | `members:write` |
+| Set the provider's enforcement to `required`  | Owner only        | `members:write` |
+
+Platform administrators pass both role checks. In the console, owners and admins see **Sign-in** in the organization navigation. The page has three sections: the identity provider, login domains, and linked accounts. Only owners can require sign-in through the provider there.
+
+## Verify a login domain
+
+A login domain tells the platform which email addresses the provider may assert for the organization. Domains are compared exactly. A verified `example.com` does not cover `mail.example.com`.
+
+1. Add the domain:
+
+   ```bash
+   deployments login-domain add --domain example.com --org <organization-id>
+   ```
+
+   The response includes `dnsRecord`. Its name is `_deployments-login.example.com`, its type is `TXT`, and its value is `deployments-login=<token>`, where the token is 32 hex characters.
+
+2. Publish that TXT record in the domain's DNS. Other TXT records at the same name can stay.
+
+3. Verify the domain:
+
+   ```bash
+   deployments login-domain verify <domain-id> --org <organization-id>
+   ```
+
+The platform API resolves the TXT record during the verify call. When no record at that name contains the value, or the name does not exist, the call fails with 422 `txt_not_found`. When the lookup itself fails, it fails with 503 `dns_lookup_failed`, and you can retry. Verifying a domain that is already verified returns it unchanged without a DNS lookup.
+
+Any number of organizations can add the same domain as `pending`, but only one can verify it. Another organization's verify call fails with 409 `domain_claimed`. Removing a domain releases its claim. The platform never checks DNS again after a domain is verified, so deleting the TXT record later changes nothing.
+
+The API lowercases the domain you enter. A login domain is an ASCII host name of 4 to 253 characters with at least two labels. Enter an internationalized domain in its `xn--` form. Adding the same domain twice to one organization fails with 409 `login_domain_exists`.
+
+## Configure an OpenID Connect provider
+
+1. In your identity provider, register a web application that uses the authorization code flow with a client secret. Set its redirect URI to the platform issuer followed by `/oauth2/federation/callback/<organizationId>`. The issuer is `https://` plus your `platform_identity_domain_name`, so with `auth.example.com` the redirect URI is `https://auth.example.com/oauth2/federation/callback/<organizationId>`. Every provider response returns the exact value as `redirectUri`, and the console shows it with a copy button.
+
+2. Save the provider. Pass the client secret through an environment variable or a file rather than on the command line:
+
+   ```bash
+   deployments identity-provider set --org <organization-id> --display-name "Example SSO" --issuer https://login.example.com --client-id <client-id> --client-secret-env EXAMPLE_SSO_SECRET --jit '{"kind":"disabled"}'
+   ```
+
+3. Sign in through the provider yourself to test it. See [how members sign in](#how-members-sign-in).
+
+4. To require the provider, see [require sign-in through the provider](#require-sign-in-through-the-provider).
+
+### Discovery checks
+
+Every save reads `<issuer>/.well-known/openid-configuration` and checks it. Saving again therefore picks up endpoints or algorithms that the provider changed.
+
+- The issuer must be an `https:` URL without credentials, query, or fragment.
+- The document's `issuer` must equal the issuer you entered, exactly.
+- The authorization, token, and JWKS endpoints must use `https:`.
+- When the document has `userinfo_endpoint`, that endpoint must use `https:` too. The platform stores it for the [callback](#the-openid-connect-callback). A provider saved before the platform stored userinfo endpoints has none, so save it again to store one. Saving again with the same issuer and client ID keeps the `connectionId` and needs no secret.
+- `response_types_supported` must include `code`.
+- The provider must sign ID tokens with `RS256`, `PS256`, or `ES256`. The platform keeps the advertised algorithms from that list, and assumes `RS256` when the document lists none.
+- The token endpoint must accept `client_secret_basic` or `client_secret_post`. The platform prefers `client_secret_basic`, and assumes it when the document lists no methods.
+
+The request goes over HTTPS pinned to the addresses DNS returned, which must be public. It has a 5-second timeout and a 256 KiB body limit. A failed check answers 422 with the check's code:
+
+| Code                                      | Meaning                                                                    |
+| ----------------------------------------- | -------------------------------------------------------------------------- |
+| `issuer_invalid`                          | The issuer is not an `https:` URL without credentials, query, or fragment. |
+| `idp_url_not_allowed`                     | The URL does not use `https:` or does not resolve to public addresses.     |
+| `idp_request_failed`                      | The request failed or timed out.                                           |
+| `discovery_failed`                        | The document could not be read or has a malformed field.                   |
+| `discovery_issuer_mismatch`               | The document names a different issuer.                                     |
+| `discovery_insecure_endpoint`             | An endpoint is not `https:`.                                               |
+| `discovery_code_flow_unsupported`         | `response_types_supported` lacks `code`.                                   |
+| `discovery_signing_algorithm_unsupported` | The provider signs with none of `RS256`, `PS256`, or `ES256`.              |
+| `discovery_client_auth_unsupported`       | The provider supports neither client secret method.                        |
+
+Field limits are 120 characters for `displayName`, 2,048 for `issuer`, 512 for `clientId`, and 4,096 for `clientSecret`. The platform always requests the scopes `openid email profile`. Scopes are not configurable.
+
+### OpenID Connect provider notes
+
+- **Okta.** Okta's ID token from the authorization code flow has no `email_verified` claim. Okta returns that claim from its userinfo endpoint, which the platform requests at sign-in. Okta needs no extra claim configuration.
+- **Microsoft Entra ID.** In the app registration's token configuration, add the `email` and `xms_edov` optional claims to the ID token. Entra ID's ID token has no `email_verified` claim, so without `xms_edov` the platform cannot tell that Entra ID verified the address, and the sign-in fails.
+- **Google Workspace.** Google's ID token has `email_verified` and the `hd` claim. The `hd` claim must equal the email's domain, so a consumer Google account cannot sign in.
+
+### Client secret and connection
+
+The platform API seals the client secret with the federation KMS key. Only the identity service can open it. The encryption context binds the secret to the organization, the provider's `connectionId`, and the purpose `identity-provider-client-secret`. The secret is write-only and never appears in a response.
+
+`connectionId` names one connection to one provider client. Saving with the same issuer and client ID keeps it, and the secret is then optional. Changing the issuer or the client ID creates a new `connectionId` and requires a new secret, or the save fails with 422 `client_secret_required`. If the provider is active, the change also resets enforcement to `optional`, because nobody has signed in through the new connection yet. Sign-ins in flight under the old connection fail with `connection_changed`, and federated grants from the old connection stop counting.
+
+## Configure a SAML provider
+
+The platform is the SAML service provider. It sends unsigned authentication requests over the HTTP-Redirect binding and receives responses at an HTTP-POST assertion consumer service (ACS). It asks for no encryption, so the identity provider needs no platform certificate.
+
+### Service provider values
+
+Each organization has its own service provider values, built from the platform issuer and the organization ID. With the issuer `https://auth.example.com`, they are:
+
+| Value        | URL                                                       |
+| ------------ | --------------------------------------------------------- |
+| Entity ID    | `https://auth.example.com/saml/<organizationId>`          |
+| ACS URL      | `https://auth.example.com/saml/<organizationId>/acs`      |
+| Metadata URL | `https://auth.example.com/saml/<organizationId>/metadata` |
+
+A SAML provider response returns the three values as `serviceProvider`. The console shows them with copy buttons, before the first save too. The metadata URL serves an `EntityDescriptor` as `application/samlmetadata+xml`. It declares `AuthnRequestsSigned="false"`, `WantAssertionsSigned="true"`, the NameID formats `persistent` and then `emailAddress`, and the ACS URL with the HTTP-POST binding.
+
+### Set up the SAML application
+
+1. In your identity provider, create a SAML 2.0 application. Enter the entity ID and the ACS URL from the [service provider values](#service-provider-values), or import the metadata URL if the identity provider accepts one.
+
+2. Send a persistent `NameID` that never changes for the user. See [send a persistent NameID](#send-a-persistent-nameid). Then decide how the assertion carries the email address. See [which email a SAML sign-in uses](#which-email-a-saml-sign-in-uses).
+
+3. Save the provider with the identity provider's metadata URL:
+
+   ```bash
+   deployments identity-provider set --org <organization-id> --protocol saml --display-name "Example SSO" --metadata-url https://idp.example.com/app/metadata --jit '{"kind":"disabled"}'
+   ```
+
+   To save a metadata file instead, pass `--metadata-file ./idp-metadata.xml`. Pass `--email-attribute <name>` when the email is in an attribute the platform does not read by default. Pass `--unsolicited-sign-in enabled` to allow [IdP-initiated sign-in](#idp-initiated-saml-sign-in).
+
+4. Sign in through the provider yourself to test it. See [how members sign in](#how-members-sign-in).
+
+5. To require the provider, see [require sign-in through the provider](#require-sign-in-through-the-provider).
+
+### Send a persistent NameID
+
+The platform links a member to the `NameID` value. Send the `persistent` format with a value the identity provider never changes or reuses, such as its internal user ID. An email address makes a risky `NameID`:
+
+- When a person's email address changes, the `NameID` changes with it. The next sign-in finds no link and goes through the [linking rules](#linking-rules) for the new address, which creates a second account when no principal has that address.
+- When the organization gives a departed person's mailbox to someone else, the new person's `NameID` equals the old one. The new person then signs in as the departed person's linked account.
+
+With a `persistent` `NameID`, the email comes from an attribute. A configured email attribute also wins over an `emailAddress` `NameID`. See [which email a SAML sign-in uses](#which-email-a-saml-sign-in-uses).
+
+### Okta
+
+1. In the Okta Admin Console, create an app integration with the sign-in method **SAML 2.0**.
+2. Set **Single sign-on URL** to the ACS URL and **Audience URI (SP Entity ID)** to the entity ID.
+3. Set **Name ID format** to **Persistent** and **Application username** to **Custom** with the expression `user.id`. Add an attribute statement named `email` with the value `user.email`, which the platform reads by default.
+4. On the application's **Sign On** tab, copy the **Metadata URL** and save it with `--metadata-url`.
+
+An Okta dashboard tile starts an IdP-initiated sign-in. The tile works only after you turn on [IdP-initiated sign-in](#idp-initiated-saml-sign-in).
+
+### Microsoft Entra ID
+
+1. In the Microsoft Entra admin center, create an enterprise application of your own, then choose **SAML** as its single sign-on method.
+2. In **Basic SAML Configuration**, set **Identifier (Entity ID)** to the entity ID and **Reply URL (Assertion Consumer Service URL)** to the ACS URL.
+3. In **Attributes & Claims**, edit the **Unique User Identifier (Name ID)**. Set its format to **Persistent** and its source attribute to `user.objectid`. Entra ID sends the email in the `http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress` claim by default, and the platform reads that claim.
+4. In **SAML Certificates**, copy the **App Federation Metadata Url** and save it with `--metadata-url`. You can also download **Federation Metadata XML** and save it with `--metadata-file`.
+
+The **My Apps** portal starts an IdP-initiated sign-in. It works only after you turn on [IdP-initiated sign-in](#idp-initiated-saml-sign-in).
+
+### Metadata URL or metadata document
+
+With a metadata URL, the platform API fetches the document on every save, over HTTPS pinned to public addresses, with a 5-second timeout and a 256 KiB body limit. The response returns the URL as `metadataUrl`. Nothing fetches it between saves.
+
+With a metadata document, you paste or upload the XML, up to 262,144 characters. The platform keeps only what it reads from the document: the entity ID, the HTTP-Redirect single sign-on URL, and the signing certificates. Every SAML save needs metadata, so to change any setting of a provider saved from a document, supply the document again.
+
+### Metadata checks
+
+The metadata must be one `EntityDescriptor` with exactly one SAML 2.0 `IDPSSODescriptor`. That descriptor needs a `SingleSignOnService` with the HTTP-Redirect binding at an `https:` location, and between one and four RSA signing certificates. The entity ID must be an absolute URI of at most 512 characters. A failed check answers 422:
+
+| Code                                       | Meaning                                                                                     |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| `idp_url_not_allowed`                      | The metadata URL does not use `https:` or does not resolve to public addresses.             |
+| `idp_request_failed`                       | The fetch failed, timed out, exceeded 256 KiB, or did not answer 200.                       |
+| `metadata_xml_malformed`                   | The metadata is not well-formed XML.                                                        |
+| `metadata_doctype_forbidden`               | The metadata contains a DOCTYPE.                                                            |
+| `metadata_entities_descriptor_unsupported` | The root is an `EntitiesDescriptor`. Supply the identity provider's own `EntityDescriptor`. |
+| `metadata_not_entity_descriptor`           | The root element is not an `EntityDescriptor`.                                              |
+| `metadata_entity_id_invalid`               | The `entityID` is not an absolute URI of at most 512 characters.                            |
+| `metadata_idp_descriptor_count`            | The metadata does not contain exactly one SAML 2.0 `IDPSSODescriptor`.                      |
+| `metadata_redirect_binding_missing`        | No `SingleSignOnService` uses the HTTP-Redirect binding.                                    |
+| `metadata_sso_url_not_https`               | The HTTP-Redirect `SingleSignOnService` location does not use `https:`.                     |
+| `metadata_signing_certificate_missing`     | The metadata has no signing certificate.                                                    |
+| `metadata_signing_certificate_count`       | The metadata lists more than four signing certificates.                                     |
+| `metadata_signing_certificate_invalid`     | A signing certificate is not a valid X.509 certificate.                                     |
+| `metadata_signing_certificate_unsupported` | A signing certificate does not use an RSA key.                                              |
+
+Field limits are 120 characters for `displayName` and 256 for `emailAttribute`. A body that matches neither protocol, for example one with both `metadata.url` and `metadata.document`, fails with 422 `validation_failed`.
+
+### Signing certificates and rollover
+
+The platform trusts the signing certificates in the `IDPSSODescriptor` and ignores any certificate inside a response. The response lists each one as `signingCertificates`, with its SHA-256 fingerprint in colon-separated uppercase hex, as `openssl x509 -fingerprint -sha256` prints it, and its `notAfter` expiry. The console shows both.
+
+Nothing refreshes the certificates on its own. Save the provider with a metadata URL to roll over a certificate and keep the [connection](#what-keeps-a-saml-connection):
+
+1. Add the new certificate in the identity provider, so its metadata lists the old and the new certificate.
+2. Save the provider again with the same metadata URL. The same `identity-provider set` command or **Save** in the console does it.
+3. Make the new certificate active in the identity provider.
+4. After the old certificate is gone from the metadata, save once more.
+
+A provider saved from a metadata document has no URL to vouch for new certificates. Pasting metadata with different certificates starts a new connection.
+
+### What keeps a SAML connection
+
+An entity ID is whatever an admin types, so it proves nothing on its own. A SAML connection is the set of signing certificates the platform trusts for that entity ID. A save keeps the `connectionId` when the entity ID stays the same and one of these holds:
+
+- The signing certificates are the same set as before.
+- The metadata came from the same metadata URL as the last save. The HTTPS fetch from that URL vouches for the new certificates.
+
+The single sign-on URL and the sign-in settings do not affect the connection. Every other save starts a new connection: pasted metadata with different certificates, a changed or removed metadata URL with different certificates, a new entity ID, or a [protocol switch](#switch-protocols).
+
+Links belong to the connection, so a new connection never reuses the old links. Every linked member confirms the mailbox once at the next sign-in, through the [linking rules](#linking-rules). If the provider is active, enforcement returns to `optional`. Sign-ins in flight under the old connection fail with `connection_changed`, and federated grants from the old connection stop counting.
+
+## Switch protocols
+
+Saving the other protocol replaces the whole provider and creates a new `connectionId`. The effects follow from that:
+
+- Links belong to the old connection. Each linked member's next sign-in goes through the [linking rules](#linking-rules) again, so a member with an existing account confirms the mailbox once.
+- If the provider is active with enforcement `required`, enforcement resets to `optional`. An owner requires it again after signing in through the new connection.
+- A switch to OIDC needs a client secret, or the save fails with 422 `client_secret_required`. A switch to SAML deletes the stored client secret.
+- A disabled provider stays disabled.
+
+Before you save a switch, the console warns you and shows how many linked members it affects.
+
+## Provider state
+
+| State                            | Effect                                                                                     |
+| -------------------------------- | ------------------------------------------------------------------------------------------ |
+| `active`, enforcement `optional` | Members may sign in through the provider. Nothing requires it.                             |
+| `active`, enforcement `required` | Members other than owners need a federated grant. See [SSO enforcement](#sso-enforcement). |
+| `disabled`                       | Sign-in through the provider stops. Settings, links, and the secret stay.                  |
+
+A new provider starts `active` with enforcement `optional`. Change the state with `deployments identity-provider set-state`:
+
+```bash
+deployments identity-provider set-state --kind disabled --org <organization-id>
+deployments identity-provider set-state --kind active --enforcement optional --org <organization-id>
+```
+
+A disabled provider never requires SSO, so disabling it cannot lock anyone out.
+
+## How members sign in
+
+The platform sign-in page asks for an email address first. If the address's domain is a verified login domain of an organization whose provider is `active`, the page offers single sign-on through that provider and names it. Otherwise it asks for a password.
+
+Continuing with single sign-on starts the sign-in. The platform sets a short-lived binding cookie in the browser and redirects to the provider. A sign-in attempt lives 10 minutes and can complete once.
+
+- For OIDC, the redirect carries `state`, a nonce, PKCE `S256`, and the scope `openid email profile`, plus the email address as `login_hint` when the page has it. The binding cookie is `SameSite=Lax`.
+- For SAML, the redirect carries an unsigned `AuthnRequest` over the HTTP-Redirect binding, with the attempt's ID as `RelayState`. The request ID derives from the binding cookie. The binding cookie is `SameSite=None; Secure`, because the identity provider posts the response back from its own site. SAML sends no `login_hint`.
+
+An application can send `organization_hint=<organizationId>` to `/oauth2/authorize`. The hint only picks a route and grants nothing. Authorization continues when the browser has a session and one of these holds:
+
+- The organization does not require SSO.
+- The member is an owner.
+- The browser signed in through the provider within the last 12 hours, on the current connection.
+
+Otherwise the browser goes to `/sign-in?organization=<organizationId>`, which shows that organization's provider button. The platform never redirects to a provider straight from the hint, so another site cannot force a cross-site login.
+
+### The OpenID Connect callback
+
+The provider redirects to `/oauth2/federation/callback/<organizationId>` on the identity host. The identity service then checks:
+
+1. The binding cookie matches `state`. The attempt is pending, unexpired, for this organization, and on the provider's current `connectionId`.
+2. When the provider sends `iss`, it equals the issuer.
+3. The code is exchanged once, with no retry.
+4. The ID token verifies against the provider's JWKS with a discovered algorithm. Its `aud` equals the client ID, its `iss` equals the issuer, its nonce matches, and it carries `exp`. The token may be at most 10 minutes old, and clocks may differ by 60 seconds. When `azp` is present, or `aud` names several clients, `azp` must equal the client ID.
+5. If the ID token has neither a boolean `email_verified` nor a boolean `xms_edov`, the identity service sends the access token to the provider's userinfo endpoint. It skips this step when the provider has no stored userinfo endpoint or the token response carried no `Bearer` access token. The userinfo response must be a JSON object, not a signed JWT, and its `sub` must equal the ID token's `sub`. The platform then takes `email`, `email_verified`, and `hd` from the userinfo response only, even when the ID token has one of them. It takes `name` from the ID token, or from the userinfo response when the ID token has none.
+6. The email is vouched for. Either `email_verified` is `true`, or Entra ID sets `xms_edov` to `true`. For the issuer `https://accounts.google.com`, the `hd` claim must also equal the email's domain, because a consumer Google account can hold any verified address.
+7. The [linking rules](#linking-rules) decide which principal signs in.
+
+On success the browser gets an identity session and returns to where sign-in started.
+
+When a client asks for a fresh login with `prompt=login` or `max_age=0`, the platform forwards `prompt=login` and `max_age=0` to the provider. The ID token must then carry an `auth_time` no earlier than the start of the sign-in, less 60 seconds. Otherwise the sign-in fails with `id_token_reauthentication_missing`.
+
+### The SAML assertion consumer service
+
+The identity provider posts a form with `SAMLResponse` to `/saml/<organizationId>/acs` on the identity host. The ACS takes no origin or CSRF check, because the identity provider sends the post. The identity service checks:
+
+1. The form body is at most 128 KiB as API Gateway delivers it. A larger body gets 413, and a body that is not form-encoded gets 400. Real signed responses run to tens of KiB.
+2. The response is well-formed XML without a DOCTYPE. Its root is a `samlp:Response` with the status `Success`, and it holds exactly one assertion. An encrypted assertion is refused.
+3. The assertion carries one enveloped signature over the assertion itself, with `rsa-sha256` or `rsa-sha512` and a SHA-256 or SHA-512 digest. The signature must verify against one of the saved signing certificates. The identity service does not check a signature on the `Response`.
+4. The assertion's `Issuer` equals the saved entity ID. Every `AudienceRestriction` names the service provider entity ID.
+5. The assertion has exactly one bearer `SubjectConfirmationData`. Its `Recipient` equals the ACS URL, and it carries `NotOnOrAfter`. When the response has a `Destination`, it equals the ACS URL too.
+6. No `IssueInstant` or `NotBefore` is more than 60 seconds in the future, and no `NotOnOrAfter` passed more than 60 seconds ago.
+7. The `NameID` has a value and is not `transient`. The assertion has an `AuthnStatement`.
+8. When the signed `SubjectConfirmationData` carries `InResponseTo`, the response answers a request the platform sent. The value must match the request ID of the attempt bound to the browser, and the attempt must be pending, unexpired, for this organization, and on the current `connectionId`. A response with no `InResponseTo` is an [IdP-initiated sign-in](#idp-initiated-saml-sign-in).
+9. The identity service picks the [email](#which-email-a-saml-sign-in-uses), and the [linking rules](#linking-rules) decide which principal signs in.
+
+On success the identity service answers 303 to where sign-in started, clears the binding cookie, and sets the identity session. A failure after the identity service used up the sign-in attempt also clears the binding cookie. Any other failed post leaves it in place, so a forged post from another site cannot cancel a sign-in in progress.
+
+When a client asks for a fresh login with `prompt=login` or `max_age=0`, the `AuthnRequest` sets `ForceAuthn="true"`. The assertion's `AuthnInstant` must then be no earlier than the start of the sign-in, less 60 seconds. Otherwise the sign-in fails with `reauthentication_required`.
+
+### Which email a SAML sign-in uses
+
+The identity service takes the email from the first source that applies:
+
+1. The configured email attribute. When you set one, the identity service reads no other source, not even an `emailAddress` `NameID`.
+2. A `NameID` with the format `urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress`.
+3. The first of these attributes that the assertion carries: `email`, `mail`, `http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress`, and `urn:oid:0.9.2342.19200300.100.1.3`.
+
+When the chosen attribute holds more than one distinct value, the sign-in fails with 502 `email_ambiguous`. When no source applies, it fails with 403 `email_missing`.
+
+SAML has no claim like `email_verified`. The verified login domain is the authority instead. A sign-in without a link admits the email only when its domain is a verified login domain of the organization. A linked principal's primary email domain must be one too, as for OIDC.
+
+### IdP-initiated SAML sign-in
+
+An IdP-initiated sign-in starts from the identity provider's app list instead of the platform sign-in page. It is off by default. Turn it on with `--unsolicited-sign-in enabled` or the **IdP-initiated sign-in** switch in the console. While it is off, such a sign-in fails with 403 `unsolicited_disabled`.
+
+Another site can post a valid assertion for its own account to a victim's browser. The platform therefore never signs a browser in straight from an unsolicited response. The ACS checks the response as above, plus these rules:
+
+- The assertion's `IssueInstant` is at most 5 minutes old by the identity service's clock, with the 60-second clock allowance. An older response fails with 400 `response_stale`.
+- Each assertion works once. The identity service keeps the issuer and the assertion ID until at least 8 minutes after `IssueInstant`, longer than it accepts the assertion. A second post fails with 400 `assertion_replayed`.
+- The assertion carries an email. Otherwise the post fails with 403 `email_missing`.
+
+The ACS then answers 303 to `/federation/confirm-sign-in#token=<token>`. The token sits in the URL fragment, so it never reaches server logs or a `Referer` header. It works for 5 minutes after the response arrived, however old its `IssueInstant` is. The page posts the token to `/v1/auth/federation/unsolicited/resume`:
+
+- When the browser already has a session for the linked principal, the sign-in completes with no question.
+- Otherwise the page shows the organization, the provider, and the account that will sign in, and asks the person to continue. When the `NameID` is linked, the page shows the linked principal's primary email. Otherwise it shows the asserted email. **Continue** posts to `/v1/auth/federation/unsolicited/confirm`, which applies the [linking rules](#linking-rules). It signs the person in, or emails a mailbox confirmation for an existing account. **Cancel** returns to the sign-in page.
+
+`RelayState` chooses where the browser goes after the sign-in. The identity service accepts only a relative path that starts with `/oauth2/authorize`. Any other value, or none, sends the browser to the identity service's application origin, `DEPLOYMENTS_AI_IDENTITY_APPLICATION_ORIGIN`.
+
+### Sign-in failures
+
+A failed OIDC callback or SAML ACS post shows an error page with one of these reasons. The IdP-initiated confirmation page shows the same reasons.
+
+| Status | Reason                          | Protocol | Cause                                                                                                                                                                                                                                                                          |
+| ------ | ------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 400    | `binding_missing`               | Both     | The attempt expired or started in another browser.                                                                                                                                                                                                                             |
+| 400    | `state_mismatch`                | Both     | The response does not match the attempt the browser started. For SAML, the signed `InResponseTo` names another request.                                                                                                                                                        |
+| 400    | `transaction_invalid`           | Both     | The attempt expired or was already used.                                                                                                                                                                                                                                       |
+| 400    | `issuer_mismatch`               | OIDC     | The callback's `iss` names a different issuer. A SAML assertion from another issuer fails with 502 `issuer_mismatch` instead.                                                                                                                                                  |
+| 400    | `provider_error`                | OIDC     | The provider returned an error or no code.                                                                                                                                                                                                                                     |
+| 400    | `provider_interaction_required` | OIDC     | The provider answered `login_required`, `consent_required`, or `interaction_required`.                                                                                                                                                                                         |
+| 400    | `reauthentication_required`     | SAML     | The sign-in asked for a fresh login, and the assertion's `AuthnInstant` is older than the start of the sign-in, less 60 seconds.                                                                                                                                               |
+| 400    | `response_stale`                | SAML     | An IdP-initiated response is more than 5 minutes old.                                                                                                                                                                                                                          |
+| 400    | `assertion_replayed`            | SAML     | An IdP-initiated response was already used.                                                                                                                                                                                                                                    |
+| 403    | `provider_access_denied`        | OIDC     | The provider answered `access_denied`.                                                                                                                                                                                                                                         |
+| 403    | `connection_inactive`           | Both     | The provider is not active.                                                                                                                                                                                                                                                    |
+| 403    | `unsolicited_disabled`          | SAML     | The response is IdP-initiated, and IdP-initiated sign-in is off.                                                                                                                                                                                                               |
+| 403    | `email_missing`                 | Both     | The provider sent no email address.                                                                                                                                                                                                                                            |
+| 403    | `email_unverified`              | OIDC     | The provider has not verified the email address. If the provider was saved before the platform stored userinfo endpoints, save it again.                                                                                                                                       |
+| 403    | `hosted_domain_mismatch`        | OIDC     | A Google account's `hd` claim does not match the email's domain.                                                                                                                                                                                                               |
+| 403    | `email_domain_not_verified`     | Both     | The organization has not verified the email's domain.                                                                                                                                                                                                                          |
+| 403    | `principal_ineligible`          | Both     | The account cannot sign in through a provider. See [linking rules](#linking-rules).                                                                                                                                                                                            |
+| 409    | `connection_changed`            | Both     | The organization changed its issuer, client ID, entity ID, or protocol during the sign-in.                                                                                                                                                                                     |
+| 502    | the check's code                | OIDC     | The token exchange, the JWKS, the ID token, or the userinfo check failed, for example `id_token_audience_mismatch`, `userinfo_failed` when the userinfo response is not a JSON object with a `sub`, or `userinfo_subject_mismatch` when its `sub` differs from the ID token's. |
+| 502    | the check's code                | SAML     | The response failed a [SAML response check](#saml-response-checks), or the email attribute held several values (`email_ambiguous`).                                                                                                                                            |
+| 503    | `provider_unavailable`          | OIDC     | The provider answered `server_error` or `temporarily_unavailable`.                                                                                                                                                                                                             |
+| 503    | `sign_in_contention`            | Both     | Concurrent writes collided. Retry.                                                                                                                                                                                                                                             |
+
+### SAML response checks
+
+A SAML response that fails verification gets a 502 page that names one of these codes:
+
+| Code                              | Cause                                                                                                                                             |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `xml_malformed`                   | The response is not well-formed XML, or the form had no `SAMLResponse`.                                                                           |
+| `doctype_forbidden`               | The response contains a DOCTYPE.                                                                                                                  |
+| `not_a_response`                  | The root element is not a `samlp:Response`.                                                                                                       |
+| `status_not_success`              | The status code is not `urn:oasis:names:tc:SAML:2.0:status:Success`.                                                                              |
+| `encrypted_assertion_unsupported` | The response holds an `EncryptedAssertion`.                                                                                                       |
+| `assertion_count`                 | The response does not hold exactly one assertion.                                                                                                 |
+| `signature_missing`               | The assertion is not signed.                                                                                                                      |
+| `signature_algorithm_forbidden`   | The signature uses an algorithm other than `rsa-sha256` or `rsa-sha512`, or a digest other than SHA-256 or SHA-512.                               |
+| `signature_reference_mismatch`    | The signature does not cover exactly the assertion, or the assertion carries more than one signature.                                             |
+| `signature_untrusted`             | No saved signing certificate verifies the signature. After a certificate rollover, [save the provider again](#signing-certificates-and-rollover). |
+| `destination_mismatch`            | The response's `Destination` is not the ACS URL.                                                                                                  |
+| `issuer_mismatch`                 | The assertion's `Issuer` is not the saved entity ID.                                                                                              |
+| `audience_mismatch`               | The assertion has no audience restriction, or one of them does not name the service provider entity ID.                                           |
+| `instant_malformed`               | A timestamp is not an `xs:dateTime` with a time zone.                                                                                             |
+| `not_yet_valid`                   | `IssueInstant` or `NotBefore` is more than 60 seconds in the future.                                                                              |
+| `expired`                         | A `NotOnOrAfter` passed more than 60 seconds ago.                                                                                                 |
+| `subject_missing`                 | The `NameID` is empty, or the subject lacks exactly one bearer confirmation with `NotOnOrAfter`.                                                  |
+| `name_id_transient`               | The `NameID` format is `transient`.                                                                                                               |
+| `recipient_mismatch`              | The confirmation's `Recipient` is not the ACS URL.                                                                                                |
+| `in_response_to_mismatch`         | The response's `InResponseTo` differs from the one in the signed confirmation.                                                                    |
+| `authn_statement_missing`         | The assertion has no `AuthnStatement`.                                                                                                            |
+
+## Linking rules
+
+A link connects one subject to one principal. For OIDC, the subject is the issuer and the ID token's `sub`, and the pair is unique across the installation. For SAML, the subject is the `NameID` value on one [connection](#what-keeps-a-saml-connection), so a SAML assertion never matches an OIDC link or another organization's link. A principal has at most one link per organization.
+
+- **Eligibility.** The provider can sign in only an active human principal with a primary email and no platform role. Platform administrators and non-human principals are never federated.
+- **Existing link.** The provider signs in the linked principal. The asserted email is not consulted, so a link never moves to another principal. The domain of the principal's primary email must still be a verified login domain of the organization at every sign-in.
+- **No link and no account.** If no principal has the asserted email and its domain is verified, the platform creates a principal with that email, marks the email verified, and links it.
+- **No link and an existing account.** If a principal already has the asserted email, the platform does not sign that principal in. It emails a confirmation link to that address instead.
+
+A SAML `NameID` that carries the email address changes when the email changes. The next sign-in then finds no link and goes through these rules again. A `persistent` `NameID` keeps the link across email changes. See [send a persistent NameID](#send-a-persistent-nameid).
+
+### Mailbox confirmation
+
+The confirmation email links to a page that names the provider and the organization and asks the person to connect the account.
+
+- The link lives 30 minutes and works once.
+- It works only in the browser that started the sign-in.
+- Confirming creates the link and ends the principal's existing sessions, including agent-built app sessions. The person then signs in through the provider again.
+
+Mailbox confirmation works for a principal that has no password. Proving the mailbox stops a personal provider account that holds a company address from taking over a principal and its memberships in other organizations.
+
+## Just-in-time membership
+
+`--jit` takes one of these values:
+
+| Value                                | Effect                                             |
+| ------------------------------------ | -------------------------------------------------- |
+| `{"kind":"disabled"}`                | Federated sign-in never adds a membership.         |
+| `{"kind":"enabled","role":"member"}` | A principal with no membership becomes a `member`. |
+| `{"kind":"enabled","role":"viewer"}` | A principal with no membership becomes a `viewer`. |
+
+JIT cannot grant `owner` or `admin`. When JIT is enabled, a federated sign-in adds the principal as an active member with the configured role, but only when the principal has no membership record in the organization. JIT never changes an existing membership, so an invited or removed member stays as they are. Mailbox confirmation does not add a membership. The sign-in that follows it does. The `organization-member.added` event carries `source: "identity-federation"`.
+
+## SSO enforcement
+
+An organization requires SSO when its provider is `active` with enforcement `required`. While it does, a member's access token works for the organization only if a federated grant exists for that token's session, names the same principal and the current `connectionId`, and has not expired. The platform API, the runtime API, the memory runtime, the channel provider runtime, platform human authorization, and the app gateway all apply this check.
+
+- The platform API, runtime API, memory runtime, and channel provider runtime answer 403 `organization_sso_required`. The platform API adds `organizationId` to the problem.
+- The app gateway answers 403 `sso_required` and asks the person to sign in again through the provider.
+- A token without a session claim never satisfies enforcement.
+
+Password sign-in still works. Its tokens fail the check for every organization that requires SSO and work for organizations that do not.
+
+### Federated grants
+
+The platform writes a federated grant when it issues tokens from a federated browser session: at the authorization code exchange, or when a device authorization approved from a federated session polls for its tokens. A password session never produces one.
+
+A grant expires 12 hours after the provider sign-in, or when the token session expires, whichever comes first. A refresh keeps the same session and does not extend the grant. After 12 hours, refreshed tokens are still valid, but they fail enforcement until the person signs in through the provider again.
+
+### Owners skip enforcement
+
+Members with the `owner` role skip enforcement, and so do platform administrators. An owner can sign in with a password and administer the organization even when the provider is down or misconfigured. Keep at least one owner who can sign in with a password.
+
+### Require sign-in through the provider
+
+1. As an owner, sign in through the provider on its current connection.
+2. From that session, set the state:
+
+   ```bash
+   deployments identity-provider set-state --kind active --enforcement required --org <organization-id>
+   ```
+
+The call must carry a token whose federated grant matches the current connection. Otherwise it fails with 409 `enforcement_requires_federated_session`. The rule proves that the connection works before it can lock members out.
+
+## API and CLI
+
+Every route uses platform bearer authentication and the `x-deployments-organization` header. Writes need an `Idempotency-Key`, which the CLI generates. Lists take `cursor` and `limit` from 1 through 100.
+
+| Route                                     | CLI                                       | API reference                                                                              |
+| ----------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `GET /v1/login-domains`                   | `deployments login-domain list`           | [`listLoginDomains`](/docs/api/reference/security/list-login-domains)                      |
+| `POST /v1/login-domains`                  | `deployments login-domain add`            | [`addLoginDomain`](/docs/api/reference/security/add-login-domain)                          |
+| `POST /v1/login-domains/{id}/verify`      | `deployments login-domain verify`         | [`verifyLoginDomain`](/docs/api/reference/security/verify-login-domain)                    |
+| `DELETE /v1/login-domains/{id}`           | `deployments login-domain remove`         | [`removeLoginDomain`](/docs/api/reference/security/remove-login-domain)                    |
+| `GET /v1/identity-provider`               | `deployments identity-provider show`      | [`getIdentityProvider`](/docs/api/reference/security/get-identity-provider)                |
+| `PUT /v1/identity-provider`               | `deployments identity-provider set`       | [`putIdentityProvider`](/docs/api/reference/security/put-identity-provider)                |
+| `PUT /v1/identity-provider/state`         | `deployments identity-provider set-state` | [`setIdentityProviderState`](/docs/api/reference/security/set-identity-provider-state)     |
+| `DELETE /v1/identity-provider`            | `deployments identity-provider delete`    | [`deleteIdentityProvider`](/docs/api/reference/security/delete-identity-provider)          |
+| `GET /v1/identity-provider/links`         | `deployments identity-provider links`     | [`listIdentityProviderLinks`](/docs/api/reference/security/list-identity-provider-links)   |
+| `DELETE /v1/identity-provider/links/{id}` | `deployments identity-provider unlink`    | [`deleteIdentityProviderLink`](/docs/api/reference/security/delete-identity-provider-link) |
+
+`identity-provider set` takes `--display-name` and `--jit` for both protocols, and `--protocol oidc` or `--protocol saml`, which defaults to `oidc`.
+
+- An OIDC provider takes `--issuer`, `--client-id`, and one of `--client-secret`, `--client-secret-env`, or `--client-secret-file`.
+- A SAML provider takes exactly one of `--metadata-url` or `--metadata-file`, plus the optional `--email-attribute` and `--unsolicited-sign-in enabled` or `disabled`.
+
+The CLI refuses a flag that belongs to the other protocol. A link has `id`, `principalId`, `issuer`, `subject`, `createdAt`, and `email` when known. The CLI reference pages for [`identity-provider`](/docs/cli/reference/identity-provider) and [`login-domain`](/docs/cli/reference/login-domain) list every flag.
+
+The routes return these error codes, among others:
+
+| Status | Codes                                                                                                                                                                        |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400    | `missing_organization_context`, `invalid_organization_context`, `missing_idempotency_key`, `invalid_limit`                                                                   |
+| 403    | `insufficient_scope`, `insufficient_role`, `organization_scope_violation`                                                                                                    |
+| 404    | `login_domain_not_found`, `identity_provider_not_found`, `link_not_found`                                                                                                    |
+| 409    | `login_domain_exists`, `login_domain_conflict`, `domain_claimed`, `identity_provider_conflict`, `link_conflict`, `enforcement_requires_federated_session`                    |
+| 422    | `invalid_login_domain`, `txt_not_found`, `client_secret_required`, `validation_failed`, the [discovery codes](#discovery-checks), and the [metadata codes](#metadata-checks) |
+| 503    | `dns_lookup_failed`                                                                                                                                                          |
+
+### Identity routes
+
+The identity host serves the sign-in routes. They take no platform bearer token.
+
+| Route                                          | Purpose                                                                                                                                      |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /v1/auth/federation/start`               | Starts a sign-in from the sign-in page, sets the binding cookie, and returns the provider location.                                          |
+| `GET /oauth2/federation/callback/{orgId}`      | The OIDC callback.                                                                                                                           |
+| `POST /saml/{orgId}/acs`                       | The SAML assertion consumer service. It takes a form-encoded `SAMLResponse` of at most 128 KiB.                                              |
+| `GET /saml/{orgId}/metadata`                   | The service provider metadata, as `application/samlmetadata+xml`. It answers for any organization ID and reads no data.                      |
+| `GET /federation/confirm-sign-in`              | The confirmation page for an IdP-initiated SAML sign-in.                                                                                     |
+| `POST /v1/auth/federation/unsolicited/resume`  | Takes the page's token. Signs in a browser that already has the linked principal's session, or returns what the page shows for confirmation. |
+| `POST /v1/auth/federation/unsolicited/confirm` | Takes the page's token after **Continue**. Signs the person in, or sends a mailbox confirmation.                                             |
+
+The `start`, `resume`, and `confirm` routes check the request origin and the CSRF token. An invalid or expired confirmation token gets 400 `invalid_request`.
+
+## Recovery
+
+### Remove a wrong link
+
+List the organization's links, then delete the wrong one:
+
+```bash
+deployments identity-provider links --org <organization-id>
+deployments identity-provider unlink <link-id> --org <organization-id> --yes
+```
+
+Deleting a link frees the `(issuer, subject)` pair and ends the principal's sessions. The next sign-in through the provider goes through the linking rules again, so it either creates a principal or asks for mailbox confirmation. Federated grants are not deleted. They expire on their own.
+
+### Stop members from signing in through the provider
+
+- To keep the provider but stop requiring it, set enforcement to `optional`.
+- To stop sign-in through the provider, set the state to `disabled`. Links, settings, and the secret stay, so you can turn it back on. Existing sessions are not ended.
+- To remove the provider, run `deployments identity-provider delete --yes`. That deletes the settings and the sealed secret. Links and existing sessions stay.
+- To block federated sign-in for one email domain, remove that login domain. Linked principals whose primary email is in that domain can no longer sign in through the provider.
+
+### Get back in after a lockout
+
+An owner signs in with a password, which enforcement never blocks for owners, and then sets enforcement to `optional` or disables the provider. If an OIDC provider changed its client, an owner saves the new issuer or client ID with a new secret. If a SAML provider changed its entity ID or certificates, an owner saves its new metadata. A new issuer, client ID, or entity ID creates a new `connectionId` and resets enforcement to `optional`.
+
+## Infrastructure
+
+The platform identity module creates the federation key and grants the two services their halves of it. You set nothing beyond `platform_identity_enabled`. The key protects OIDC client secrets only. The platform signs no SAML messages, so SAML needs no key.
+
+| Resource or setting                             | Details                                                                                                                                                                                                         |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| KMS key `alias/identity-federation`             | A symmetric key with rotation on. With `operations.deletion_protection` set, the key is protected from destroy and has a 30-day deletion window. Otherwise its window is `operations.kms_deletion_window_days`. |
+| Identity service permission                     | `kms:Decrypt` on the key, only when the encryption context `purpose` is `identity-provider-client-secret`.                                                                                                      |
+| Platform API permission                         | `kms:GenerateDataKey` on the key with the same condition. The API seals secrets and never opens them.                                                                                                           |
+| `DEPLOYMENTS_AI_IDENTITY_FEDERATION_KMS_KEY_ID` | The key, set on the identity service and on the platform API. The identity service requires it. The platform API serves the federation routes only when it is set.                                              |
+
+For OIDC, the identity service reaches providers over HTTPS pinned to public addresses, so a provider on a private network cannot be used. The identity service caches each provider's JWKS for 10 minutes, and when a token names an unknown key, it refetches at most once a minute. Each provider request at sign-in has a 3-second deadline. A sign-in makes at most four of them in sequence: the token exchange, a JWKS fetch on a cold cache, a refetch when the token names a key that fetch lacked, and the userinfo request. Twelve seconds of provider time fits the identity service's 15-second Lambda timeout.
+
+A SAML sign-in makes no request to the identity provider. The identity service verifies the response against the saved certificates. Only the platform API fetches metadata, when you save a provider by URL, so a metadata URL must also resolve to public addresses.
+
+When `operations.web_application_firewall` is `true`, the identity API stage has an AWS WAF web ACL with the AWS managed common rule set. A SAML response is often larger than the 8 KB body limit of that set's `SizeRestrictions_BODY` rule, so the web ACL runs the rule in count mode. A second rule, `body-size-outside-saml-acs` at priority 2, blocks any request the size rule labeled unless its path matches `^/saml/[0-9A-HJKMNP-TV-Z]{26}/acs$`. Only the ACS accepts a large body, and the identity service limits it to 128 KiB.
+
+For the rest of the identity and session model, see [Security model](/docs/operate/security).

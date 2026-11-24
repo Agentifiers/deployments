@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Prepares an Amp orb with the toolchain and dependencies CI uses (.github/actions/setup-workspace).
+# Amp runs it on a fresh orb and again after restoring a stale snapshot, so every step is idempotent
+# and skips work the snapshot already holds.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step() {
+  local name="$1"
+  shift
+  local started=$SECONDS
+  echo "==> ${name}"
+  "$@"
+  echo "    ${name}: $((SECONDS - started)) s"
+}
+
+# Installs a verified release binary into /usr/local/bin, replacing whatever version is there.
+install_release_binary() {
+  local name="$1" url="$2" sha256="$3" member="$4"
+  local work
+  work="$(mktemp -d)"
+  curl -fsSL --retry 3 -o "${work}/archive" "$url"
+  echo "${sha256}  ${work}/archive" | sha256sum -c --quiet -
+  bsdtar -xf "${work}/archive" -C "$work"
+  sudo install -m 0755 "${work}/${member}" "/usr/local/bin/${name}"
+  rm -rf "$work"
+}
+
+# The orb image ships a newer Bun than the one package.json pins, and bun.lock is written by the pin.
+bun_version="$(jq -r '.packageManager | sub("^bun@"; "")' package.json)"
+install_bun() {
+  if [[ "$(bun --version 2>/dev/null || true)" == "$bun_version" ]]; then
+    echo "    bun ${bun_version} already installed"
+    return
+  fi
+  local sha256
+  sha256="$(
+    curl -fsSL --retry 3 "https://github.com/oven-sh/bun/releases/download/bun-v${bun_version}/SHASUMS256.txt" |
+      awk '$2 == "bun-linux-x64.zip" { print $1 }'
+  )"
+  install_release_binary bun \
+    "https://github.com/oven-sh/bun/releases/download/bun-v${bun_version}/bun-linux-x64.zip" \
+    "$sha256" bun-linux-x64/bun
+  bun --version
+}
+
+tofu_version="$(tr -d '[:space:]' < .opentofu-version)"
+install_tofu() {
+  if [[ "$(tofu version -json 2>/dev/null | jq -r .terraform_version 2>/dev/null || true)" == "$tofu_version" ]]; then
+    echo "    tofu ${tofu_version} already installed"
+    return
+  fi
+  local base="https://github.com/opentofu/opentofu/releases/download/v${tofu_version}"
+  local sha256
+  sha256="$(
+    curl -fsSL --retry 3 "${base}/tofu_${tofu_version}_SHA256SUMS" |
+      awk -v file="tofu_${tofu_version}_linux_amd64.tar.gz" '$2 == file { print $1 }'
+  )"
+  install_release_binary tofu "${base}/tofu_${tofu_version}_linux_amd64.tar.gz" "$sha256" tofu
+  tofu version
+}
+
+# /usr/local/bin precedes the orb image's own Node on PATH.
+node_version="$(tr -d '[:space:]' < .node-version)"
+install_node() {
+  if [[ "$(/usr/local/bin/node --version 2>/dev/null || true)" == "v${node_version}" ]]; then
+    echo "    node ${node_version} already installed"
+    return
+  fi
+  local base="https://nodejs.org/dist/v${node_version}"
+  local file="node-v${node_version}-linux-x64.tar.xz"
+  local work
+  work="$(mktemp -d)"
+  curl -fsSL --retry 3 -o "${work}/${file}" "${base}/${file}"
+  curl -fsSL --retry 3 "${base}/SHASUMS256.txt" | awk -v file="$file" '$2 == file' > "${work}/SHASUMS256.txt"
+  (cd "$work" && sha256sum -c --quiet SHASUMS256.txt)
+  sudo tar -xJf "${work}/${file}" -C /usr/local --strip-components=1 \
+    --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md
+  rm -rf "$work"
+  /usr/local/bin/node --version
+}
+
+install_dependencies() {
+  bun install --frozen-lockfile
+  # `bun run build` installs the SDK generator's own lockfile; do it here so builds work offline.
+  bun install --cwd tools/sdk-codegen --frozen-lockfile
+}
+
+write_orb_guidance() {
+  local guidance="$HOME/.config/amp/AGENTS.md"
+  local marker="<!-- deployments orb guidance -->"
+  mkdir -p "$(dirname "$guidance")"
+  if grep -Fqx "$marker" "$guidance" 2>/dev/null; then
+    echo "    already written"
+    return
+  fi
+  cat >> "$guidance" <<EOF
+
+$marker
+# Deployments repository in an orb
+
+- .agents/setup installed the pinned Bun, Node, and OpenTofu in /usr/local/bin and ran
+  \`bun install --frozen-lockfile\`. Rerun it after changing package.json pins or lockfiles.
+- The orb's NO_PROXY lists 169.254.169.254, which makes
+  apps/durable-streams/src/authenticated-server.test.ts fail. Run tests and the pre-commit
+  signoff with \`NO_PROXY=localhost,127.0.0.1,::1\`.
+- Docker and Postgres are not running, so \`bun run test:postgres\` and the local DynamoDB
+  tests are skipped or need those services started first.
+EOF
+}
+
+[[ "$(uname -m)" == "x86_64" ]] || { echo "Unsupported architecture $(uname -m)." >&2; exit 1; }
+
+step "Bun ${bun_version}" install_bun
+step "OpenTofu ${tofu_version}" install_tofu
+step "Node ${node_version}" install_node
+step "Workspace dependencies" install_dependencies
+step "Orb agent guidance" write_orb_guidance

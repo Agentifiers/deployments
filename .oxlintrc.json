@@ -1,0 +1,63 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "rules": {
+    "no-restricted-properties": [
+      "error",
+      {
+        "object": "mock",
+        "property": "module",
+        "message": "A module mock outlives its test file and reaches every later file in the worker (scripts/run-tests.ts). Spy on the export with spyOn and restore it, or inject the dependency."
+      },
+      {
+        "object": "vi",
+        "property": "mock",
+        "message": "A module mock outlives its test file and reaches every later file in the worker (scripts/run-tests.ts). Spy on the export with spyOn and restore it, or inject the dependency."
+      },
+      {
+        "object": "jest",
+        "property": "mock",
+        "message": "A module mock outlives its test file and reaches every later file in the worker (scripts/run-tests.ts). Spy on the export with spyOn and restore it, or inject the dependency."
+      }
+    ],
+    "typescript/await-thenable": "error",
+    "typescript/no-floating-promises": "error",
+    "typescript/no-base-to-string": "error",
+    "typescript/no-duplicate-type-constituents": "error",
+    "typescript/no-misused-spread": "error",
+    "typescript/no-redundant-type-constituents": "error",
+    "typescript/require-array-sort-compare": "error",
+    "typescript/restrict-template-expressions": "error",
+    "typescript/unbound-method": "error"
+  },
+  "overrides": [
+    {
+      "files": ["apps/console/src/**/*.ts", "apps/console/src/**/*.tsx"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@deployments-ai/api-contract",
+                "allowTypeImports": true,
+                "message": "The contract root pulls node:crypto into the browser through runtime.ts and agent-manifest. Import values from a subpath such as @deployments-ai/api-contract/plan-features; type imports are fine."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "apps/console/src/server/**",
+        "apps/console/src/**/*.test.ts",
+        "apps/console/src/**/*.test.tsx",
+        "apps/console/src/**/*.fixture.ts",
+        "apps/console/src/**/*-fixtures.tsx"
+      ],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "@deployments-ai/streaming",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./client-transport": "./src/client-transport.ts",
+    "./events": "./src/events.ts",
+    "./paths": "./src/paths.ts",
+    "./session-tokens": "./src/session-tokens.ts",
+    "./sessions": "./src/sessions.ts",
+    "./transport": "./src/transport.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@durable-streams/client": "0.2.6"
+  }
+}

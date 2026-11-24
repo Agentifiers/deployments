@@ -1,0 +1,151 @@
+---
+title: "OpenTofu provider"
+description: "Issue an environment API key from OpenTofu and deliver it to AWS Parameter Store without putting the key in state."
+---
+
+The Deployments.ai OpenTofu provider manages one resource, `deployments_environment_credential`. The resource makes sure a named service account and API key exist in one environment, then writes the key to an AWS Systems Manager Parameter Store SecureString parameter. OpenTofu state keeps identifiers only, never the key. Use it to give a service that you deploy with OpenTofu its platform credential.
+
+To keep the same kind of credential outside OpenTofu, use the [credential tool](/docs/operate/platform-credentials)'s `api-key` command. It applies the same rules, keeps a working key across runs, and can also mint the bearer that manages the key from an operator identity.
+
+<Callout type="warn" title="Availability">
+  The provider is not published to a registry. You build it from
+  `infrastructure/terraform-provider-deployments` and install it under the local address
+  `terraform.local/deployments-ai/deployments`, version `0.1.0`. It has one resource and no data
+  sources. Its default API URL is `https://api.us.deployments.ai`, so set `api_url` to your
+  installation's API origin.
+</Callout>
+
+## Install the provider
+
+The build needs Go. From the repository root, run:
+
+```bash
+cd infrastructure/terraform-provider-deployments
+make install
+```
+
+`make install` builds the `terraform-provider-deployments` binary and copies it to `~/.terraform.d/plugins/terraform.local/deployments-ai/deployments/0.1.0/<os>_<arch>/`, a local plugin directory that `tofu init` searches. Set `VERSION` to install under another version.
+
+Then require the provider in your configuration:
+
+```hcl
+terraform {
+  required_providers {
+    deployments = {
+      source  = "terraform.local/deployments-ai/deployments"
+      version = "0.1.0"
+    }
+  }
+}
+```
+
+## Configure the provider
+
+Each attribute falls back to environment variables when you leave it out of the `provider` block.
+
+| Attribute         | Environment fallback                                         | Default                         |
+| ----------------- | ------------------------------------------------------------ | ------------------------------- |
+| `api_key`         | `DEPLOYMENTS_API_KEY`                                        | None. Required.                 |
+| `api_url`         | `DEPLOYMENTS_API_URL`                                        | `https://api.us.deployments.ai` |
+| `organization_id` | `DEPLOYMENTS_ORGANIZATION_ID`, then `DEPLOYMENTS_ORG`        | None. Required.                 |
+| `project_id`      | `DEPLOYMENTS_PROJECT_ID`, then `DEPLOYMENTS_PROJECT`         | None. Required.                 |
+| `environment_id`  | `DEPLOYMENTS_ENVIRONMENT_ID`, then `DEPLOYMENTS_ENVIRONMENT` | None. Required.                 |
+| `aws_region`      | `AWS_REGION`, then `AWS_DEFAULT_REGION`                      | `us-east-2`                     |
+
+`api_key` is sensitive. `api_url` must be an origin with no path, query, or fragment. The provider reads AWS credentials from the AWS SDK default chain and uses `aws_region` for Parameter Store.
+
+The provider sends `organization_id`, `project_id`, and `environment_id` as the `x-deployments-organization`, `x-deployments-project`, and `x-deployments-environment` headers on every request, and a new `idempotency-key` on every write. Use an API key that belongs to that environment and holds the scopes to manage service accounts and API keys. A caller can grant only scopes it holds, so the key also needs every scope you put in `scopes`. See [Service accounts and API keys](/docs/capabilities/service-accounts-and-api-keys).
+
+```hcl
+provider "deployments" {
+  api_url         = "https://api.example.com"
+  organization_id = "org_123"
+  project_id      = "proj_123"
+  environment_id  = "env_123"
+}
+```
+
+## Issue a credential
+
+Point the credential at a Parameter Store path. Do not declare the parameter with `aws_ssm_parameter`: that resource reads the value back into state. The provider creates the parameter on first write.
+
+```hcl
+resource "deployments_environment_credential" "worker" {
+  name        = "worker"
+  scopes      = ["agents:read", "runs:write"]
+  secret_name = "/worker/platform-api-key"
+}
+```
+
+After `tofu apply`, the parameter's current version holds the API key as a SecureString encrypted with the AWS managed key. Your service reads it with `ssm:GetParameter` and decryption.
+
+### Arguments and attributes
+
+| Name                 | Kind                          | Meaning                                                             |
+| -------------------- | ----------------------------- | ------------------------------------------------------------------- |
+| `name`               | Required. Forces replacement. | The name of both the service account and the API key.               |
+| `scopes`             | Required. Forces replacement. | The capability scopes for both the service account and the API key. |
+| `secret_name`        | Required. Forces replacement. | The Parameter Store parameter name that receives the key.           |
+| `id`                 | Computed                      | `<service_account_id>/<api_credential_id>`                          |
+| `service_account_id` | Computed                      | The service account ID.                                             |
+| `api_credential_id`  | Computed                      | The API key ID.                                                     |
+| `key_prefix`         | Computed                      | The key's display prefix.                                           |
+| `secret_arn`         | Computed                      | The ARN of the parameter.                                           |
+| `secret_version_id`  | Computed                      | The parameter version that holds the key.                           |
+
+## What the provider does
+
+On create, the provider runs these steps in order:
+
+1. It lists the environment's service accounts and looks for an active one named `name`. If it finds one with different scopes, it fails with "refusing to widen it". If it finds none, it creates one with `scopes`.
+2. It reads the parameter. A missing parameter counts as empty.
+3. If the parameter already holds an active key for this service account and name, it keeps that key. If that key's scopes differ from `scopes`, it fails with "refusing to widen it".
+4. Otherwise it issues a new API key and checks that the key authenticates with one `GET` request. Then it writes the key to the parameter, creating it or adding a new version.
+
+The check in step 4 uses the first of these scopes that `scopes` contains. If `scopes` contains none of them, create fails, so include at least one.
+
+| Scope             | Request                             |
+| ----------------- | ----------------------------------- |
+| `approvals:read`  | `GET /v1/approvals?limit=1`         |
+| `agents:read`     | `GET /v1/agent-definitions?limit=1` |
+| `channels:read`   | `GET /v1/channel-bindings?limit=1`  |
+| `workspaces:read` | `GET /v1/workspaces?limit=1`        |
+| `tools:read`      | `GET /v1/extensions?limit=1`        |
+| `schedules:read`  | `GET /v1/schedules?limit=1`         |
+| `webhooks:read`   | `GET /v1/webhooks?limit=1`          |
+
+If the check fails, the provider reports the error and does not write the parameter. The key it just issued stays active, so revoke it with `deployments api-key revoke`.
+
+### Refresh, change, and delete
+
+- **Refresh.** The provider looks up the API key by ID and reads the parameter. If the key is missing or no longer active, or the parameter is gone, it removes the resource from state, and the next apply creates it again. Otherwise it refreshes `key_prefix`, `secret_arn`, and `secret_version_id`.
+- **Change.** The resource has no in-place update. A change to `name`, `scopes`, or `secret_name` replaces it. If you change `scopes` and keep `name`, the replacement fails on create, because delete leaves the service account with its old scopes.
+- **Delete.** The provider revokes the API key. It leaves the service account active and leaves the parameter and its last value in place. Revoking a key that is already gone succeeds.
+
+By default OpenTofu destroys the old resource before it creates the replacement. During a replacement, the old key stops working before the new key reaches the parameter.
+
+### Move from Secrets Manager
+
+Releases before Parameter Store wrote the key to a Secrets Manager secret, and their state holds that secret's name. Copy the key to the new parameter, then change `secret_name` to the parameter path and apply:
+
+```bash
+value="$(aws secretsmanager get-secret-value --secret-id <old_secret_name> --query SecretString --output text)"
+printf %s "${value}" | aws ssm put-parameter --name <parameter_name> --type SecureString --value file:///dev/stdin
+unset value
+```
+
+On refresh, the provider forgets a resource whose `secret_name` is not a parameter path. It does not revoke the key. The create that follows finds the copied key in the parameter and keeps it. If you skip the copy, the create issues a new key and the old one stays active until you revoke it. Delete the old secret after the service reads the parameter.
+
+### Import an existing credential
+
+The import ID is the service account ID, the API key ID, and the parameter name, separated by commas:
+
+```bash
+tofu import deployments_environment_credential.worker <service_account_id>,<api_credential_id>,<parameter_name>
+```
+
+## Reference
+
+- API: [Create a service account](/docs/api/reference/tenancy/create-service-account), [Create an API key](/docs/api/reference/tenancy/create-api-credential), [Revoke an API key](/docs/api/reference/tenancy/revoke-api-credential)
+- CLI: [`deployments service-account`](/docs/cli/reference/service-account), [`deployments api-key`](/docs/cli/reference/api-key)
+- Related: [Operator credentials](/docs/operate/platform-credentials), [Service accounts and API keys](/docs/capabilities/service-accounts-and-api-keys), [Security model](/docs/operate/security)

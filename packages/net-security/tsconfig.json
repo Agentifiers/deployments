@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/net-security",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/net-security.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": []
+}

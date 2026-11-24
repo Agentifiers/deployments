@@ -1,0 +1,170 @@
+---
+title: "Streaming"
+description: "Follow run output live through thread stream sessions and the stream gateway, and resume reads from a durable offset."
+---
+
+Every thread has one durable event stream. The platform appends each step of every run on the thread to it: the accepted user message, the reply as the model generates it, tool calls, approvals, artifacts, and the run's end. Read the stream when you want to show a reply while it is generated or react to tool calls and approvals as they happen. To read one thread, you open a short-lived stream session on the API and then read from the stream gateway with the token the session returns.
+
+## Two hosts, two credentials
+
+Reading a stream takes two requests to two different hosts.
+
+| Step            | Request                                       | Host           | Credential                                                                                                                   |
+| --------------- | --------------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Open a session  | `POST /v1/threads/{threadId}/stream-sessions` | API            | An API key or a user sign-in with the `runs:read` scope. A user sign-in also sends the tenant headers.                       |
+| Read the stream | `GET {streamUrl}`                             | Stream gateway | `Authorization: Bearer <accessToken>` from the session. The gateway accepts no other credential and reads no tenant headers. |
+
+Always request the `streamUrl` exactly as the session returns it. The gateway origin depends on the platform deployment, so do not build the URL yourself. [Hosts and environments](/docs/getting-started/hosts-and-environments) lists the origins.
+
+The session token is read-only and covers one thread. It expires five minutes after the API issues it. A token for another thread fails with `stream_scope_violation`. When a token expires, open a new session and continue from the last offset you processed.
+
+## What a session returns
+
+| Field                 | Meaning                                                                                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `accessToken`         | The bearer token for the stream gateway.                                                                                                                      |
+| `streamUrl`           | The absolute URL of this thread's stream on the gateway.                                                                                                      |
+| `history`             | The first page of the thread's stored messages, oldest first, at most 15.                                                                                     |
+| `historyNextCursor`   | Present when the thread has more messages. Pass it as `cursor` to [list thread messages](/docs/api/reference/runtime/list-thread-messages) for the next page. |
+| `session.offset`      | The stream offset the platform captured before it read `history`. Start reading here so you miss nothing that happened after the snapshot.                    |
+| `session.replayState` | The message IDs that `history` already contains. Skip stream events for those messages so you do not render a message twice.                                  |
+| `session.expiresAt`   | When `accessToken` stops working.                                                                                                                             |
+
+The platform reads the offset first and the history second. A message that arrives in between appears in both places, and `replayState` is how you drop the duplicate.
+
+## Read from an offset
+
+The gateway serves one operation, [read thread stream](/docs/api/reference/runtime/read-thread-stream), with three query parameters:
+
+| Parameter | Values                                                                                                                                             |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `offset`  | Where to start. Use `session.offset`, or `-1` to read the thread's stream from the beginning. After each read, use the offset the gateway returns. |
+| `cursor`  | The cursor from the previous read. Send it back unchanged.                                                                                         |
+| `live`    | Omit it for a catch-up read. `long-poll` waits for the next events. `sse` keeps a `text/event-stream` response open.                               |
+
+A catch-up read returns a JSON array of events and these response headers:
+
+| Header               | Meaning                                                       |
+| -------------------- | ------------------------------------------------------------- |
+| `stream-next-offset` | The offset to send on the next read.                          |
+| `stream-cursor`      | The cursor to send on the next read.                          |
+| `stream-up-to-date`  | `true` when you have read everything written so far.          |
+| `stream-closed`      | `true` when the stream is closed and receives no more events. |
+
+With `live=sse`, the gateway sends two kinds of events. A `data` event carries a JSON array of stream events. A `control` event carries `streamNextOffset`, `streamCursor`, `upToDate`, and `streamClosed`. Events become durable only when the `control` event that follows them reports the next offset. If the connection drops before that `control` event, read again from the last `control` offset and the gateway sends those events again. The server also closes SSE responses from time to time, so reconnect from the last `control` offset when that happens.
+
+Persist the offset you have processed, not the offset you have received. A reader that restarts from its last processed offset sees every event at least once.
+
+## Event envelope
+
+Every stream event is a JSON object with these fields:
+
+| Field                                                          | Meaning                                                                                       |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `eventId`                                                      | A unique ID for this event. Use it to drop duplicates.                                        |
+| `eventType`                                                    | One of the types below.                                                                       |
+| `occurredAt`                                                   | An ISO 8601 timestamp.                                                                        |
+| `organizationId`, `projectId`, `environmentId`, `threadId`     | The thread's scope.                                                                           |
+| `runId`, `messageId`, `toolCallId`, `approvalId`, `artifactId` | Correlation IDs. Each event type carries the ones listed in the next table.                   |
+| `actor`                                                        | Optional. `type` is `agent`, `service`, `system`, `user`, or `worker`, with an optional `id`. |
+| `payload`                                                      | Event-specific JSON.                                                                          |
+
+| Event type                                                                               | Always carries        |
+| ---------------------------------------------------------------------------------------- | --------------------- |
+| `user-message.accepted`                                                                  | `messageId`, `runId`  |
+| `assistant-token.chunk`, `assistant-message.finalized`                                   | `messageId`, `runId`  |
+| `agent.plan.updated`, `agent.task.updated`                                               | `runId`               |
+| `run.started`, `run.progress`, `run.completed`, `run.failed`, `run.canceled`             | `runId`               |
+| `tool.requested`, `tool.policy-decided`, `tool.running`, `tool.completed`, `tool.failed` | `runId`, `toolCallId` |
+| `approval.requested`, `approval.resolved`                                                | `approvalId`, `runId` |
+| `artifact.available`                                                                     | `artifactId`, `runId` |
+| `stream.closed`                                                                          | No correlation ID     |
+
+The stream holds every run on the thread, so filter by `runId` when you follow one run. `run.completed`, `run.failed`, and `run.canceled` end a run. Ignore event types you do not recognize, because the list can grow.
+
+### Assistant text
+
+An `assistant-token.chunk` payload has `modelCallId`, `sequence`, and `text`. `modelCallId` identifies one streamed model call. It changes when the run is retried or requeued, and a new value replaces any partial text from an earlier one. `sequence` starts at 0 within one `modelCallId`. Treat chunks as a preview of the reply. After `assistant-message.finalized`, read the stored reply with [get run message](/docs/api/reference/runtime/get-run-message).
+
+Some runs stream no chunks at all. Schedule runs, heartbeat runs, and runs submitted with `responsePublication: external` do not stream assistant text. For those runs, wait for the run to end and read the stored message. [Threads and runs](/docs/capabilities/threads-and-runs) explains how external publication holds back the reply.
+
+## Errors
+
+| Code                         | Status | Returned by | Cause                                                                          |
+| ---------------------------- | ------ | ----------- | ------------------------------------------------------------------------------ |
+| `publication_busy`           | 409    | API         | The thread's history is waiting for an external delivery outcome. Retry later. |
+| `stream_gateway_unavailable` | 503    | API         | The platform has no stream gateway origin configured.                          |
+| `unauthorized`               | 401    | Gateway     | The request has no bearer token.                                               |
+| `invalid_stream_token`       | 401    | Gateway     | The token is malformed, or the gateway cannot verify it.                       |
+| `stream_session_expired`     | 401    | Gateway     | The token is past `session.expiresAt`. Open a new session.                     |
+| `stream_scope_violation`     | 403    | Gateway     | The token belongs to another thread or does not allow reads.                   |
+| `invalid_id`                 | 400    | Gateway     | The thread ID in the path is not a valid ID.                                   |
+| `invalid_stream_request`     | 400    | Gateway     | A query parameter is invalid, for example `live` is not `long-poll` or `sse`.  |
+| `stream_unavailable`         | 503    | Gateway     | The gateway cannot reach the stream store. Retry from your last offset.        |
+
+## Use it
+
+1. Start a run. The output includes the run ID and the thread ID.
+
+   ```bash
+   deployments run create --agent $AGENT_DEPLOYMENT_ID --message "Summarize yesterday's tickets."
+   ```
+
+2. Follow the run until it ends. `run tail` opens a session, reads from the start of the thread's stream, prints only this run's events, and stops at `run.completed`, `run.failed`, or `run.canceled`. Without `--follow`, it stops once it has caught up. With `--follow`, it keeps an SSE connection open and opens a new session if the token expires.
+
+   ```bash
+   deployments run tail $RUN_ID --thread $THREAD_ID --follow
+   ```
+
+3. To resume from a known position, pass the offset and cursor you saved.
+
+   ```bash
+   deployments run tail $RUN_ID --thread $THREAD_ID --offset $OFFSET --cursor $CURSOR
+   ```
+
+4. To read the stream from your own code, open a session and read from `session.offset`. The CLI hides `accessToken` unless you pass `--reveal`.
+
+   ```bash
+   deployments thread session $THREAD_ID --reveal --json
+   curl -N "$STREAM_URL?offset=$OFFSET&live=sse" -H "authorization: Bearer $ACCESS_TOKEN"
+   ```
+
+The same session and one catch-up read through the SDK:
+
+```ts
+import {
+  createClient,
+  createConfig,
+  createThreadStreamSession,
+} from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data } = await createThreadStreamSession({
+  client,
+  path: { threadId: process.env.THREAD_ID! },
+});
+if (!data) throw new Error("Could not open a stream session.");
+
+const response = await fetch(
+  `${data.streamUrl}?offset=${encodeURIComponent(data.session.offset)}`,
+  {
+    headers: { authorization: `Bearer ${data.accessToken}` },
+  },
+);
+const events = await response.json();
+const nextOffset = response.headers.get("stream-next-offset");
+```
+
+[Streaming run output](/docs/sdk/streaming) covers the SDK helpers that read stream pages and SSE for you.
+
+## Reference
+
+- API: [create thread stream session](/docs/api/reference/runtime/create-thread-stream-session), [read thread stream](/docs/api/reference/runtime/read-thread-stream), [list thread messages](/docs/api/reference/runtime/list-thread-messages), [get run message](/docs/api/reference/runtime/get-run-message)
+- CLI: [`deployments run tail`](/docs/cli/reference/run#run-tail), [`deployments thread session`](/docs/cli/reference/thread#thread-session)
+- SDK: [Runtime functions](/docs/sdk/reference#runtime), [Streaming run output](/docs/sdk/streaming)

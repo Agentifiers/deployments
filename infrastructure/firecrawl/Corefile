@@ -1,0 +1,5 @@
+.:53 {
+  errors
+  cache 30
+  forward . 127.0.0.11
+}

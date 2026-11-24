@@ -1,0 +1,27 @@
+{
+  "name": "@deployments-ai/agent-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./model-gateway": "./src/model-gateway.ts",
+    "./runtime": "./src/runtime.ts",
+    "./types": "./src/types.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@deployments-ai/agent-manifest": "workspace:*",
+    "@deployments-ai/db": "workspace:*",
+    "@deployments-ai/model-gateway": "workspace:*",
+    "@deployments-ai/observability": "workspace:*",
+    "@deployments-ai/sandbox-hosts": "workspace:*",
+    "@deployments-ai/streaming": "workspace:*",
+    "ajv": "8.20.0",
+    "effect": "4.0.0-beta.92"
+  }
+}

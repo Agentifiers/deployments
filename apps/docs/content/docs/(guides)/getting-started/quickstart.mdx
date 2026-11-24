@@ -1,0 +1,210 @@
+---
+title: "Quickstart"
+description: "Install the CLI, sign in, and take an agent from manifest to a deployed, running conversation."
+---
+
+In this tutorial we build a small assistant agent and talk to it. We install the `deployments` CLI, sign in, create an organization, project, and environment, publish an agent release, deploy it, send it a message, and watch the run stream back.
+
+<Callout type="warn" title="Availability">
+  The CLI and SDK are published to the public npm registry under the `@deployments-ai` scope, on the
+  `next` prerelease tag. The CLI runs on Bun 1.3.14 or later.
+</Callout>
+
+## Before you start
+
+You need:
+
+- Bun 1.3.14 or later on your `PATH`.
+- The API origin of the platform install you use. The examples on this page use the placeholder `https://api.example.com`; replace it with your install's origin. If you run the install, it is the `platform_api_domain_name` you deployed. Otherwise, ask its operator. See [Hosts and environments](/docs/getting-started/hosts-and-environments).
+- An account on that install's identity service.
+
+## Install the CLI
+
+<Steps>
+<Step>
+
+Install the CLI globally from npm:
+
+```sh
+npm i -g @agentifiers/deployments-cli@next
+```
+
+`bun add --global @agentifiers/deployments-cli@next` works too.
+
+</Step>
+<Step>
+
+Check that the binary is on your `PATH`:
+
+```sh
+deployments --version
+```
+
+The CLI prints its version, for example `0.1.0-alpha.1`.
+
+</Step>
+</Steps>
+
+## Sign in
+
+The CLI defaults to `https://api.us.deployments.ai`. Point it at your install and confirm the API answers:
+
+```sh
+deployments health --api-url https://api.example.com
+```
+
+The CLI prints `status` `ok` and `service` `deployments-ai-api`. The health check needs no credential.
+
+Now sign in. Passing `--api-url` here stores the origin in your CLI profile, so later commands use it:
+
+```sh
+deployments auth login --api-url https://api.example.com
+```
+
+The CLI prints a line like `Open https://app.example.com/device?code=... and enter code ...`. Open the URL, sign in to the console, check that the code matches your terminal, and approve. The CLI polls until you approve, then prints `status` `authenticated` and `mode` `live`.
+
+Check who you are:
+
+```sh
+deployments whoami
+```
+
+You see your principal `id`, `authentication` `tenant-jwt`, and `capabilities`, the scopes your token carries.
+
+## Create a place for the agent
+
+Agents live in an environment, inside a project, inside an organization. Create all three and save each ID in the CLI context.
+
+<Callout type="info">
+  If someone already invited you to an organization, accept the invitation with `deployments
+  invitation accept` and select their project and environment instead. See [Organizations, projects,
+  and environments](/docs/capabilities/tenancy).
+</Callout>
+
+```sh
+deployments org create --name "Quickstart"
+```
+
+The CLI prints the new organization. Copy its `id`. You are the organization's `owner`.
+
+```sh
+deployments context set --org $ORG_ID
+deployments project create --name "Quickstart"
+```
+
+Copy the project `id`, then create a development environment:
+
+```sh
+deployments context set --project $PROJECT_ID
+deployments env create --name "Development" --type development
+deployments context set --env $ENV_ID
+```
+
+`context set` prints the resolved context. You now see your organization, project, and environment IDs. Every later command sends them as tenant headers.
+
+## Write a manifest
+
+Save this agent manifest as `agent.json`. It is the smallest manifest the platform accepts: a key, a name, a semantic version, instructions, a model, and a sandbox mode.
+
+```json title="agent.json"
+{
+  "apiVersion": "agents.deployments.ai/v1",
+  "kind": "Agent",
+  "metadata": {
+    "key": "quickstart-assistant",
+    "name": "Quickstart assistant",
+    "version": "1.0.0"
+  },
+  "spec": {
+    "instructions": "You are a concise assistant. Answer in two sentences or fewer.",
+    "model": { "id": "bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0" },
+    "sandbox": { "mode": "none" }
+  }
+}
+```
+
+The model is one of the platform's curated models, which an environment without a model policy admits. A default installation hosts Amazon Bedrock as its only model provider, so it runs this model with no provider key once the operator has enabled Bedrock access to it. If your installation hosts other providers, run `deployments model list` to see the models your environment can use. [Agent manifests](/docs/capabilities/agent-manifests) describes every field.
+
+## Create, release, and deploy the agent
+
+<Steps>
+<Step>
+
+Create the agent definition from the manifest:
+
+```sh
+deployments agent create --manifest "$(cat agent.json)"
+```
+
+The CLI prints the definition. Copy its `id`. Its `version` is `0` and its `status` is `active`.
+
+</Step>
+<Step>
+
+Publish an immutable release. Pass the definition version from the previous step:
+
+```sh
+deployments agent release $AGENT_DEFINITION_ID --expected-version 0
+```
+
+The CLI prints the release with `releaseNumber` `1` and a `contentHash` that starts with `sha256:`. Copy the release `id`.
+
+</Step>
+<Step>
+
+Deploy the release into your environment:
+
+```sh
+deployments agent deploy --release $AGENT_RELEASE_ID
+```
+
+The CLI prints the deployment with `desiredState` `running` and `currentState` `ready`. Copy the deployment `id`.
+
+</Step>
+</Steps>
+
+## Talk to the agent
+
+Send the deployment a message:
+
+```sh
+deployments chat --agent $AGENT_DEPLOYMENT_ID --message "What can you help me with?"
+```
+
+The CLI prints the accepted submission. It holds a `thread`, a `run` whose `status` is `queued`, and `created` `true`. Copy the run `id` and the thread `id`.
+
+Follow the run as it executes:
+
+```sh
+deployments run tail $RUN_ID --thread $THREAD_ID --follow
+```
+
+Each line shows a timestamp and an event type. The events include `run.started`, a series of `assistant-token.chunk` events as the model writes, `assistant-message.finalized`, and `run.completed`. The command exits after the run reaches a terminal event.
+
+Print the finished answer:
+
+```sh
+deployments run message $RUN_ID --thread $THREAD_ID
+```
+
+To continue the conversation on the same thread, pass `--thread $THREAD_ID` to `deployments chat`.
+
+## Where to go next
+
+<Cards>
+  <Card title="Core concepts" href="/docs/getting-started/concepts">
+    How definitions, releases, deployments, threads, and runs fit together.
+  </Card>
+  <Card title="Agents, releases, and deployments" href="/docs/capabilities/agents">
+    Retarget, roll back, run canaries, and promote releases between environments.
+  </Card>
+  <Card
+    title="Service accounts and API keys"
+    href="/docs/capabilities/service-accounts-and-api-keys"
+  >
+    Give CI jobs and backend services their own credentials.
+  </Card>
+  <Card title="Local preview loop" href="/docs/cli/preview-loop">
+    Chat with an unpublished manifest before you release it.
+  </Card>
+</Cards>

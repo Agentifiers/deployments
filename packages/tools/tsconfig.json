@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/tools",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/tools.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../agent-manifest" },
+    { "path": "../channel-adapters" },
+    { "path": "../db" },
+    { "path": "../net-security" },
+    { "path": "../providers" }
+  ]
+}

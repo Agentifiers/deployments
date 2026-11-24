@@ -1,0 +1,27 @@
+{
+  "name": "@deployments-ai/memory",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./builtins": "./src/builtins.ts",
+    "./aws-native": "./src/aws-native.ts",
+    "./governance": "./src/governance.ts",
+    "./repository": "./src/repository.ts",
+    "./platform": "./src/platform.ts",
+    "./provider": "./src/provider.ts",
+    "./service": "./src/service.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@deployments-ai/db": "workspace:*",
+    "@deployments-ai/events": "workspace:*",
+    "@deployments-ai/governance": "workspace:*",
+    "effect": "4.0.0-beta.92"
+  }
+}

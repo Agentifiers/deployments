@@ -1,0 +1,199 @@
+---
+title: "Context management"
+description: "How the runtime packs instructions, tools, run context, history, memory, and artifacts into a bounded model request on every generation, and how to size those budgets."
+---
+
+Before every model call, the runtime builds the model input from the release, the run, and the thread. The stored thread transcript stays complete and pageable. Model input is a bounded view derived from it, so context management never deletes or rewrites a stored message. Read this page when you size a release's context budgets, decide what to pass in `runContext`, or debug why a model did not see part of a conversation.
+
+## Budgets come from the model and the release
+
+Each generation has a context window, an output reserve, and an input budget. The runtime resolves the window and default reserve from the model, then applies the release's [runtime settings](/docs/capabilities/agent-manifests#runtime-settings).
+
+| Model source                                                      | Context window and maximum output      | Default output reserve                                         |
+| ----------------------------------------------------------------- | -------------------------------------- | -------------------------------------------------------------- |
+| Curated model                                                     | Platform-owned limits for that model   | 4,096 tokens                                                   |
+| Catalog model                                                     | The model's synchronized catalog entry | The smallest of 4,096, the maximum output, and half the window |
+| Model without platform limits, admitted through an operator grant | None                                   | None. The release must set both budget fields.                 |
+
+The release can change the defaults:
+
+- `spec.runtime.modelOutputTokenReserve` replaces the default reserve. The runtime clamps it to the model's maximum output when that is known.
+- `spec.runtime.modelInputTokenBudget` lowers the input budget. It never raises it above the window.
+
+The input budget is the smaller of `modelInputTokenBudget` and the window minus the output reserve. If the reserve leaves no input capacity, the run fails before the runtime calls the model.
+
+A model that has neither curated limits nor a catalog entry needs both `modelInputTokenBudget` and `modelOutputTokenReserve` in the release. The runtime then treats their sum as the window. Without both fields, the run fails locally with a context budget error. See [Models and model policies](/docs/capabilities/models) for how a model gets into the catalog.
+
+## Token estimates are conservative
+
+The runtime estimates tokens itself and never asks the provider. It counts one token per UTF-8 byte of text, adds 6 tokens per message and 16 per request, and counts tool definitions as their JSON text. Media parts reserve a fixed amount regardless of their encoded size.
+
+| Content       | Estimate               |
+| ------------- | ---------------------- |
+| Text          | 1 token per UTF-8 byte |
+| Each message  | 6 tokens of overhead   |
+| Each request  | 16 tokens of overhead  |
+| An image part | 16,384 tokens          |
+| An audio part | 32,768 tokens          |
+
+Most tokenizers produce fewer tokens than bytes, so the estimate errs high and a request that fits it leaves headroom at the provider.
+
+## Required context must fit
+
+Some parts of the request are always sent:
+
+- The system prompt, which carries the release instructions, pinned skills, and the declared sub-agents.
+- The definitions of the tools the model may call.
+- The run's `runContext`, when you send one.
+- The current prompt, including any input artifacts.
+- The tool calls this run has already completed.
+
+If these parts exceed the input budget, the run fails locally with a context budget error instead of sending a request the provider would reject. The error names what to reduce: the prompt, the run context, the instructions, the skills, or the tool catalog.
+
+## Optional context fills the rest in priority order
+
+The runtime spends the remaining budget in this order:
+
+1. Screenshots from the latest tool calls, when the release sets `toolResultImages: "screenshots"`.
+2. Durable [memory](/docs/capabilities/memory) the agent may read.
+3. Live [Brain](/docs/capabilities/brains) evidence.
+4. The rolling conversation checkpoint.
+5. Recent thread messages, newest first.
+6. Run artifacts.
+
+When a section does not fit, the runtime keeps its head and tail around a `[truncated]` marker if more than 32 tokens remain, and records the section as dropped. Recent messages work differently. The runtime adds messages from newest to oldest and stops at the first one that does not fit. Only the newest message can be truncated, and only when no other message fits.
+
+Memory, Brain evidence, run artifacts, and the run context each carry a label that tells the model to treat the content as untrusted and not to follow instructions inside it. The checkpoint carries a label that marks it as an untrusted summary.
+
+Before packing starts, the worker loads recent history up to `recentMessageCharacterBudget` characters (default 65,536). Lower it to keep long threads from loading history that packing would drop anyway.
+
+## Pass per-run data in runContext
+
+`runContext` is an optional string of at most 256 KiB that you send with a run submission. Use it for structured workflow state and evidence snapshots, and keep `content` for the actual conversational turn.
+
+- The runtime sends it as required context, labeled as untrusted data.
+- The platform stores it on the run for recovery and audit. Run responses do not include it.
+- It is never added to the thread history, so later turns do not see it.
+- Replaying a run copies the original value to the new run.
+
+## Send files as input artifacts
+
+A run submission can attach `inputArtifacts`, one to eight unique [artifact](/docs/capabilities/artifacts#attach-files-to-a-run) IDs uploaded with `type: "input"`. Each artifact must meet these rules:
+
+- Completing the upload resolved it to an image, audio, or document. A file that resolved to `unusable` fails the submission with `422 input_file_<reason>`, and the message names the file.
+- Images and audio together are at most 20 MiB. Documents don't count toward this limit.
+- The artifact is private, available, unexpired, and attached to the same thread as the run.
+- The person or service account that submits the run uploaded it. The caller also needs the `artifacts:read` scope.
+
+The current prompt carries its parts in this order: one framed text part per document, a note naming any attached files that were left out, a list of documents that earlier turns attached, your message, then image and audio parts. Later turns never replay a document's text.
+
+- **Documents.** Each document's extracted text is framed as untrusted file content. A turn's documents share at most 64 KiB of text, and at most half of what the input budget leaves after the rest of the required context. The budget stays the same on every generation of a run, so the prompt does not change during a tool loop. A file whose text is cut ends with a notice that names the next byte, and the model reads the rest with `attachment.read {artifactId, startByte, maxBytes}`, 16 KiB per call by default and at most 24 KiB. The platform adds `attachment.read` to a run that has a document, and a release cannot declare it.
+- **Documents from earlier turns.** A later turn lists up to 12 documents that earlier messages in the thread attached, newest first, with each file's name, summary, text size, artifact ID, and how many turns ago it arrived. The model reads their text with `attachment.read`. A document stays on the list while its message is in the recent history that the model sees and among the thread's newest 400 messages, and while its retention lasts. The list shows only files the run's caller may read: a person's own uploads, or for a channel binding, the files that binding captured. A turn from an agent email binding lists nothing and reads only the files its own email attached, because anyone who knows an email thread's first message ID can reply into it.
+- **Images and audio.** The bytes go into the prompt as image or audio parts. Each part reserves the fixed estimate from the table above. Images need a release whose primary model reads images, or the submission fails with `422 model_image_input_unsupported` or `model_image_input_unknown`. Fallbacks that cannot read images are left out of that run. See [Models](/docs/capabilities/models#image-input).
+
+A text part counts as its UTF-8 bytes plus 8 tokens. Files that a channel or agent email binding received but the turn left out, such as a file over the turn's limits, a file type the platform does not read, or an image on a model that cannot read images, are named to the model with the reason, so the agent can tell the person. The note names at most eight files and then says how many more were left out.
+
+## Long tool loops stay bounded
+
+A generation can request up to 8 tool calls, and the runtime runs them in order. Across the whole run, `maxModelGenerations` and `maxToolCalls` in the release bound the loop.
+
+On the next generation, the runtime replays earlier tool calls as native assistant and tool messages when each call's arguments are at most 16 KiB and the history fits the remaining budget. Tool result summaries are capped at 4 KiB. If any call is larger or the history does not fit, older generations become a textual summary of at most 8,192 tokens before the prompt.
+
+Long loops can also pause and resume on another worker. At a completed tool batch, the worker writes an execution checkpoint and requeues the run as `queued` when the next batch could no longer be saved in one write or when its host is shutting down. A run can take at most 64 execution checkpoints and then fails with `run_checkpoint_limit_exhausted`. Execution checkpoints do not count toward the run's retry attempts. A `thread-persistent` sandbox stays up across an execution checkpoint unless the host is shutting down. See [Threads and runs](/docs/capabilities/threads-and-runs#run-lifecycle).
+
+### Screenshots from tool calls
+
+With `spec.runtime.toolResultImages: "screenshots"`, the model sees the screenshots its latest browser tool calls captured. At most 4 PNG, JPEG, or WebP images of up to 5 MiB each attach per generation, and each reserves 16,384 tokens. Only the latest generation's images are sent. Screenshots take priority over every optional section but never over required context. A capture that is skipped is named in the message text instead.
+
+## Keep long conversations coherent with checkpoints
+
+A conversation checkpoint is a rolling summary of a thread. Set `spec.runtime.contextCheckpointMode` to `auto` (the default is `off`) for long-lived conversational agents.
+
+- After a run completes, a memory flush model call rewrites the summary. The summary is at most 8 KiB.
+- The runtime includes the latest checkpoint as optional context, labeled as an untrusted summary that the model must verify with tools.
+- The newest raw messages can overlap the checkpoint. The checkpoint carries older continuity and the recent messages keep exact wording.
+- Preview and evaluation runs never write checkpoints or memory.
+- Heartbeat, schedule, and externally published runs update the checkpoint only after their publication settles. Heartbeat and schedule runs never write durable memory.
+
+Leave checkpoints off for short transactional threads whose state already arrives through `runContext` and tools. Treat a checkpoint as a hint. It is never the source of truth for consent, money, approvals, or other state that tools can read directly.
+
+A thread continued on a new deployment inherits its predecessor's checkpoint. Spare history budget fills with the predecessor's recent turns. See [Continue a thread on another deployment](/docs/capabilities/threads-and-runs#continue-a-thread-on-another-deployment).
+
+## Choose answer depth per turn
+
+`spec.runtime.responseDepthPolicy` lets the agent choose between a default and a detailed answer on each turn. Before the conversational generation, a private call to the run's model picks `default` or `detailed`.
+
+- The selector sees the current prompt and at most 8 recent messages as quoted data. It gets no memory, checkpoint, Brain evidence, skills, artifacts, tool results, or tools.
+- It has a 64-token output allowance and at most 12,288 estimated input tokens.
+- Detailed mode adds `detailedInstructions` and requires the answer to fall between `minimumWords` and `maximumWords` (each 1 to 8,192). An answer outside the range is regenerated, never padded or cut.
+- A release cannot combine `responseDepthPolicy` with `responseFormat`.
+
+The policy does not raise the output reserve. Set a reserve large enough for `maximumWords`.
+
+## Read packing metrics
+
+Every completed generation emits a `model.generation.completed` event on the thread stream. Its `payload.metadata.contextPacking` object reports what the runtime packed.
+
+| Field                     | Meaning                                                                                            |
+| ------------------------- | -------------------------------------------------------------------------------------------------- |
+| `contextWindowTokens`     | The window the runtime used.                                                                       |
+| `outputTokenReserve`      | The reserve the runtime used.                                                                      |
+| `inputTokenBudget`        | The input budget after the reserve and any `modelInputTokenBudget`.                                |
+| `estimatedInputTokens`    | The estimate for the request that was sent.                                                        |
+| `optionalSectionsDropped` | Optional sections that were truncated or left out: `memory`, `brain`, `checkpoint`, or `artifact`. |
+| `checkpointIncluded`      | Whether any part of the checkpoint was sent.                                                       |
+| `recentMessagesAvailable` | Recent messages the worker loaded.                                                                 |
+| `recentMessagesIncluded`  | Recent messages that fit.                                                                          |
+| `recentMessagesDropped`   | Recent messages left out.                                                                          |
+| `runContextIncluded`      | Whether the run carried `runContext`.                                                              |
+
+## Use it
+
+1. Set budgets in the release manifest. This example lowers the input budget, keeps a larger output reserve, and turns on checkpoints.
+
+   ```json title="agent.json (excerpt)"
+   "runtime": {
+     "modelInputTokenBudget": 64000,
+     "modelOutputTokenReserve": 8192,
+     "recentMessageCharacterBudget": 32768,
+     "contextCheckpointMode": "auto"
+   }
+   ```
+
+2. Publish and deploy the release as shown in [Agents, releases, and deployments](/docs/capabilities/agents#use-it).
+
+3. Send a turn with per-run state in `runContext`.
+
+   ```ts
+   import { createClient, createConfig, submitAgentRun } from "@agentifiers/deployments-sdk";
+
+   const client = createClient(
+     createConfig({
+       baseUrl: "https://api.example.com",
+       headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+     }),
+   );
+
+   const { data, error } = await submitAgentRun({
+     client,
+     path: { agentDeploymentId: process.env.AGENT_DEPLOYMENT_ID! },
+     headers: { "idempotency-key": crypto.randomUUID() },
+     body: {
+       content: "Where is my order?",
+       runContext: JSON.stringify({ orderId: "order_123", status: "shipped" }),
+     },
+   });
+   ```
+
+4. Tail the run as JSON and read `contextPacking` on each `model.generation.completed` event.
+
+   ```bash
+   deployments run tail $RUN_ID --thread $THREAD_ID --follow --json
+   ```
+
+## Reference
+
+- API: [submit run](/docs/api/reference/runtime/submit-agent-run), [create thread](/docs/api/reference/runtime/create-thread), [read thread stream](/docs/api/reference/runtime/read-thread-stream)
+- CLI: [`deployments run`](/docs/cli/reference/run), [`deployments thread`](/docs/cli/reference/thread)
+- SDK: [Runtime functions](/docs/sdk/reference#runtime)
+- Manifest fields: [Runtime settings](/docs/capabilities/agent-manifests#runtime-settings)

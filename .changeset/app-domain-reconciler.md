@@ -1,0 +1,12 @@
+---
+"@deployments-ai/cli": minor
+"@deployments-ai/sdk": minor
+---
+
+Activate custom domains of agent-built apps automatically. A new `apps-domains` Lambda converges CloudFront distribution tenants and their managed certificates to the domain records every 5 minutes and on demand. A `verified` domain gets a tenant with a CloudFront-managed certificate; once the certificate is issued it is attached, and once CloudFront serves the hostname the domain moves to `active`. `refreshAppDomain` now also queues that convergence for the domain and answers the domain as it stands, without waiting; the queued run re-requests a failed or timed-out certificate. Poll the domain to follow the setup. `detachAppDomain` queues the convergence, so the tenant is disabled within seconds and deleted, with its certificate, on a later run.
+
+When CloudFront rejects the tenant for a domain, the platform tries again after 10 minutes, then after twice as long each time, up to once a day, whether a sweep or a refresh asks. Every TLS certificate request also counts against a daily limit for the organization (5 by default) and for the installation (12 by default), counted in UTC days, which keeps an installation under ACM's 5,000 certificates a year. Detaching and attaching a hostname again does not reset them.
+
+Domain `problem` gains four codes: `previous_tenant_draining`, recorded while a hostname that was detached and attached again waits for its earlier tenant to be deleted; `edge_rejected`, recorded when CloudFront rejects the hostname itself, usually because its `CNAME` does not point at the routing endpoint yet; and `organization_certificate_limit` and `platform_certificate_limit`, recorded when a daily certificate request limit is spent. The platform makes the request on its own after 00:00 UTC.
+
+Installations that set `APPS_DOMAIN` for the API now also set `APPS_DOMAIN_RECONCILER_FUNCTION_NAME`, and the API refuses to start without it. The platform module wires it, and the deploy pipeline publishes the new `app-domains` Lambda artifact. The `apps-domains` Lambda reserves a concurrency of 1, does not retry a failed run, and drops a queued event after 10 minutes. When it drops the run a refresh queued, the failed or timed-out certificate is not requested again until the next refresh. The `apps-domains-deferred-steps` alarm notifies the platform alarm topic when every sweep for 15 minutes runs out of time.

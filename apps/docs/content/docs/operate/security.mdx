@@ -1,0 +1,127 @@
+---
+title: "Security model"
+description: "How the platform authenticates callers, isolates tenants, protects secrets and stored data, secures transport, limits outbound calls, and bounds the IAM roles that deploy it."
+---
+
+This page describes the security controls built into the platform and where each one lives, for operators who install, review, or audit an installation. Each section links the page that covers the topic in depth.
+
+## Authenticate callers and isolate tenants
+
+Tenants nest as organization, project, and environment. A tenant-scoped request names its scope in the `x-deployments-organization`, `x-deployments-project`, `x-deployments-environment`, and `x-deployments-workspace` headers, and the API checks that the caller may act there. See [Organizations, projects, and environments](/docs/capabilities/tenancy).
+
+### People
+
+A platform access token carries no authoritative organization or role claims. On each request, the API resolves the requested tenant headers with strongly consistent reads of the control table:
+
+1. The principal must be an active human principal.
+2. The environment must belong to the named organization and project. The runtime API also requires the environment to be active.
+3. The principal must be an active member of the organization. The membership's organization role then limits which of the token's scopes apply.
+
+Removing a member therefore takes effect on the next request, not when a token expires. A principal whose `platformRole` is `administrator`, or a signed-in token with the `platform:admin` or `platform:*` scope, needs no membership, but only while it has open [operator access](/docs/operate/system-operator#operator-access) to that organization. Without it the request gets `403` with `operator_access_required`. The organization sees each open and close in its audit log, along with every change made under the access. An administrator who is also an active member acts as that member. No public API route grants the administrator role. See [System operator](/docs/operate/system-operator).
+
+How people get accounts in the first place, and why self-registration is off by default, is covered in [Users and sign-in](/docs/operate/users). To sign people in through your own identity provider instead of passwords, see [Identity federation](/docs/operate/identity-federation).
+
+### Machines
+
+API keys belong to service accounts. The platform stores only a SHA-256 hash of each key and looks a key up by that hash. A key authenticates only while all of these are true:
+
+- The key is active, not revoked, and not past its `expiresAt`.
+- Its service account is active and belongs to the same organization, project, and environment as the key.
+
+The key's effective scopes are the scopes that both the key and its service account hold. A key carries exactly one organization, project, and environment. See [Service accounts and API keys](/docs/capabilities/service-accounts-and-api-keys).
+
+## Protect secrets
+
+### The credential vault
+
+Secrets that a tenant gives the platform, such as provider tokens, MCP server auth, hosted code secrets, channel credentials, and webhook signing secrets, live in the credential vault. The vault uses envelope encryption:
+
+1. For each write, it asks KMS for a new AES-256 data key.
+2. It encrypts the secret with AES-256-GCM and a random 12-byte IV, and stores the ciphertext with the encrypted data key.
+3. It binds the ciphertext to an encryption context of organization, project, environment, owner type, owner ID, purpose, and credential ID. KMS requires the same context to decrypt the data key, and AES-GCM authenticates the same context as additional data.
+
+The vault reuses a decrypted data key from its in-process cache for at most 60 seconds, and it zeroes the key buffer when it evicts or finishes with it. See [Credential vault](/docs/capabilities/credential-vault).
+
+### IAM scoping by tenant
+
+The channel and provider runtime reads and writes vault entries through IAM roles that are scoped to one tenant at a time. A function assumes the reader or writer role with session tags for `accessMode`, `organizationId`, `projectId`, and `environmentId`. The role's trust policy refuses a session without all of those tags. The role's permissions then limit it in two ways:
+
+- DynamoDB access is limited to items whose partition key falls under the tagged organization or environment, through the `dynamodb:LeadingKeys` condition.
+- `kms:Decrypt` and `kms:GenerateDataKey` are allowed only when the encryption context names the tagged organization, project, and environment.
+
+A session for one tenant cannot read another tenant's vault entries, even if the application code asks it to. Sessions last at most 1 hour.
+
+### Installation secrets
+
+OpenTofu creates the installation's runtime parameters, such as model provider keys, with a placeholder value and ignores later changes to it. The deploy tool or the operator writes the real values, so they never appear in OpenTofu configuration. The OpenTofu provider follows the same rule for the API keys it issues. See [OpenTofu provider](/docs/operate/opentofu-provider).
+
+Model provider API keys reach the Bifrost container in the model gateway task. The model catalog sync function also reads the OpenAI key to list OpenAI's models. Every other runtime calls models with short-lived tokens that name the models it may use. See [Model gateway](/docs/operate/model-gateway).
+
+### Organization model keys
+
+An organization can store its own OpenAI or OpenRouter key so that its model calls bill to its provider account. The platform API seals each key with a dedicated KMS key and never decrypts it. The model gateway opens a key only for a token whose signed `funding` names that credential and key version. It sends the key to Bifrost for that one request. See [Organization model keys](/docs/operate/model-gateway#organization-model-keys).
+
+Bifrost runs in the same ECS task as the gateway and uses the same task role. That role may call `dynamodb:GetItem` on organization partitions of the control table and `kms:Decrypt` on the dedicated key for model provider credentials. Bifrost already receives each organization key in transit when it calls the provider, and it holds the deployment's provider keys. With the gateway's role it can also read and decrypt every organization's stored model key, not only the key of the request it serves. Treat Bifrost as trusted with all organization model keys. If that trust boundary must narrow, the follow-up is to move Bifrost into its own task with a role that has neither grant.
+
+## Encrypt stored data
+
+| Store                           | Protection                                                                                                                                                                                |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Artifact and governance objects | SSE-KMS with the shared customer managed key, which has automatic rotation turned on. The artifact and governance bucket policies deny uploads that use another key or no KMS encryption. |
+| Credential vault entries        | Envelope encryption with the same customer managed key, as described above.                                                                                                               |
+| DynamoDB tables                 | Encrypted with an AWS owned key. Point-in-time recovery is on for the platform data tables.                                                                                               |
+| Model gateway tokens            | Signed by an asymmetric KMS key. Only the token issuer roles may sign. See [Model gateway](/docs/operate/model-gateway#rotate-the-token-signing-key).                                     |
+
+## Secure transport
+
+| Endpoint                                                        | TLS                                          |
+| --------------------------------------------------------------- | -------------------------------------------- |
+| Platform API and identity custom domains (API Gateway)          | `TLS_1_2` security policy                    |
+| CloudFront distributions for the console and the stream gateway | `TLSv1.2_2021` minimum, SNI only             |
+| Load balancer listeners for the stream gateway and web tools    | `ELBSecurityPolicy-TLS13-1-2-2021-06`        |
+| OpenSearch search domains                                       | HTTPS enforced, `Policy-Min-TLS-1-2-2019-07` |
+
+The bucket policies for the artifact, governance, console, observability, preview site, and sandbox build buckets deny any request that does not use TLS. The CLI refuses an API URL that is not HTTPS unless the host is loopback.
+
+<Callout type="info" title="Exception">
+  The model gateway's internal load balancer listens with plain HTTP on port 80. Its security group
+  accepts that port only from the VPC CIDR, and the gateway accepts only short-lived signed tokens.
+</Callout>
+
+## Limit outbound calls
+
+When the platform calls a URL that a tenant supplied, shared outbound-request checks apply. Webhook endpoints and deliveries, HTTP callback tools, remote MCP servers, provider-native HTTP tools, provider connection checks, browser tools, and channel media downloads all use them.
+
+The checks enforce these rules:
+
+- The URL must use `https` and must not contain credentials.
+- The host must be public. The checks refuse `localhost`, names ending in `.localhost`, `.local`, `.internal`, `.lan`, or `.home.arpa`, single-label names, and `metadata.google.internal`.
+- Every address the host resolves to must be public. A private or reserved IPv4 range fails the request, including `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, and `192.168.0.0/16`. An IPv6 address must be in `2000::/3` and outside the special-purpose ranges. One malformed answer rejects the whole set.
+- The connection uses the addresses that passed the check, so a DNS change between the check and the connection cannot redirect it.
+- A caller that follows redirects follows them only on the same HTTPS origin and checks each hop again.
+
+The web tools egress proxy applies its own version of the address rule. By default it allows only ports 80 and 443. Every address a destination resolves to must be public, and the proxy connects only to a public IPv4 address among them.
+
+Sandboxes have their own network rules. Lambda MicroVMs have internet egress, and hosted code with `network: none` runs in a fresh network namespace with no interfaces up. See [Sandbox runtime](/docs/operate/sandbox-runtime).
+
+## Sign webhooks
+
+Each webhook delivery carries `x-deployments-timestamp` and `x-deployments-signature`. The signature is `v1=` followed by the hex HMAC-SHA256 of `<timestampMs>.<body>`, keyed with a 32-byte random signing secret from the credential vault. Receivers should reject a timestamp more than 5 minutes from their clock and compare signatures in constant time.
+
+When you rotate a signing secret, the old secret can keep signing for an overlap of up to 7 days, and 24 hours by default. During the overlap, the header carries one signature per active secret, current secret first. See [Verifying webhooks](/docs/sdk/webhook-verification) and [Webhooks](/docs/capabilities/webhooks#verify-signatures).
+
+## Bound the deploy and observer roles
+
+The account bootstrap in `infrastructure/bootstrap/customer` creates the roles that act on the installation from outside the platform, and the boundary that caps every role the platform creates. See [Apply the account bootstrap](/docs/operate/install#apply-the-account-bootstrap).
+
+- **Deploy role**, `platform-deploy`. Only `deploy_principal_arn` may assume it. It holds `PowerUserAccess` by default. Its IAM writes reach only roles, policies, and instance profiles whose names start with the platform's prefixes, and it may create or change a role only when the role carries the workload boundary. It may never remove a boundary, change the boundary policy, or change the bootstrap roles, and it passes platform roles only to EC2, ECS tasks, EventBridge, Firehose, Lambda, and EventBridge Scheduler. A managed policy in `deploy_managed_policy_names` that grants IAM permissions bypasses these limits, except the denies.
+- **Observer role**, `platform-observer`. The bootstrap creates it only when `observer_principal_arn` is set, and only that principal may assume it. It may call only `GET /v1/system/observer/*` in the installation's account and region. See [Observer routes](/docs/operate/system-operator#observer-routes).
+- **Workload boundary**, `platform-workload-boundary`. Every role the platform creates must carry it. It allows every action outside `iam:*`, `account:*`, and `organizations:*`, plus passing platform roles to the same services and creating the SES service-linked role. It denies assuming any other role in the account, and every IAM or `sts:AssumeRole` action on the bootstrap roles and on itself.
+
+Each trust policy names one IAM role or user. The bootstrap rejects account root ARNs and session ARNs, so no other identity in the principal's account can assume the role.
+
+When `deploy_principal_arn` or `observer_principal_arn` is in another account, the bootstrap requires `external_id`, and both trust policies require it as `sts:ExternalId`. The external ID keeps a third party that operates many accounts from being tricked into using its access to this one, the confused-deputy problem. When every principal is in the installation's account, `external_id` is optional. When it is set, both trust policies require it.
+
+## Reference
+
+- Related: [Architecture](/docs/operate), [Service accounts and API keys](/docs/capabilities/service-accounts-and-api-keys), [Credential vault](/docs/capabilities/credential-vault), [Model gateway](/docs/operate/model-gateway), [Sandbox runtime](/docs/operate/sandbox-runtime), [System operator](/docs/operate/system-operator)

@@ -1,0 +1,520 @@
+---
+title: "Management console"
+description: "What the management console offers and how to sign in to it."
+---
+
+The management console is a browser app for setting up your organizations and for inspecting and operating agents in your environments. Use it to create organizations, projects, and environments, invite people and manage their roles, review releases and deployments, run canaries, follow and act on runs and approvals, operate schedules and heartbeats, manage service accounts, API keys, and webhooks, read traces and metrics, run evaluations, and check usage. It calls the same public API as the CLI and SDK, with your own permissions.
+
+<Callout type="warn" title="Availability">
+  The console runs only on installs that enable it; an install from the customer root in
+  `infrastructure/environments/customer` enables it by default. Each install serves it at its own
+  origin, written here as `https://app.example.com`.
+</Callout>
+
+## Sign in
+
+1. Open the console origin, for example `https://app.example.com`.
+2. If you have no session, the console shows **Sign in required**. Click **Sign in**.
+3. The console sends you to the platform identity service. Sign in with your platform account.
+4. The identity service returns you to the console page you started from.
+
+The console signs you in with an OpenID Connect authorization-code flow with PKCE. It keeps your tokens on its server and gives the browser an `HttpOnly`, `Secure`, host-only session cookie. While a thread page shows a run in flight, the browser also holds a read-only token for that thread's stream, which expires five minutes after the console issues it. To sign out, open the account menu and click **Sign out**. The organization list, the **System** area, and the error pages also have a **Sign out** button.
+
+## Find your way around
+
+After sign-in, the console asks you to **Choose an organization** from the organizations you belong to. If you belong to none, it offers **Create organization**. The sidebar header has two switchers:
+
+- The organization switcher lists your organizations and links to the organization overview, which lists its projects and environments, and to **Members**, **Model keys**, **Usage and limits**, **Data governance**, **Sign-in**, **Alerts**, and **Audit log**. It also has **Create organization**.
+- The environment switcher lists each project's environments with their type badge.
+
+Inside an environment, the sidebar shows only the screens your role and token scopes allow.
+
+| Section     | Screen        | What you can do                                                                                                                                                                         |
+| ----------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Environment | Overview      | See environment details, budgets refusing new runs, deployment states, pending approvals, connections that need attention, and failed webhook deliveries.                               |
+| Build       | Agents        | List agent definitions and create one from a pasted manifest.                                                                                                                           |
+| Build       | Workflows     | Create, edit, publish, and archive workflow definitions, start and cancel executions, follow an execution step by step, and approve or reject waiting steps.                            |
+| Build       | Skills        | Browse the managed-skill catalog, install a skill with its dependencies, see dependency status, and upgrade or remove an installation.                                                  |
+| Build       | Apps          | List agent-built apps, change publication and access, and manage member grants, releases, and custom domains.                                                                           |
+| Operate     | Runs          | Filter every run in the environment, find a run or thread by ID, and open a run.                                                                                                        |
+| Operate     | Approvals     | See pending tool-call approvals and their history, and open the run to decide. Workflow approvals are under Workflows.                                                                  |
+| Operate     | Automations   | See every schedule and heartbeat with its cadence, next and last fire, and origin, and pause, resume, archive, or fire one.                                                             |
+| Observe     | Traces        | Filter and open traces, record scores, add annotations, and export traces.                                                                                                              |
+| Observe     | Metrics       | Chart trace volume, errors, latency, tokens, and cost over a time range.                                                                                                                |
+| Observe     | Evaluations   | Manage datasets and scorers, start evaluation runs, and compare releases.                                                                                                               |
+| Observe     | Alerts        | See this environment's alert incidents and monitors, and create a monitor for it.                                                                                                       |
+| Connect     | Connections   | Add, verify, grant, and revoke connections, connect and reauthorize OAuth providers, and register OAuth apps.                                                                           |
+| Connect     | MCP servers   | Register remote MCP servers, discover their allowlisted tools, edit and archive them, and create and revoke their connections.                                                          |
+| Connect     | Extensions    | List extension tools, create MCP, HTTP callback, client-executed, and hosted code extensions, edit them, and archive them.                                                              |
+| Connect     | Email         | Check whether the environment can send agent email, manage inboxes, bindings, domains, placements, policy, suppressions, usage, and sending tenants, and read and send an inbox's mail. |
+| Connect     | Webhooks      | Create and manage webhook endpoints, send test events, and inspect and retry deliveries.                                                                                                |
+| Knowledge   | Brains        | List and create the organization's Brains, upload files, search and ask them, and manage sources, documents, review, access, settings, and erasure.                                     |
+| Knowledge   | Memory        | Create and archive memory spaces, grant agents access, list, import, export, archive, restore, and delete memories, resolve reviews, search, read quality, and create or edit policies. |
+| Govern      | Models        | Browse the model catalog, and create, edit, or archive the environment's model policy after checking which live deployments lose a model.                                               |
+| Govern      | Tool policies | Browse the tool catalog, create, edit, duplicate, and archive tool policies, and simulate a policy or a deployment on tools.                                                            |
+| Govern      | Audit log     | Filter the environment's audit events by event, actor, resource, and time, and open one event.                                                                                          |
+| Access      | API keys      | Create service accounts, issue, rotate, and revoke API keys, and see each key's calls.                                                                                                  |
+| Access      | Secrets       | List every stored credential with its owner, purpose, status, and rotation count. The console never shows a secret value.                                                               |
+| Access      | Workspaces    | List the environment's workspaces and create one. Every connection grant names a workspace.                                                                                             |
+| Usage       | Usage         | Read the metered usage and cost ledger with breakdowns.                                                                                                                                 |
+| Usage       | Budgets       | See the budgets that govern the environment, create budgets, and change, pause, resume, or archive them.                                                                                |
+
+Platform administrators also see **System**, which shows the install record, its endpoints, and every organization in the install with its active member count. The organization list at `/` and the organization switcher show only the organizations you are a member of, for a platform administrator too. The list links to **System** for platform administrators, even when they belong to no organization, and **System** is where they find every other organization.
+
+## Set up an organization
+
+1. On the organization list, click **Create organization**. Enter a name. The console proposes a slug from the name. A slug is 1 to 63 lowercase letters, digits, or hyphens, and organization slugs are unique across the install.
+2. On the organization overview, click **Create project**. Owners and admins can create projects and environments.
+3. The console then asks for the project's first environment. Pick its name, slug, and type, and click **Create environment**. The type cannot change later.
+
+The console opens the new environment. To add another environment, click **Create environment** next to an active project on the organization overview.
+
+## Manage members and invitations
+
+The **Members** screen lists the organization's members with their role, status, and join date. Removed members stay in the list with the `removed` status. Owners and admins also see the pending invitations.
+
+- **Invite** takes an email address, a role, and an expiry of 1, 7, 14, or 30 days. The console shows the accept link once. Copy it, select **I stored this invitation link**, and then select **Done**. If the install sends email, the invitee also gets the link by email.
+- **Change role** and **Remove** act on one member. Only an owner can change or remove an owner, and the organization must keep at least one active owner. To lower your own owner or admin role, type the new role to confirm.
+- **Revoke** cancels a pending invitation. Type the invited address to confirm.
+
+## Accept an invitation
+
+1. Open the invitation link from the email or from the person who invited you.
+2. If you have no session, the console asks you to sign in. Sign in with the email address the invitation was sent to. The console returns you to the invitation.
+3. Click **Accept invitation**. The console opens the organization.
+
+If you are signed in with another account, accepting fails with a message about the email address. Click **Sign in with a different account**. The identity service shows its sign-in form even when it already has a session, and the console returns you to the invitation. A used, revoked, or expired link cannot be accepted. Ask for a new invitation instead.
+
+## Work with one agent
+
+Open an agent to see its header and a row of tabs. Some tabs appear only when you have access to the data behind them.
+
+| Tab            | What you can do                                                                                                               |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Overview       | See activity totals over a time range, a comparison of the two releases in any running canary, and recent runs and errors.    |
+| Releases       | Publish the draft as a release, compare two releases' manifests, and promote a release to another environment of the project. |
+| Deployments    | Deploy a release, edit tool bindings, pause, resume, retarget, or stop a deployment, and start, promote, or abort a canary.   |
+| Configuration  | Read the definition's draft manifest.                                                                                         |
+| Runs           | Browse and filter the agent's runs across its deployments. Each run opens its run page.                                       |
+| Automations    | See the schedules and heartbeats of the agent's deployments.                                                                  |
+| Tools & access | See the effective tools, extensions, MCP connections, and connection grants for each deployment.                              |
+| Channels       | See channel bindings and email inboxes routed to the agent.                                                                   |
+| Evaluations    | See evaluation results for the agent's releases.                                                                              |
+| Usage          | See the agent's usage and cost for a period.                                                                                  |
+
+### Deploy a release and bind its tools
+
+**Deploy release** opens the agent's deploy page. Pick the release, the desired state, and optionally a deployment to start from. Starting from a deployment copies its runtime configuration. Bindings the new release cannot accept are removed, and the page lists them.
+
+A tool that a release declares with `authorization: "workspace"` runs with a connection grant that the deployment pins. The page shows one row per such tool, with its grant, its tool policy, a status, and the decision the policy gives for that tool. The grant list offers only active `agent-runtime` grants that fit the tool: the right provider or MCP server, an active MCP connection, and the scopes the tool needs. The pinned policy links to its page. A required tool with no grant blocks the deploy.
+
+On the **Deployments** tab, **Edit tool bindings** opens the same editor for a deployment whose current state is `ready` or `paused`. The save sends only the rows you changed. The console re-reads the deployment, applies your changes to its current configuration, and keeps every other key, such as sub-agent bindings, as it is. It then runs the platform's deploy-time configuration check before it calls the API. If someone saved the deployment after you opened the page, the save is refused. The page reloads and keeps your unsaved choices on top of the new configuration, so you can review them and save again.
+
+A save can fail for reasons unrelated to tools. Every save re-resolves the deployment's sub-agent bindings. A save on a running deployment also re-admits its release's models against the environment's model policy. The editor warns before you save when the model catalog does not allow the release's model, or when a bound sub-agent deployment is stopped or gone. The save dialog says which checks apply, and a refused save names the cause.
+
+If a deploy or save fails without an answer from the platform, such as a timeout, it may still have gone through. The deploy dialog says the deployment may already exist. Submitting again from the same dialog resends it under the same idempotency key, even after a refusal in between, so it cannot create a second deployment. When an earlier attempt may have gone through and the request has changed since, the dialog asks you to close it and check the deployments.
+
+Deploying and editing tool bindings need `agents:write`, which only owners and admins hold, so only they see **Deploy release** and **Edit tool bindings**. Another role that opens a deployment's bindings URL sees its bindings read-only. In a production environment, deploying asks you to type the agent's slug and saving asks for the last eight characters of the deployment ID.
+
+## Act on runs and approvals
+
+A run page shows the run's status, deployment, release, trigger, attempt, timing, and error, with links to its trace and to its thread's transcript. The buttons follow the run's status:
+
+- **Cancel** stops a queued, running, or waiting run. If the run waits for an approval, the approval is rejected.
+- **Retry** runs a failed run again as a new attempt.
+- **Replay** starts a new run from the prompt of a finished run and opens it.
+
+The tool calls table lists each call's status, policy decision, and input and output summaries. A call that waits for approval shows **Approve** and **Reject**. Rejecting fails the run. The **Approvals** screen lists pending approvals first. Its **Approved**, **Rejected**, **Expired**, and **All** tabs show who resolved each approval and when.
+
+The Trigger field links a run that a schedule or heartbeat started to that automation. For a completed run, **Output** shows the run's final answer. Schedule and heartbeat runs keep that answer out of the thread transcript, so **Output** is where you read it.
+
+The thread page lists a thread's runs and its messages, oldest first. While a run of the thread is in flight, the thread page streams the assistant's reply into the transcript and shows **Live** next to the transcript heading. If the stream is unavailable, it refreshes every five seconds instead. A run page refreshes every five seconds while the run is in flight, and the **Runs** screen has a **Refresh** button. To find the thread of one of your product's end users, paste the thread ID or run ID that your backend stored into **Find** on the **Runs** screen.
+
+When a thread has automations, the thread page lists the ones whose fires continue the thread and the ones an agent created in it.
+
+**Cancel**, **Retry**, and **Replay** ask you to type the run ID's last eight characters, and **Reject** asks you to type `reject`. In a production environment, every action asks for a typed confirmation.
+
+## Manage artifacts
+
+The **Artifacts** screen lists every artifact in the environment that you can read, newest first. Filter by type, by content such as **Images** or **JSON**, by run ID, by thread ID, or by the day it was created. Each row links to the artifact and to the run and thread it belongs to. A run page and a thread page also list their own files.
+
+An artifact's page shows its status, type, media type, who can read it, its run and thread, its retention, and its metadata as JSON. It previews the file when that is safe:
+
+- PNG, JPEG, GIF, WebP, and AVIF images up to 20 MiB show as an image.
+- Plain text, CSV, JSON, and Markdown show their first 256 KiB as text.
+- HTML, SVG, XML, scripts, and PDF files never open in the console, because a browser can run code from them. Download them instead.
+
+**Download** saves the file. **Copy link** copies a download link that anyone can use for one hour, and the page shows when it expires. **Retention** sets the day after which the platform deletes the file. **Delete** removes the artifact at once and erases its bytes. It asks you to type `delete`.
+
+**Upload** on the **Artifacts** screen sends a file of up to 100 MiB. The browser computes the file's SHA-256 digest, sends the file to the platform's storage, and the platform checks it. Choose where it goes:
+
+- **Environment file** keeps it in the environment, for people and tools that read it by ID.
+- **Thread file** adds it to an existing thread's files.
+- **Input for a new run** uploads a private file of up to 10 MiB on a new thread of the deployment you choose. The artifact page then offers **Start a run with this file**, which runs the agent with your message and the file as input.
+
+If the upload fails, the dialog says why: the file is too large, its bytes did not match its digest, the upload link expired, or the network failed. Upload it again. An unfinished upload stays `pending` and expires within 24 hours. See [Artifacts](/docs/capabilities/artifacts).
+
+## Manage service accounts and API keys
+
+The **API keys** screen lists active service accounts with their keys, 25 accounts at a time. Select **All** to include disabled and archived accounts and revoked keys.
+
+- **Create service account** picks the account's scopes from the scopes you hold.
+- **Issue key** creates a key with some or all of the account's scopes and an optional expiry.
+- **Rotate** replaces a key's secret. The old secret stops working at once. To switch without an outage, issue a second key, move your backend to it, and then revoke the first.
+- **Revoke** on a service account disables the account and every key it holds.
+
+The console shows a new key's secret once. Copy it, select **I stored this API key**, and then select **Done**. A key's page counts its calls over the last 24 hours, 7 days, or 30 days and lists the most recent ones.
+
+## Operate schedules and heartbeats
+
+The **Automations** screen lists the environment's schedules and heartbeats in one table, active ones first by next fire. Filter by kind or origin, and select **All** to include archived ones. Next fire times are computed in the console from the expression and time zone, and **≈** marks an estimate. A badge flags an automation stuck in provisioning, one that missed an expected fire, or one whose last fire started no run. Archived and disabled automations show no badge.
+
+- **Pause** disables the timer. **Resume** turns it back on, and for an automation that is still provisioning it reads **Retry provisioning**.
+- **Fire now** fires the automation once and shows the run it started, or why it started none. Firing a one-time schedule uses it up.
+- **Archive** stops the automation for good and asks you to type its name, or the heartbeat ID's last eight characters.
+
+An automation's page lists its fires with the run each one started. Create and edit automations with the CLI. See [Schedules and heartbeats](/docs/capabilities/automations).
+
+## Manage webhooks
+
+The **Webhooks** screen has two tabs. **Endpoints** lists active and disabled endpoints, 25 at a time. Select **All** to include archived endpoints. **Deliveries** lists deliveries with status and endpoint filters.
+
+- **Create endpoint** takes a name, an HTTPS URL, and event types such as `run.completed`, or **All events**. The console shows the signing secret once.
+- **Send test** posts a test event and shows the response status and time.
+- **Disable** stops deliveries. Events that occur while an endpoint is disabled are never delivered. **Enable** resumes deliveries and resets the failure count.
+- **Rotate secret** issues a new signing secret. The previous secret keeps signing for the overlap you choose, 24 hours by default.
+- **Archive** removes the endpoint for good.
+
+A delivery page lists every attempt with its response status, headers, and body. **Retry delivery** sends a delivered or failed delivery again to an active endpoint.
+
+## Manage connections
+
+The **Connections** screen lists the environment's provider connections, 25 at a time, most recently updated first. It hides disconnected connections unless you pick another filter. **Needing attention** shows the connections in `error` or `reauthorization-required`, the same ones the overview's **Connections needing attention** block counts. That block links to this filtered list. The screen reads at most 2,000 connections and says so when the environment has more.
+
+**Add connection** connects a provider that takes a static credential, such as an API key, no credential at all, or an OAuth sign-in. For a static credential, the form shows the credential fields the provider declares. The credential goes to the credential vault, and the console never shows it again. When the provider's MCP server URL has a tenant placeholder, the form also asks for your tenant's URL.
+
+For an OAuth provider, click **Authorize**. The console opens the provider's consent page in the same tab, and you have 10 minutes to finish there. The platform then sends you back to the console, which opens the new connection. Verify it before you grant it. If you decline on the consent page or the platform cannot finish, the console says so and offers **Try again**. Some providers accept only OAuth clients registered with them. If the environment has no active OAuth app for such a provider, the form links to the **OAuth apps** tab instead. If several apps are active for the provider, pick one.
+
+A connection's page shows its scopes, its capabilities, when it was last verified, and its grants with the deployments and tools that pin each grant. Its actions depend on the connection's status and auth method:
+
+- **Verify** checks the credential with the provider. The check can take up to 25 seconds, and the page then shows its outcome. A successful verification records a capability with the verified scopes and makes the connection `active`.
+- **Grant** lets agent runs in one workspace use the connection. Pick an active workspace and the scopes, and optionally add resource constraints as a JSON object. The purpose is always `agent-runtime`. Until a verification records an active capability, **Grant** is disabled and shows **Verify first**. If the environment has no active workspace, the grant dialog links to the **Workspaces** screen.
+- **Rotate credential** replaces the credential of a static connection. Enter every field again, because the new credential replaces the old one as a whole.
+- **Revoke** disconnects the connection and revokes its active grants. The dialog counts the grants and the deployments that lose tools.
+- **Reauthorize** replaces an OAuth connection with a new authorization and moves its grants and deployment pins to the new connection. It is available in every status, including `disconnected`. See [Reauthorize an OAuth connection](#reauthorize-an-oauth-connection).
+- **Sync tools** appears on a connection of a vendor-hosted MCP provider. It lists the server's tools and creates, updates, or archives the matching extensions. The table that follows shows each remote tool's change, and why a rejected tool was rejected. Sync needs an active, verified connection and `providers:write`.
+- **Revoke** on a grant row revokes only that grant.
+
+**Rotate credential** and **Revoke** ask you to type the connection's name. Revoking a grant asks for the last eight characters of the grant ID. In a production environment, every action asks for a typed confirmation. Revoking a connection or a grant cannot be undone.
+
+Every organization role can read connections, grants, and workspaces. Only owners and admins can change them. Connection and grant actions need `providers:write`, and creating a workspace needs `workspaces:write`. Re-pinning deployments after a rotation also needs `agents:write`.
+
+### Restore grants after a credential rotation
+
+A rotation revokes every active grant of the connection, marks its capabilities `stale`, and sets the connection to `reauthorization-required`. The old credential cannot be restored. The runtime denies the tools pinned to the revoked grants until the new credential verifies and the deployments pin new grants. The rotate dialog shows how many grants and deployments the rotation affects.
+
+If the rotate request fails with a server error or a timeout, the rotation may be half done. The dialog locks its fields. Submit again to resend the same request and finish the rotation. A throttled (429) or forbidden (403) answer keeps the fields locked. If you close the dialog instead, the connection stays unusable until you revoke it. If the platform refuses the resent request, for example because the connection changed elsewhere, the fields unlock, and the next submission sends what you entered with the connection's current version. When the platform refuses a request with `version_conflict` or `rotation_cleanup_pending` and the dialog sent earlier requests, the dialog reads the connection's current version and resends the earlier requests that were read at an earlier version, because only the request that started a rotation can finish it. If that read fails, the dialog shows the error like a failed rotate request. A server error or a timeout locks the fields, a throttled (429) or forbidden (403) answer leaves them as they were, and any other refusal unlocks them. An earlier request that never started a rotation cannot start one this way. If a rotation is pending, the request that finishes it stores the credential it carried, which may be values you entered before a correction. The rebind page verifies the stored credential, and the connection page shows its external account. If it does not verify or the account is not the one you meant, rotate again.
+
+When the rotation succeeds, the console opens the connection's rebind page at `connections/<id>/rebind`. Each click on **Continue** runs these steps in order and stops when a step needs you:
+
+1. **Verify.** The console checks the new credential with the provider. If the check fails, click **Rotate again** to enter correct values, or click **Verify again**. After **Rotate again**, the page still restores the grants that the first rotation revoked. A rotation started from the connection's page starts a new restore instead, and the first rotation's grants appear under **Revoked earlier and still pinned** only if a deployment pins them.
+2. **Restore grants.** For each grant the rotation revoked, the console creates a grant in the same workspace with the same scopes, purpose, and constraints.
+3. **Re-pin deployments.** Each deployment that pinned a revoked grant gets the new grant's ID in its `runtimeConfig.toolAuthorizations`. The rest of its configuration stays the same.
+
+The page leaves some work to you:
+
+- A grant that was revoked before the rotation and that a deployment still pins appears under **Revoked earlier and still pinned**. It stays revoked unless you click **Restore** on its row.
+- A grant that asks for scopes the new credential does not hold stops the restore. Click **Skip** on its row to restore the rest.
+- A deployment whose current state is not `ready` or `paused`, such as `failed` or `deploying`, is not re-pinned, because an update would change its state. When the other steps are done, the page lists every live deployment that still pins a revoked grant: these deployments, the ones you skipped, and the ones that pin a grant you left revoked. Restore the grants they need, or point their tool authorizations at active grants yourself.
+- If the API rejects a grant or a re-pin with an error that retrying does not fix, for example because the grant's workspace was archived, the page shows the problem. **Skip and continue** skips that grant or deployment and runs the next step.
+
+The page plans each step from the platform's current state and from its own URL. You can reload it, leave and come back, or open the same URL in another browser to finish. Unless you hold both `providers:write` and `agents:write`, the page is read-only and says **An owner or admin must finish this**.
+
+If a deployment still pins a revoked grant of a connection, the connection's page says how many deployments have tools denied. For an OAuth connection that is not active, the notice links to **Reauthorize**. For any other connection that is not disconnected, it links to the rebind page with **Continue restoring**. Opened from that link, the page knows no rotation time, so it restores only the grants you choose with **Restore**.
+
+### Register OAuth apps
+
+The **OAuth apps** tab lists the environment's OAuth apps, which are the OAuth clients you register with providers. Each row shows the provider, the client ID, the status, how many connections refresh their tokens through the app, and when the app was created.
+
+**Register OAuth app** takes the provider, a name, the client ID, the client secret, and the scopes the app may request. All of the provider's scopes start selected. For a vendor MCP provider, also pick how the client authenticates at the provider's token endpoint. The client secret is optional only for `none`.
+
+The dialog shows the redirect URI to register with the provider and a **Copy** button. The URI is `<channel API origin>/public/provider-connections/oauth/callback/<key>`, where the key is the provider's OAuth key, such as `google` for Google Ads or `google-calendar` for Google Calendar. The console reads the channel API origin from its `CONSOLE_OAUTH_CALLBACK_ORIGIN` setting. Without that setting, the dialog shows a `<channel API origin>` placeholder. Replace it with your deployment's channel API endpoint when you register the URI with the provider.
+
+A client ID stays claimed in its environment after its app is archived, so registering the same client ID again fails with **Client ID already registered**. Each app row has these actions:
+
+- **Rotate secret** replaces the client secret for every connection that refreshes through the app. The dialog lists those connections, because a wrong secret makes their next token refresh fail.
+- **Archive** stops new authorizations from using the app. The dialog lists the connections that use the app, because they fail at their next token refresh, and asks you to type the app's name. Archiving cannot be undone.
+
+### Reauthorize an OAuth connection
+
+An OAuth authorization always creates a new connection. **Reauthorize** on an OAuth connection's page opens its rebind page at `connections/<id>/rebind?kind=reauthorize`, which moves everything to the new connection:
+
+1. **Authorize.** You authorize the provider account again on the provider's consent page.
+2. **Confirm and verify.** The page shows the new connection's name, account, creation time, and ID. Confirm that grants and pins should move to it, then click **Continue**, which checks the new connection with the provider.
+3. **Restore grants.** For each active grant of the old connection, and for each grant that the old connection's own revocation revoked, the console creates a grant on the new connection in the same workspace with the same scopes, purpose, and constraints. A grant revoked by hand earlier stays revoked unless you click **Restore** on its row.
+4. **Re-pin deployments.** Each deployment that pins an old grant gets the new grant's ID.
+5. **Revoke the old connection.** The page shows the new connection's account. Click **Revoke** and type the old connection's name.
+
+A provider links an account to one connection at a time. The page therefore decides, before it opens the consent page, whether to revoke the old connection first:
+
+- If the old connection is disconnected, or its account cannot be shared, the page authorizes first and revokes the old connection last. A vendor MCP connection with no account claim is such a connection.
+- If the old connection is in `error` or `reauthorization-required`, the runtime already denies its tools. **Revoke and authorize** first starts the authorization, so a refusal revokes nothing. It then asks you to type the old connection's name, revokes it, and opens the consent page. If the connection entered `reauthorization-required` less than two minutes ago, the platform may still be refreshing its token, so the page asks you to check again after a moment.
+- If the old connection is `active`, the page asks which account you will authorize. For the same account, the page revokes the old connection first after you type its name. Its tools stay denied until the page re-pins them, including the time you spend on the consent page. For a different account, the old connection keeps working until the last step.
+
+If the provider refuses the authorization, the page says so and offers **Authorize again**. If the platform could not finish the authorization and the old connection may still hold the same account, the page also offers **Revoke and authorize**. When the environment has several active OAuth apps for the provider, the page asks which one to use and starts with the old connection's app. For a vendor MCP provider whose server URL has a tenant placeholder, the page asks for your tenant's URL again before each authorization. Grants you skip or restore before you authorize come back with you from the consent page.
+
+The consent page expires after 10 minutes. If you finish later, the platform shows its own result page and does not send you back to the console. Open the old connection's page and click **Reauthorize** to authorize again. The page then restores the same grants.
+
+Reauthorizing needs `providers:write`. Restoring grants and re-pinning deployments also need `agents:write`.
+
+## Manage tool policies
+
+**Tool policies** under **Govern** has three tabs. Every organization role can read them. Only owners and admins can create, edit, or archive a policy, which needs `tools:write`.
+
+**Policies** lists the active policies by name, 25 at a time. Select **All** to include archived ones. The screen reads at most 2,000 policies and says so when the environment has more. A policy's page shows its rules in order, its default, and the live deployments that pin it to a tool.
+
+**Create policy** and **Edit** open the rules editor. The runtime checks rules from top to bottom, and the first match decides. Each rule has an action and any of these conditions, and a tool must meet every condition the rule sets:
+
+- **Tool name** matches one tool exactly. **Tool name prefix** matches every tool whose name starts with the text.
+- **Effect** matches any of the checked effects: `execute`, `read`, or `write`.
+- **Connector provider** matches the connection's provider key exactly. Custom MCP tools have the connector provider `mcp`.
+- **Provider** matches a provider key and its aliases.
+- **Granted scopes** matches when the connection grants every listed scope.
+
+A rule without conditions matches every tool. When no rule matches, the policy's default applies. Leave the default as **each tool's own default** to use the default that each tool's catalog entry declares. Policies decide connection tools: provider, MCP, and HTTP callback tools. Platform, hosted code, and client tools always follow their own default.
+
+The editor checks every field against the API contract as you type and marks the field that fails. It also marks a rule that can never decide a call: a rule after another rule that matches every call it matches, or a rule with no effect checked. You can still save a policy with such a rule. Provider aliases resolve only at run time, so the editor does not compare a provider with its aliases.
+
+**Save** shows the live deployments that pin the policy. Their next tool call uses the new rules. When a live deployment pins the policy, or the console cannot read every deployment, the dialog asks you to type the policy's name. When the environment has more deployments than the console reads, the dialog says that its list may be partial. If someone saved the policy after you opened the editor, the page says so and offers to load the newer version. Your unsaved changes are then discarded. You can change a policy's description but not remove it. Only an active policy can be edited.
+
+**Duplicate** opens the editor with a copy of the policy. Use a copy to stage a change: simulate it, then pin it to a deployment's tools. **Archive** cannot be undone. Deployments keep their pins to an archived policy, and the runtime denies every tool pinned to it with "Runtime tool policy is not active." When a live deployment pins the policy, the archive dialog lists it and asks you to type the policy's name. Like the save dialog, it says when its list may be partial.
+
+**Catalog** lists the platform's tools, 50 at a time, with filters for a name prefix, a provider, a text search, and status. Click a tool name to see its scopes and its input and output schemas. Your environment's extension tools are not in the catalog. Check tools and click **Simulate** to open the simulator with them.
+
+**Simulate** runs the platform's policy evaluation without side effects. Against a policy, enter up to 100 tool names. The simulator assumes each tool runs on its own provider with its required scopes granted. Against a deployment, it evaluates every tool that the deployment's primary release declares, with the grants and policies the deployment pins. Each result shows the decision, what decided it, the matched rule, and the reason. See [Tools](/docs/capabilities/tools).
+
+## Manage MCP servers
+
+The **MCP servers** screen lists the environment's [custom MCP servers](/docs/capabilities/mcp) with their origin, the size of their tool allowlist, whether they store a secret, and their active connections. Archiving deletes a server's secret, so an archived server shows its secret as deleted. Select **All** to include archived servers. The screen reads at most 2,000 servers and 2,000 connections and says so when the environment has more of either, because then the list and its connection counts may be incomplete.
+
+**Register server** takes a name, the server's HTTPS endpoint URL, the tool allowlist, and the authentication. The console splits the URL into the origin and the path that the API stores. Put one tool name per line, so a name can contain spaces or commas. List at least one tool, because the platform discovers and calls only allowlisted tools. For authentication, pick **None**, **Bearer token**, or **Authorization header** for a full header value such as `Basic …`. The secret goes to the credential vault, and the console never shows it again.
+
+A server's page shows its endpoint, allowlist, and connections. For each connection, it lists the grants on it and the deployments and tools that pin each grant. Its actions apply only to an active server:
+
+- **Edit** changes the name, endpoint, allowlist, or authentication, and sends only the fields you changed. A field you leave alone keeps its stored value exactly, even when the stored endpoint is not in the form the console would write. A stored secret can be kept or replaced but not removed. If the server stores a secret and you change its endpoint, enter a new secret too, because the platform does not send the stored secret to a different endpoint.
+- **Discover tools** connects with the stored secret and lists each allowlisted tool with its description and input schema. It saves nothing. A tool that the server did not advertise shows as `not advertised`. Once the console has the Extensions screen and your role can create extensions, each advertised tool links to **Create extension**, which opens the extension form for that remote tool. Until then, the list has no such link. Discovery fails if the server lists a tool outside the allowlist or echoes the secret back.
+- **Create connection** adds the connection that a workspace grant points at. Grant it with `deployments grant create --connection <connection ID>`.
+- **Archive** deletes the stored secret and stops discovery, new connections, and tool calls through the server.
+- **Revoke** on a connection row stops tool calls through the grants on that connection.
+
+Archiving a server or revoking a connection changes nothing else. The grants stay, and the runtime denies the tools of the deployments that pin them, so both dialogs list those deployments first. The console reads at most 2,000 of each of the environment's MCP servers, MCP connections, grants, and deployments. When the environment has more MCP servers or connections, the server's page says that it may have connections that are not listed, and **Archive** says that other deployments may pin its grants. When the environment has more grants or deployments, the page says that grants and pins may be missing, and both dialogs say that other deployments may be affected. When your role cannot read grants or deployments, both dialogs say that the console could not check which deployments would lose these tools. **Archive** asks you to type the server's name, and **Revoke** the last eight characters of the connection ID. In a production environment, every action asks for a typed confirmation. Neither can be undone.
+
+Every organization role can read MCP servers. Only owners and admins can change them, which needs `tools:write`. The grants and pinning deployments show when your role can also read grants (`providers:read`) and deployments (`agents:read`).
+
+## Manage extensions
+
+**Extensions** under **Connect** lists the environment's extension tools, 25 at a time, with their execution type, effect, default policy action, and status. Select **All** to include archived extensions, and filter by execution type. Vendor MCP tools appear here too, but only **Sync tools** on their connection changes them. The screen reads at most 2,000 extensions and says so when the environment has more. An extension past that limit still opens from the link the console follows after you create or edit it.
+
+- **Create extension** first asks for the execution type, which cannot change later. The form then takes the tool name, the description the model reads, the effect, the default policy action, the required scopes, and the input schema as JSON.
+- An **MCP** extension picks an active MCP server and one tool from its allowlist. It is always a read tool. The console reads the first 2,000 MCP servers and the first 2,000 MCP connections, and the picker says so when the environment has more of either. The server a discovered tool prefills, or the one an edited extension already uses, stays selectable either way.
+- An **HTTP callback** extension takes a provider key, `extension_callback` by default, the endpoint origin and path, optional workspace file patterns, and a callback secret. The console never shows the secret again.
+- A **client-executed** extension takes an optional timeout and output schema.
+- A **hosted code** extension takes a source file or pasted source, its language, the entrypoint, network mode, timeout, memory, the output schema, and secrets. The console uploads the source first. A TypeScript compile error stops the create with `hosted_code_compile_failed`, and nothing is created.
+- **Edit** changes everything except the name and the execution type. Moving an HTTP callback to a new endpoint needs a new callback secret. Hosted code keeps its artifact unless you upload new source, and keeps its secrets unless you replace the whole set. If someone changed the extension after you opened it, the console refuses the save and reloads the extension, keeping your edits. A field you left alone takes the newer value. A callback's endpoint origin, path, and secret stay together, and so do hosted code's source and entrypoint, so an edit to one of them keeps your whole group.
+- **Archive** disables the tool for every deployment that calls it and frees its name.
+
+The form names each invalid field before it sends anything. An extension's page shows its schemas and its timeout. For hosted code it also shows the entrypoint, memory, network mode, and the uploaded artifact. An archived extension still opens, but the API returns its schemas and limits only while it is active. Every organization role can read extensions. Only owners and admins can change them, which needs `tools:write`.
+
+## Manage agent email
+
+**Email** under **Connect** opens on **Inboxes**. A checklist at the top shows whether the environment can send [agent email](/docs/capabilities/agent-email): a verified domain, exactly one active default placement, and a policy whose sending is active. An environment without a saved policy sends under the platform defaults. When agent email is not installed on the platform, the screen says so.
+
+- **Inboxes** lists inboxes with a status filter. **Create inbox** takes an optional name, local part, and domain. Without a local part, the address uses the inbox ID. An inbox page renames, pauses, resumes, or archives the inbox and lists its bindings. **Bind** routes inbound mail to a deployment or records an external ID. The deployment must be running, and its release must accept the email trigger. An agent holds one active deployment binding per environment.
+- **Domains** lists the hosted domain and custom domains with the DNS records to publish. **Refresh** checks the records. **Revoke** retires a custom domain. The hosted domain cannot be revoked.
+- **Placements** creates a placement, makes one the default, or disables it. The console never requests a dedicated IP pool, which is billed monthly.
+- **Policy** pauses or resumes sending and edits the warmup stage, limits, allowlist, blocklist, and raw retention. Only changed fields are sent.
+- **Suppressions** adds or removes a manual suppression. Removing a bounce or complaint suppression also clears it at the email provider.
+- **Usage** totals messages and bytes over 24 hours, 7 days, or 30 days, for the environment or one inbox, and downloads the buckets as CSV or JSON. The platform refuses ranges over 31 days.
+- **Sending tenants** manages [sending email](/docs/capabilities/email) tenants: create, pause, and resume a tenant, add, refresh, and revoke its domains, and send from a verified domain. A send always asks you to type `send`, because every recipient can be outside the platform, and the console does not resend after an unknown outcome.
+
+An inbox page has **Threads**, **Messages**, and **Drafts** tabs. Threads and messages are searchable, messages filter by direction and status, and drafts filter by status. Each message search request reads 25 stored messages and returns the ones that match, so a page of results is often short, and **Load more** keeps searching. A request also stops early after reading 16 MiB of message bodies. Thread search pages can be short too. A filtered page can come back empty while more remain, and then the list shows only **Load more**.
+
+- A message page shows the addresses, status, body, and attachments. The console never renders HTML. It shows a message's text part, and **Show HTML source** shows any HTML part's exact markup as text. A message with only an HTML part has no text view, because a text approximation of HTML can hide words a mail client shows. Read its source, or download the raw message. **Download raw message** saves the original `.eml` and keeps you on the page. **Open** shows a plain text, PNG, JPEG, GIF, WebP, or PDF attachment in a new tab. The platform serves an attachment with the type its sender gave it, so an HTML or SVG file would run the sender's code in that tab, and the console shows the attachment's ID instead. For such a file, `deployments inbox-attachment access <attachment> --reveal` prints a link that expires in 300 seconds. Save the file from it with a download tool. Each link is fresh, because links expire. Sent mail has no raw message, and a raw message removed by retention says so.
+- **Send message**, **Reply**, **Reply all**, and **Forward** send from the inbox, with optional attachments and an optional send time. A reply goes to the original sender, or to its Reply-To. Reply all adds the original To and Cc, never the inbox itself. A forward with a note puts the note above the quoted original in both the text and HTML parts. The text, the quoted original, and the attachments count toward the console's size limit together.
+- The dialog labels each recipient as an inbox in this environment, an allowlisted address, or an address outside the environment. When any recipient is not an inbox in this environment, or the environment is production, you type `send` to confirm. If the environment's inboxes and allowlist cannot be read, the dialog says so and does not send. **Save draft** works without them.
+- A sent message's page refreshes every five seconds while it is queued, scheduled, or sending. A scheduled message leaves when the platform's maintenance sweep next reaches its environment, which can be several minutes after the send time.
+- **Reprocess** parses a stored inbound message again. It does not start bound agents again.
+- **New draft** saves a draft that sends only after review. A draft moves from **Submit for approval** to **Approve** or **Reject**, then **Send**, which opens the sent message. **Send** waits until it has read the draft's latest recipients. **Cancel draft** works until the draft sends. A rejected draft can be edited and submitted again. Editing saves cleared Cc, Bcc, and text. A draft's send time can move but cannot be removed, and an unchanged send time is kept as it is. Editing keeps a draft's HTML part unchanged and adds no text part to it, and the draft page shows that part.
+
+Owners and admins manage domains, placements, policy, suppressions, and sending tenants and their domains, and they approve, reject, and reprocess. Every role can read them, manage inboxes and bindings, send, and create, submit, cancel, and send drafts.
+
+## Manage memory
+
+**Memory** under **Knowledge** has five tabs. **Spaces** lists the environment's memory spaces, archived ones included. **Review** lists the open review items. **Search** searches the environment's active spaces. **Quality** shows recall quality over the last 24 hours or 7, 30, or 90 days. **Policies** lists the environment's memory policies. Every role can read spaces, search, quality, and policies. Owners and admins can read memories and the review queue, and they make every change.
+
+- **Create space** takes a name, an optional description, a kind (organization, shared, or agent), and an optional retention from 1 to 3650 days. Workspace spaces need a workspace ID, so create them with `deployments memory-space create`.
+- A space page shows the space and, for owners and admins, its memories and its agent grants. **Grant an agent** gives an agent definition in the environment `read` or `read-write` access. Granting an agent that already holds an active grant changes that grant's permission. **Change permission** switches an active grant between the two. **Revoke** ends a grant for good, and granting again creates a new grant.
+- **Memories** on a space page lists the space's active, archived, or deleted memories, 50 at a time. The page address keeps the chosen status. A memory whose content the platform stored outside the record shows its size, and an export includes its content. A deleted memory keeps its record without content. **Archive** moves an active memory to archived, **Restore** moves it back, and **Delete** removes an archived memory's content for good with an optional reason. Delete asks you to type the memory's ID. Restoring a memory that replaces an older one archives the older one. An archived space offers no Restore, because the platform refuses restores there. If a change may have applied before its request failed, the dialog locks its fields, and submitting again resends the same request with the same key.
+- **Import** turns each blank-line-separated block of text into one memory, up to 100 memories and 4 MiB, with an optional memory type. The platform collapses each run of whitespace in a block to one space and stores that text, and each block takes at most 8,000 bytes after the collapse. In a workspace space, each memory belongs to the space's workspace; in any other space, it is organization-scoped. The toast counts imported, already imported, and rejected memories, and when the platform rejects any block, a dialog lists each rejected block's number and reason. If the request fails after part of it may have been stored, the dialog locks its fields, and submitting again resends the same import with the same key.
+- **Export** downloads the space's memories as a JSON file, built from at most 500 memories read page by page. It starts no export job. When the space holds more, the toast says so. `deployments memory export --space <id> --reveal --json` prints one page; pass each page's `nextCursor` as `--cursor` to read the next. Without `--reveal`, the CLI redacts every memory body.
+- **Review** shows each open item with its memory's content, the reason, and any proposed content. The console looks for each memory among at most 200 memories it reads, active ones first, then archived ones. An item whose memory it did not reach shows the memory's ID, and an item whose memory is in neither list, after the console read both to the end, says it is not an active or archived memory. **Resolve** approves, edits, rejects, archives, or deletes the memory, with an optional reason. An edit takes the replacement content, and a delete asks you to type the memory's ID. Archiving a memory that is still pending review opens a new review item for it.
+- **Search** takes a query, 1 to 20 of the environment's active spaces, and 1 to 45 results. **Policy** retrieval uses the strategy the environment's memory policy chooses. Owners and admins can also pick one strategy for an evidence search, and they can rate each result **Useful**, **Neutral**, or **Harmful**. A result keeps one rating, so a later click replaces the earlier one, and Quality counts the latest. Each search makes a model call, plus a rerank call under `hybrid-rerank-v1`, and Quality records it.
+- **Quality** shows recall attempts, retrievals, latency percentiles, duplicate and canonical drop rates, retrieval feedback, and attempts per strategy. The counts cover at most the platform's sample of recall attempts in the window, which the tab states. The platform accepts a window of at most 90 days by its own clock, so the 90-day view starts five minutes later. The page address keeps the chosen window.
+- **Archive** on a space page retires the space for good. An archived space refuses imports, new grants, restores, and searches.
+- **Create policy** sets active recall and its rollout, the sensitivity mode, an optional retention, and the retrieval strategy for the environment or the organization. It offers only a scope that has no policy yet. **Edit** changes those settings on an existing policy. Each agent gets the most specific policy: its workspace's, then the environment's, then the organization's. So an environment policy applies to every agent in the environment except in workspaces with their own policy, an organization policy applies only where neither exists, and a workspace policy applies only in its workspace. The dialog names who the policy reaches and asks you to type a confirmation.
+- A policy's retention replaces the retention of every space it reaches, and it applies to existing memories too. Each memory expires that many days after it was created, and the platform permanently deletes memories past it. A policy without a retention leaves each memory to its space's retention. The dialog warns before a save that can delete memories the policy reaches: a new retention, a shorter one, or a new environment policy without a retention that takes over from an organization policy with one. It does not warn for an organization policy that an environment policy overrides, because that policy reaches no memories in the environment. Retention can be changed but not removed.
+- When a policy sets retrieval per purpose, with a partial rollout, or with a shadow strategy, the Policies tab shows it as `custom` with its settings, and the dialog keeps it unchanged. Change such a setting with `deployments memory-policy upsert`.
+
+Archiving a space or a memory, restoring or deleting a memory, saving a policy, importing, resolving a review, and searching need the organization's memory search, which an operator enables. Without it the platform answers with an internal error, and the console says memory search may not be enabled.
+
+## Manage workspaces
+
+The **Workspaces** screen lists the environment's workspaces. **Create workspace** takes a name, an optional slug, and an optional description. Every grant names a workspace, so create one before you grant a connection.
+
+## Manage managed skills
+
+**Skills** under **Build** has two tabs. Everyone in the organization can read both. Owners and admins can install and remove skills.
+
+- **Catalog** lists the platform's active managed-skill sources. Select **All sources** to include archived ones. A source page lists its releases, newest version first. A release page lists its skills with their dependencies and where each one is installed. **View** opens a skill's content and its reference file paths.
+- **Installed** lists the environment's active installations. Each row shows the release, who the skill serves (the whole environment or one agent), whether the release and source are still active, and each dependency's status. A dependency counts as installed when the same agent has it or the whole environment has it. When the source has a newer active release, the row links to it. When the same target already has a newer release of the skill, the row says so, and its button reads **Remove the older release**.
+
+**Install** on a release page installs a skill for the whole environment or for one active agent. Without `agents:read`, the dialog offers only the whole environment, and agents show by ID. The dialog lists every step before it runs. By default it installs the skill's missing dependencies first. Clear the checkbox to install the skill alone, for example when an agent-level installation of the dependency is enough. When the release page lists only part of the release, a missing dependency it cannot find is named, and the install stays blocked until you clear the checkbox. When the same target already has an older release of the skill, the dialog becomes **Upgrade**. It installs the new release, then removes the old installation, so the skill is never missing. When the target has a newer release, the dialog becomes **Replace with older release** and removes the newer installation the same way. If the chosen release is already installed next to another release, the dialog confirms the chosen release is installed before it removes the other one. If a step fails, submitting again finishes the rest without repeating the steps that ran. **Remove** takes the skill away from its target.
+
+Each release gives its skills new IDs, so a dependent skill needs the exact release it was published with. When an upgrade, a replacement, or a removal would leave an installed skill without a dependency, the dialog names each such skill and its target. Those skills stay installed and show the dependency as missing. When a change removes an installation and the environment has more installations than the console reads, an installation the console did not read may still provide the dependency, so the dialog says that the named skills may lose it. It also says that installed skills the console did not read may lose a dependency.
+
+**Remove** always asks you to type the skill key. **Install**, **Upgrade**, and **Replace with older release** ask for it in a production environment, when the change leaves an installed skill without a dependency, or when the change removes an installation and the console could not read every installation.
+
+The screens read at most 2,000 sources, 2,000 releases per source, 2,000 installations, 2,000 agents, and 200 installed skills, and say so when there are more. A release page reads at most 2,000 skills across the whole catalog, because the API filters a release's skills after paging all of them, and says when its list may be partial. See [Managed skills](/docs/capabilities/managed-skills) for how sources, releases, and installations work.
+
+Installing a skill does not change an agent's prompt. Agents read an installed skill's reference files with `managed_skills.reference.read`. The console cannot publish or archive catalog entries. Publishing needs a platform administrator holding `managed-skills:admin`, which the console never requests. Use `deployments managed-skill-release publish` instead.
+
+## Manage workflows
+
+**Workflows** under **Build** has three tabs, **Definitions**, **Executions**, and **Approvals**. Every organization role can read them. Only owners and admins can change or run workflows. Creating, editing, publishing, and archiving need `workflows:write`. Starting and canceling an execution need `workflows:execute`, and deciding an approval needs `approvals:write`. See [Workflows](/docs/capabilities/workflows) for how definitions, releases, and executions work.
+
+- **Definitions** lists the environment's active workflow definitions, 50 at a time, with their slug, status, draft version, and last update. Select **Archived** or **Active and archived** to see the others. When a filtered page comes back empty but more definitions remain, the list offers **Load more** instead of saying there are none. A definition page shows the draft's description, version, and steps, the draft document, the definition's releases with their content hash and publisher, and its executions. A release page shows the content hash, the publisher, the published document, and the release's executions.
+- **Executions** lists the environment's workflow executions, 50 at a time, with their status, current step, release, and creation and completion times. Without a status filter the API groups executions by status, not by time, and the screen says so. Filter by status to find, for example, the executions waiting for approval. The list refreshes every 30 seconds while it shows an unfinished execution.
+- **Approvals** lists the workflow steps waiting for a decision, with their execution, release, step, prompt, and waiting time. It reads at most 50 executions waiting for approval and the first 300 step attempts of each. When that leaves some out, the tab says the list may be missing steps and points to the **Executions** tab's status filter. The list refreshes every 30 seconds.
+
+An execution page shows its workflow, release, current step, workspace, input, output, and error, and its step attempts. Each attempt shows its status and the run, approval, tool call, or delivery it references. A run links to its run page. Expand an attempt to read its input and its output or error. The page refreshes every 5 seconds until the execution completes, fails, or is canceled. It reads the first 300 step attempts, oldest first. When there are more, it says so and warns that the current step may be among the ones it did not load.
+
+The API cannot filter executions by workflow or release, so definition and release pages read the environment's first 500 executions and show the ones that belong to them, grouped by status as on the Executions tab. When the environment has more, the page says that more may exist.
+
+**Create workflow** on the **Definitions** tab opens a JSON editor that starts from a sample approval workflow. The console checks the document against the workflow contract, including the step graph, and shows the problem before the platform stores anything. On a definition page, **Edit draft** changes only the draft, because releases and running executions keep the document they were published with. If someone saved the draft after you opened the editor, the save fails with a version conflict. Open the editor again to load their draft, then redo your change. **Publish release** turns the current draft into a new numbered release. **Archive** retires the definition so it can no longer be edited or published, but its active releases can still start executions, so archive them separately. On a release page, **Start execution** starts that release with an optional JSON input, and **Archive** stops new executions from starting from it. An archived definition or release cannot be restored. A started execution's agent, tool, and notification steps act for real and can incur cost.
+
+**Approve** and **Reject** appear on the **Approvals** tab and on the page of an execution waiting for approval. The decision dialog first reads the approval, with its prompt and deadline. Reading an approval after its deadline closes it as expired, and the dialog then says there is nothing left to decide. If another decision or a cancel closed the approval first, the console says nothing changed. If the deadline passed before your decision arrived, the console says your decision was not applied, and the execution follows the step's `onExpired` path, or fails without one. Once the console reports the outcome, the approval's row on the **Approvals** tab and its card on the execution page go away at once. An open decision dialog stays until you close it, with the row or card you opened it from, even when the tab's refresh no longer lists the approval or the execution moves on behind it. **Cancel execution** appears on the page of a queued, running, or waiting execution, and after a decision it stays hidden until the page shows the execution moving on. The workflow stops advancing and ends as canceled, and a pending approval on it closes as canceled. An agent run or tool call it already started can still finish, and the workflow ignores its result. Stop a run from its run page.
+
+Rejecting, canceling, and archiving always ask you to type a confirmation. In a production environment every workflow action does.
+
+## Manage Brains
+
+**Brains** under **Knowledge** lists the Brains you can read. A Brain belongs to the organization, so the list is the same in every project and environment. You see a Brain when you own it or hold a grant on it, yourself or through your organization role.
+
+- **Create Brain** takes a name, a slug of up to 80 characters, a kind, and a sensitivity label. You receive the owner grant. Only organization owners and admins see the **Company** kind. Everyone else creates a **Private** Brain. Creating needs membership in the organization, so a platform administrator outside it does not see the button. Sensitivity is a label, and search does not filter on it.
+- **Sources** lists the Brain's sources. An owner can **Add upload source**. GitHub sources sync every hour and the API cannot pause or remove them, so the console leaves them to `deployments brain-source create`.
+- **Upload** on an active upload source sends one Markdown, plain text, CSV, JSON, HTML, or PDF file up to 3.2 MB (3,362,712 bytes), as the file picker counts megabytes, and opens the captured document. The console refuses a larger file before sending it. Upload files up to 8 MB with `deployments brain-upload` and `deployments brain-document capture`. The identity names the document in its source, so a new upload with the same identity becomes the document's next version. A failed upload can be sent again to finish it. When its five-minute upload window has closed, the dialog says the upload did not finish, and uploading again starts a new upload.
+- **Documents** lists index health for each document version the indexer has processed, and opens a document or an entity by ID. The API has no document or entity list. If documents you uploaded never appear in index health, Brain search is not enabled for the organization, and an operator has to enable it.
+- A document page shows the document and its current version. **Archive**, **Tombstone**, and **Restore** capture a new version. Tombstone asks you to type `tombstone` and is the only way to delete a Brain document. Restore brings back the content the document last held. After a server error, sending the same change again returns the version it already captured, if the first attempt went through.
+- An entity page shows the entity's aliases and up to 50 of its edges, linked to their documents and entities.
+- **Review** lists open review items: documents with identical content and, once indexing runs, proposed entity merges. **Resolve** approves or rejects an item, which only records the decision, or merges an entity-merge item's candidates into the one you pick after you type `merge`. After a server error, submitting again sends the same decision unchanged. If the first attempt went through, the repeat either returns the recorded decision or stops at a version conflict; either way the item leaves the queue. The platform cannot yet record a decision on a duplicate-document item, so those items have no **Resolve** button. Remove a copy by archiving or tombstoning its document.
+- **Access** lists grants and mounts and appears only to the Brain's owners. **Add grant** gives a person, everyone with an organization role, an agent in this environment, or a service account a permission on the Brain. The person list offers active members who hold no grant on the Brain. A private Brain takes only agent and service-account grants. **Revoke** asks you to type `revoke`, and **Unmount** asks you to type `unmount`. The console refuses to revoke the last owner of a company Brain or the owner of a private Brain. **Mount on a deployment** attaches the Brain to an agent deployment in this environment, which needs an agent grant first. In a production environment, an agent grant asks you to type the agent's name, a service-account grant asks for the last eight characters of the service account ID, and a mount asks for the last eight characters of the deployment ID.
+- **Settings** appears only to owners and edits the name, slug, and sensitivity. Anyone else who opens it by URL sees the details read-only. When someone else saves the Brain while you edit it, the dialog says so and offers to load the latest details.
+- **Search and ask** on the Brains list, or **Search this Brain** on a Brain, opens a page where you choose up to 20 Brains and search them or ask a question. Nothing runs until you submit. A search embeds the query with one model call, and asking also makes up to two answer-model calls. Each counts one Brain retrieval in this environment's usage. Search results link each excerpt to its document. An answer lists its claims with numbered citations to their documents and lists what the evidence did not cover. **Rate this result** records whether the query was useful, neutral, or harmful, with an optional note. A new rating replaces the usefulness, but an earlier note stays unless you write a new one. Anyone in the organization who can read Brains can replace that rating. When search fails with a server error, the page says Brain search may not be enabled for the organization, which an operator sets up, and shows the status and request ID. When the platform install has no Brain query runtime, the page says that instead.
+- **Archive** on Settings asks you to type `archive`. Archiving is permanent. The Brain disappears from every list, no one can read, search, or change it again, and there is no unarchive. The console then opens the erase page.
+- The erase page holds the version the archive returned, which the console cannot read again, so erase from that page or keep its address. **Erase Brain** asks you to type `erase`. It deletes every stored version of the Brain's documents, the memories derived from it, its search index entries, and its records. It runs in the background and cannot be stopped or undone. The erasure page refreshes until it finishes, then shows the records deleted and the absence checks. The API lists no erasures, so keep that page's address. After a server error, the dialog sends the same request again. If the platform answers that a request with that key is still in progress, an earlier attempt is running or has started the erasure, and the console cannot open its page.
+
+The API reports no permission of your own on a Brain. The console treats you as an owner when it can list the Brain's grants. Otherwise it hides Access and Settings. Upload, document changes, and review stay visible, and the API refuses them unless you hold a writer, curator, or owner grant. A refused upload, document change, or review decision names that grant.
+
+The API answers a refused Brain request, such as a taken slug or a duplicate grant, with the same 500 as a write whose outcome is unknown. That 500 `internal_error` also frees the request's idempotency key, so a resend runs the write again. After a 500, a Brain dialog locks its fields, and submitting again sends the same request. When the first attempt went through, most dialogs refuse the repeat. A taken slug refuses a second Brain, an active grant refuses a second grant for the same grantee, and an active mount refuses a second mount on the same deployment. Each of those refusals is another 500. A changed version refuses a repeated edit or revoke with a version conflict, and the console then loads the latest version. When a revoke meets a version conflict, the dialog sends the grant's or mount's current version next, or closes when it is no longer active. Nothing refuses a second upload source, so a repeat can add another one. In the create, grant, mount, and upload source dialogs, **Leave unfinished** closes the dialog and reloads the list behind it. Check the Brains list, the grants, the mounts, or **Sources** there before you open the dialog again.
+
+## Manage budgets
+
+**Budgets** under **Usage** lists the active and paused budgets that govern the environment: its own, its project's, and the organization's. Select **All budgets** to see every budget in the organization, archived ones included, 25 at a time. Each row shows this period's spend, and a budget that refuses new runs shows **refusing**. Owners, admins, and billing members can change budgets. Everyone else can read them.
+
+- **Create budget** takes a name, a target (the organization, a project, or an environment), a period, an amount in US dollars with up to six decimal places, and alert thresholds. Commas may only group thousands, as in `1,000.50`, and the dialog shows the amount it read. Period and target cannot change later.
+- **Edit** changes the name, amount, or thresholds. If someone changed the budget after you opened the dialog, the console refuses the edit and reloads the budget.
+- **Pause** lifts a refusal and stops alerts. **Resume** turns the budget back on.
+- **Archive** retires the budget for good. Its period history stays readable.
+
+When a create, edit, or resume would refuse new runs at once because this period's spend already reaches the amount, the dialog names the environments that would be affected and asks you to type a confirmation. When the console cannot see the spend, as for a new budget on a target that has no other budget for that period, the dialog warns instead. A budget page lists its periods with spend and the alerts sent. Past periods are measured against the current amount.
+
+When a budget refuses new runs in an environment, the environment overview names it and links to it. The overview checks the organization's newest 1,000 budgets and says so when there are more. When **Retry** or **Replay** fails with **Budget exhausted**, the dialog links to the budget that refused the run, and so does a failed evaluation case.
+
+## Manage alerts
+
+**Alerts** in the organization menu has three tabs. Every member can read them. Owners and admins can change monitors.
+
+- **Incidents** lists alert incidents across the organization, newest first. Each row shows whether the incident is firing or resolved, its monitor, what happened, and where. Open one to see its timeline: when it fired, each repeat, when it resolved, and whether anyone was told.
+- **Monitors** lists the organization's monitors with their state (`ok`, `firing`, `muted`, or `archived`), condition, and recipients. **Create monitor** asks what to watch, then shows only that kind's fields, checked against the same limits as the API. Pick the recipients by role or by member, choose whether to send webhook events, and choose whether to repeat the alert while it stays firing. A monitor's page has **Edit**, **Mute** (for a time or until unmuted), **Send test**, which emails only you, and **Archive**.
+- **Email settings** holds your own alert email choice for the organization: all alert email, or none, and monitors you muted for yourself. Every alert email links here.
+
+Each environment also has **Alerts** under **Observe**, which lists that environment's incidents and monitors. See [Alerts](/docs/capabilities/alerts).
+
+## Govern organization data
+
+**Data governance** in the organization switcher shows the organization's retention policy, its exports, and the history of every export and erasure. Everyone in the organization can read it. Owners and admins can change retention and start exports.
+
+- **Edit retention** sets how many days each class of data stays. Every class takes 1 to 3,650 days, and audit events take at least 365. Shortening a class deletes older records at the next daily sweep, so the dialog asks you to type the organization slug. If someone changed the policy after you opened the dialog, the console refuses the save and reloads the policy into the dialog. Your edits stay, every class you left alone shows the new value, and you can review and save again.
+- **Export data** writes every record the organization holds into one file. **Export audit log** writes every audit event into a hash-chained archive and a signed manifest, both locked against deletion until the audit retention ends.
+
+An export's page refreshes until the export finishes, then shows each file's size and SHA-256 digest. **Download** and **Download records** save a data export file or an audit export's records without leaving the page. **View manifest** opens a JSON manifest in a new tab. An audit export has a signed manifest, and a data export larger than 128 MiB is a manifest of storage parts that only an operator can read. Each button creates a fresh link on each click, because a link expires five minutes after the platform signs it. The history table works the same way.
+
+Thread and end-user erasures also appear in the history with their status, request time, and ID. The console does not start them, so their rows are read-only, with no page, files, or retry.
+
+### Erase an organization
+
+Only an owner or a platform administrator sees **Erase organization**. The section lists what erasure keeps: copies held by providers, audit exports until their lock ends, and the erasure receipt. Type `ERASE` to confirm. The console then opens the erasure's own page, which works after the organization is gone, and refreshes it until the erasure finishes or stops. If it stops, for example because runs are still active, the page names the cause. Only an owner or a platform administrator sees **Resume erasure**, which also asks you to type `ERASE`, and only the person who requested the erasure can resume it. After a resume, the page checks the erasure every 5 seconds for up to a minute until it runs again. See [Data governance](/docs/capabilities/governance) for what erasure deletes.
+
+## Read audit logs
+
+The organization's **Audit log** lists administration: members, invitations, projects, environments, retention, and governance requests. **Audit log** under **Govern** lists activity inside one environment. Each row shows the time, the event, the actor, the resource, and any recorded change. Filters match exactly: the event name, the actor's ID, the changed resource's ID, and a time window. A filtered page can come back empty while older events remain, so **Load more** keeps searching. In the environment log, a row opens the event's page.
+
+## Review stored secrets
+
+**Secrets** under **Access** lists every credential the environment stores for connections, OAuth apps, MCP servers, webhooks, channel bindings, and tool adapters. Each row shows the owner, the purpose, the status, how many times the secret was rotated, and its expiry. Filter by owner type, and open the owner to rotate or revoke the secret there. The console never reads or shows a secret value.
+
+## Manage the model policy
+
+**Models** under **Govern** has two tabs. **Catalog** lists the models the platform knows, 50 at a time, with provider, capabilities, context window, and the price per million input and output tokens. Filter by provider, capability, whether this environment allows the model, and whether it is curated, or search the model ID and name. A model shown as not allowed can still run for an agent or workspace that an operator grant covers.
+
+**Policy** shows the environment's model policy and the history of past policies. Without a policy, the environment allows only the curated models. Owners and admins can change the policy. Everyone else can read it.
+
+- **Create policy** and **Edit** take a name, a description, whether the curated models stay allowed, and the models to allow, one entry per line. An entry is an exact model ID from the catalog, such as `openai/gpt-4o`, or a whole provider, such as `openrouter/*`.
+- **Archive** retires the policy, and the environment returns to the curated models.
+
+Every run admits its primary model and each fallback again when it starts, so a policy change can fail the next run of a deployment that is already running. Before each create, edit, or archive, the dialog checks the primary and canary releases of every deployment that is not stopped. It lists the releases that would lose a model, with their deployments, and rejects entries that the platform would reject. The check reads at most 2,000 deployments, 200 releases, and 2,000 catalog models. When the catalog is longer, the dialog lists the exact entries it could not find as not checked, and the platform checks them when you save. Each time you open the dialog it checks again, and the button stays disabled until that check finishes.
+
+The dialog asks you to type the policy name before it saves or archives in three cases:
+
+- The environment is a production environment. Every create, edit, and archive there asks.
+- A live release would lose a model.
+- The check is incomplete: a release could not be read, more than 200 releases are live, or the deployment or model list is longer than the check reads. The dialog names every cause that applies.
+
+For a create or edit, the name to type is the name in the form, and the dialog shows it above the field. If someone saved the policy after you opened the editor, the save fails with a version conflict. Reload the page and edit again.
+
+## When something fails
+
+If the API refuses an action, the console shows the problem title, its status, its `code`, and the request ID. A 403 means your role or token scopes do not permit the operation. Quote the request ID when you report a problem. [Errors](/docs/api/errors) lists common codes.
+
+If a change fails without an answer from the platform, such as a timeout or a server error, the platform may still have applied it. A dialog whose request carries an idempotency key then locks its fields and says so. Submitting again repeats the request under the same key. If the first request applied and the page's data has changed since, the platform refuses the repeat as a conflict. Some operations can still apply it a second time after a server error, so check first when that matters. To change the request, choose **Leave unfinished** and open the dialog again, which starts a new request. A dialog whose request carries no key refuses to resubmit and asks you to close it and check.
+
+## Reference
+
+- [Authentication](/docs/getting-started/authentication)
+- [Organizations, projects, and environments](/docs/capabilities/tenancy)
+- [Agents, releases, and deployments](/docs/capabilities/agents)
+- [Observability](/docs/capabilities/observability)
+- [Evaluations](/docs/capabilities/evaluations)
+- [Usage and budgets](/docs/capabilities/usage-and-budgets)
+- [Brains](/docs/capabilities/brains)
+- [Models](/docs/capabilities/models)
+- [Managed skills](/docs/capabilities/managed-skills)
+- [Threads and runs](/docs/capabilities/threads-and-runs)
+- [Schedules and heartbeats](/docs/capabilities/automations)
+- [Approvals and client tools](/docs/capabilities/approvals-and-client-tools)
+- [Service accounts and API keys](/docs/capabilities/service-accounts-and-api-keys)
+- [Webhooks](/docs/capabilities/webhooks)
+- [Memory](/docs/capabilities/memory)
+- [Providers and connections](/docs/capabilities/providers-and-connections)
+- [Tools](/docs/capabilities/tools)
+- [Data governance](/docs/capabilities/governance)

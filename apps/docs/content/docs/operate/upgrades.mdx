@@ -1,0 +1,103 @@
+---
+title: "Upgrades and rollbacks"
+description: "Move an installation to another platform commit: find what changed, check for rollback barriers, build and deploy the new release, roll back safely, and keep CLI and SDK versions in step."
+---
+
+An installation runs one release bundle, and a release bundle is built from one commit of this repository. Upgrading means building a bundle from a newer commit and deploying it with the same target. Rolling back means deploying a bundle from an older commit. The platform has no release channel or schedule of its own: any commit you can build is a release you can deploy. [Deploying the platform](/docs/operate/deployment) describes the commands this page uses.
+
+## Find the running release
+
+The [installation record](/docs/operate/deployment#the-installation-record) holds the source commit and the release digest, the SHA-256 of `release.json`, of the last successful deploy. A platform administrator reads it with the CLI:
+
+```bash
+deployments system installation
+deployments system deployments
+```
+
+`installation` shows the current record, including `sourceCommit` and `releaseManifestSha256`. `deployments` lists the recorded deploys, newest first. A deploy that failed verification is never recorded.
+
+## Review what changed
+
+The repository uses Conventional Commits. A commit that breaks an operator or API contract carries `!` after its type or scope, such as `feat(api)!: ...`, and explains the break in a `BREAKING CHANGE:` footer. List the commits between the running release and the one you plan to deploy:
+
+```bash
+git log --oneline <running commit>..<new commit>
+git log --grep='BREAKING CHANGE' <running commit>..<new commit>
+```
+
+Then compare your var file with the root's variables. A new required variable, or a new validation rule, fails the plan before anything changes. `infrastructure/environments/customer/tests/terraform.tfvars.json` is the sample the root's tests plan at every commit, so a diff of that file shows new settings.
+
+## Check for rollback barriers
+
+Some changes make it unsafe to go back to an older release after you deploy a newer one. The deploy tool calls them rollback barriers:
+
+| Reason             | Detected when the commit range                                                                           |
+| ------------------ | -------------------------------------------------------------------------------------------------------- |
+| `terraform-moved`  | adds a `moved` block to a `.tf` file. Older code would not know the new resource addresses.              |
+| `record-schema`    | changes a file under `packages/db/src/records/`. Older code may not decode records the newer one writes. |
+| `deploy-migration` | adds or modifies a deploy migration, a file named `scripts/platform-deploy/*-migration.ts`.              |
+
+Run the check from a checkout that has both commits:
+
+```bash
+bun run deploy -- release compat --from <running commit> --to <new commit>
+```
+
+The command prints JSON with `rollbackBarrier` and the list of `reasons`. It reads only git history and changes nothing. When `rollbackBarrier` is `true`, plan the upgrade as one-way: after you deploy it, fix problems by deploying a newer commit, not an older one.
+
+When you keep releases in a [release registry](/docs/operate/release-registry), `release publish` records each release's barriers against the previous release, and `release rollback-check` walks that chain for you. See [Check a rollback](/docs/operate/release-registry#check-a-rollback).
+
+## Data model changes
+
+The platform keeps canonical state in DynamoDB records that every reader decodes through a versioned schema. `packages/db/README.md` is the source of truth for the data model. Changes do not come with backfills, dual writes, compatibility reads, or migration machinery unless the change itself explicitly migrates persisted data. When one does, it ships as a deploy step, and `release compat` reports it.
+
+This is why a record schema change is a barrier. A newer release can write records an older release rejects on read, and nothing converts them back.
+
+## Upgrade
+
+Run from a clean checkout of the new commit, with the deploy role's credentials:
+
+```bash
+git checkout <new commit>
+bun install
+bun run deploy -- release build
+bun run deploy -- deploy --target acme.target.json
+```
+
+The deploy tool refuses a bundle built from another commit and a checkout with tracked modifications, so the commit you check out is the version you install. When your configuration lives in another repository with this one as a git submodule, move the submodule pin to the new commit and build inside it. See [Keep your configuration in your own repository](/docs/operate/deployment#keep-your-configuration-in-your-own-repository).
+
+The pipeline orders the rollout so a failure stops before it reaches the next layer:
+
+- OpenTofu applies the whole root before any Lambda code changes.
+- The tool waits for the agent worker's ECS rollout. A failed rollout, or a circuit-breaker rollback to the previous task definition, fails the deploy before new Lambda code is released.
+- The console's static assets upload before the new server code, so new pages never reference missing assets.
+- Only Lambda functions whose code changed are updated, eight at a time, and no new update starts after a failure.
+- The tool records the installation only after the API, the public end-to-end suite, and the console pass verification.
+
+A deploy that fails partway leaves the installation on a mix of old and new components. Fix the cause and run the same deploy again, or deploy the previous release if no barrier lies between them.
+
+## Roll back
+
+A rollback is a deploy of an older release, with the same rules as an upgrade:
+
+1. Check that no barrier lies between the two releases. With a registry, run `release rollback-check` with the running and target digests. Without one, run `release compat --from <older commit> --to <running commit>`. If it reports a barrier, roll forward instead.
+2. Check out the older commit cleanly, then build its bundle or fetch it from your registry with `release fetch`.
+3. Deploy it with your target.
+
+The deploy tool must run from the release's commit, so a rollback always uses the older commit's deploy tool and OpenTofu configuration. OpenTofu plans that older configuration against the current state, so it destroys resources that exist only in the newer configuration.
+
+## Tool versions
+
+The roots require OpenTofu 1.13.0 or later. The repository's `deploy-platform` GitHub action pins Bun 1.4.4 and OpenTofu 1.13.2. A commit can raise these versions, so install the versions the commit you deploy expects.
+
+## CLI and SDK versions
+
+`@agentifiers/deployments-cli` and `@agentifiers/deployments-sdk` are published to npm separately from the platform. Changesets version them, and the two packages always share one version number. Prereleases are published under the `next` tag, and stable versions under `latest`.
+
+The public API has one contract, `/v1`. To check that a client matches your installation, compare the contract the client was built from with the installation's OpenAPI document:
+
+```bash
+deployments openapi --json
+```
+
+[Versioning and limits](/docs/api/versioning-and-limits) explains the contract metadata the SDK records.

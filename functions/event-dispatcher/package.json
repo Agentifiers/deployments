@@ -1,0 +1,21 @@
+{
+  "name": "@deployments-ai/event-dispatcher",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --target=node --format=esm --outfile=dist/index.mjs",
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-eventbridge": "3.1090.0",
+    "@aws-sdk/util-dynamodb": "3.996.7",
+    "@deployments-ai/events": "workspace:*",
+    "effect": "4.0.0-beta.92"
+  }
+}

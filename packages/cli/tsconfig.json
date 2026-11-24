@@ -1,0 +1,21 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/cli",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/cli.tsbuildinfo"
+  },
+  "include": ["package.json", "src/**/*.ts"],
+  "references": [
+    {
+      "path": "../agent-manifest"
+    },
+    {
+      "path": "../api-contract"
+    },
+    {
+      "path": "../sdk"
+    }
+  ]
+}

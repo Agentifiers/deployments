@@ -1,0 +1,24 @@
+{
+  "name": "@deployments-ai/identity-email-worker",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/dispatcher.ts src/worker.ts src/reconciler.ts --target=node --format=esm --outdir=dist",
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1090.0",
+    "@aws-sdk/client-kms": "3.1090.0",
+    "@aws-sdk/client-sesv2": "3.1090.0",
+    "@aws-sdk/client-sqs": "3.1090.0",
+    "@aws-sdk/lib-dynamodb": "3.1090.0",
+    "@aws-sdk/util-dynamodb": "3.996.7",
+    "@deployments-ai/db": "workspace:*",
+    "@deployments-ai/identity": "workspace:*",
+    "@deployments-ai/identity-emails": "workspace:*",
+    "effect": "4.0.0-beta.92"
+  }
+}

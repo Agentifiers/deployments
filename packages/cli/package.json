@@ -1,0 +1,32 @@
+{
+  "name": "@agentifiers/deployments-cli",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "license": "MIT",
+  "bin": {
+    "deployments": "./src/bin.ts"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./catalog": "./src/catalog.ts",
+    "./commands": "./src/commands.ts",
+    "./custom-command-routes": "./src/custom-command-routes.ts",
+    "./exit-codes": "./src/exit-codes.ts"
+  },
+  "scripts": {
+    "build": "bun ../../scripts/build-cli-package.ts",
+    "start": "bun src/bin.ts",
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@agentifiers/deployments-sdk": "workspace:*",
+    "@clack/prompts": "1.7.0",
+    "@deployments-ai/agent-manifest": "workspace:*",
+    "@deployments-ai/api-contract": "workspace:*",
+    "citty": "0.2.2",
+    "cli-table3": "0.6.5",
+    "picocolors": "1.1.1"
+  }
+}

@@ -1,0 +1,142 @@
+---
+title: "Sending email"
+description: "Send transactional email from verified domains through sending tenants."
+---
+
+Sending email delivers one-way transactional messages, such as notifications and sign-in links, from a domain you own. Each message goes out through a sending tenant that isolates its reputation from other tenants. Use it when your application sends mail. When an agent needs an address that receives mail and holds a conversation, use [Agent email](/docs/capabilities/agent-email) instead.
+
+<Callout type="warn" title="Availability">
+  Sending email runs on the agent email runtime, which an installation from the customer root runs
+  by default. Delivery needs SES production access in the installation's region.
+</Callout>
+
+## How it differs from agent email
+
+|                 | Sending email                                | Agent email                                                  |
+| --------------- | -------------------------------------------- | ------------------------------------------------------------ |
+| Direction       | Send only                                    | Receive and send                                             |
+| Routes          | `/v1/email`                                  | `/v1/agent-email`                                            |
+| Message history | None. The platform stores no message bodies. | Messages, threads, and attachments                           |
+| Capabilities    | `email:read`, `email:write`, `email:admin`   | `agent-email:read`, `agent-email:write`, `agent-email:admin` |
+
+Agent email capabilities do not authorize `/v1/email` routes.
+
+## Resources
+
+| Resource       | What it is                                                                                                                                                                                                   |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Sending tenant | An isolated sender with its own provider tenant and configuration set. `status` is `active` or `paused`. `sendingStatus` reports the provider state: `provisioning`, `enabled`, `reinstated`, or `disabled`. |
+| Sending domain | A domain that belongs to one tenant. Status is `pending`, `provisioning`, `pending_dns`, `verified`, `failed`, or `revoked`.                                                                                 |
+
+Every route is environment scoped and needs the `x-deployments-environment` header. Every mutation needs an `Idempotency-Key` header.
+
+## Verify a domain
+
+Registering a domain returns the DNS records to publish in `dnsRecords`: an ownership `TXT` record, `CNAME` records for DKIM, and records for the custom MAIL FROM domain. Send-only domains never get an inbound `MX` record. Publish the records, then refresh the domain. It stays `pending_dns` until the records resolve and becomes `verified` when they do.
+
+Sends require a `verified` domain, so revoking a domain stops sends from it.
+
+## Send a message
+
+A send names a `from` mailbox on a verified domain of the same tenant, at least one `to` recipient, a `subject`, and a `text` body, an `html` body, or both.
+
+| Rule       | Limit                                                                           |
+| ---------- | ------------------------------------------------------------------------------- |
+| Recipients | At most 50 across `to`, `cc`, and `bcc`                                         |
+| Body       | At least one non-empty body. `text` and `html` together at most 1 MiB of UTF-8. |
+| Subject    | At most 998 characters, no control characters                                   |
+| Mailboxes  | One address each, display names allowed, no header injection                    |
+
+The API answers `202` with `status: "accepted"` and a `providerMessageId` once the provider accepts the message. Accepted does not mean delivered. Delivery to the recipient's mail server happens later, and this route does not report it.
+
+| Status | Code                         | Meaning                                                            |
+| ------ | ---------------------------- | ------------------------------------------------------------------ |
+| `202`  |                              | The provider accepted the message                                  |
+| `409`  | `email_domain_not_verified`  | The `from` domain is not verified in this tenant                   |
+| `409`  | `email_tenant_paused`        | The tenant is paused                                               |
+| `422`  | `email_send_rejected`        | The provider rejected the message                                  |
+| `429`  | `email_send_throttled`       | The provider's sending limit was reached                           |
+| `500`  | `ambiguous_write_outcome`    | The platform cannot tell whether the provider accepted the message |
+| `503`  | `email_provider_unavailable` | The provider is unavailable or misconfigured before the send       |
+
+<Callout type="error" title="Do not resend after an ambiguous outcome">
+  The platform calls the provider once per send and never retries it, because the provider has no
+  idempotency token. After `ambiguous_write_outcome`, the idempotency key stays claimed, so
+  repeating the request with the same key does not send again. The idempotency record lasts 24
+  hours. A retry after that, or with a new key, can deliver a duplicate.
+</Callout>
+
+## Permissions
+
+| Capability    | Allows                                                                                                       |
+| ------------- | ------------------------------------------------------------------------------------------------------------ |
+| `email:read`  | List and read tenants and domains                                                                            |
+| `email:write` | Send messages                                                                                                |
+| `email:admin` | Create and update tenants, and create, refresh, and revoke domains. Includes `email:read` and `email:write`. |
+
+A human keeps `email:admin` only with the organization `owner` or `admin` role.
+
+## Use it
+
+1. Create a sending tenant:
+
+   ```sh
+   deployments email-tenant create --name "Product notifications"
+   ```
+
+2. Register your domain and read the DNS records to publish:
+
+   ```sh
+   deployments email-domain create $EMAIL_TENANT_ID --domain mail.example.com
+   ```
+
+3. After you publish the records, refresh until the status is `verified`:
+
+   ```sh
+   deployments email-domain refresh $EMAIL_DOMAIN_ID
+   ```
+
+4. Send a message. `--to` takes a JSON array, and `--text-file` reads the body from a file:
+
+   ```sh
+   deployments email send $EMAIL_TENANT_ID --from "Example <notify@mail.example.com>" --to '["user@example.com"]' --subject "Your report is ready" --text-file body.txt
+   ```
+
+The same send through the SDK:
+
+```ts
+import { createClient, createConfig, sendEmail } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data, error } = await sendEmail({
+  client,
+  path: { tenantId: "etn_123" },
+  headers: {
+    "idempotency-key": crypto.randomUUID(),
+    "x-deployments-environment": "env_123",
+  },
+  body: {
+    from: "Example <notify@mail.example.com>",
+    to: ["user@example.com"],
+    subject: "Your report is ready",
+    text: "Your weekly report is ready to view.",
+  },
+});
+```
+
+Reuse the same idempotency key for every attempt to send the same message.
+
+In the [management console](/docs/getting-started/console#manage-agent-email), the **Sending tenants** tab under **Connect › Email** creates, pauses, and resumes tenants, adds and refreshes domains, and sends a message from a verified domain.
+
+## Reference
+
+- API: [Create an email tenant](/docs/api/reference/email/create-email-tenant), [Create an email domain](/docs/api/reference/email/create-email-domain), [Refresh an email domain](/docs/api/reference/email/refresh-email-domain), [Send email](/docs/api/reference/email/send-email)
+- CLI: [`deployments email-tenant`](/docs/cli/reference/email-tenant#email-tenant-create), [`deployments email-domain`](/docs/cli/reference/email-domain#email-domain-create), [`deployments email send`](/docs/cli/reference/email#email-send)
+- SDK: [Email functions](/docs/sdk/reference#email)
+- Related: [Idempotency](/docs/api/idempotency), [Errors](/docs/api/errors)

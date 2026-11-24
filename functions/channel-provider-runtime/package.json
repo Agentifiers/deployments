@@ -1,0 +1,43 @@
+{
+  "name": "@deployments-ai/channel-provider-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./ingress": "./src/ingress.ts",
+    "./ingress-consumer": "./src/ingress-consumer-main.ts"
+  },
+  "scripts": {
+    "build": "bun build src/ingress.ts src/ingress-consumer-main.ts src/delivery.ts src/provider-tools.ts src/credentials.ts src/oauth.ts src/oauth-refresh.ts --target=node --format=esm --outdir=dist",
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1090.0",
+    "@aws-sdk/client-kms": "3.1090.0",
+    "@aws-sdk/client-lambda": "3.1090.0",
+    "@aws-sdk/client-s3": "3.1090.0",
+    "@aws-sdk/client-sqs": "3.1090.0",
+    "@aws-sdk/client-sts": "3.1090.0",
+    "@aws-sdk/lib-dynamodb": "3.1090.0",
+    "@deployments-ai/channel-adapters": "workspace:*",
+    "@deployments-ai/conversations": "workspace:*",
+    "@deployments-ai/credential-vault": "workspace:*",
+    "@deployments-ai/db": "workspace:*",
+    "@deployments-ai/events": "workspace:*",
+    "@deployments-ai/file-text": "workspace:*",
+    "@deployments-ai/ingress-media": "workspace:*",
+    "@deployments-ai/net-security": "workspace:*",
+    "@deployments-ai/organization-admission": "workspace:*",
+    "@deployments-ai/providers": "workspace:*",
+    "@deployments-ai/secret-store": "workspace:*",
+    "@deployments-ai/streaming": "workspace:*",
+    "@deployments-ai/tools": "workspace:*",
+    "effect": "4.0.0-beta.92"
+  },
+  "devDependencies": {
+    "@deployments-ai/agent-manifest": "workspace:*"
+  }
+}

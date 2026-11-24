@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/webhooks",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/webhooks.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../db" }, { "path": "../events" }]
+}

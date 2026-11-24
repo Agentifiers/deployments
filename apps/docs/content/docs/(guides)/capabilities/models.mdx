@@ -1,0 +1,169 @@
+---
+title: "Models and model policies"
+description: "Find model IDs in the hosted model catalog, decide which models an environment may run with a model policy, and read the admission errors that block a release or run."
+---
+
+Every model call an agent makes goes through the platform's model gateway, and every model it names must be admitted by the environment it runs in. Three things decide admission: a code-owned set of curated models, a model catalog that the platform synchronizes from the hosted providers, and an optional model policy per environment. Use this page to find model IDs for a manifest, to allow models beyond the curated set, and to fix admission errors.
+
+## Model IDs
+
+A platform model ID starts with a provider prefix:
+
+- `openai/<model>`, for example `openai/gpt-4o`.
+- `openrouter/<vendor>/<model>`, for example `openrouter/z-ai/glm-5.2`.
+- `bedrock/<foundation model or inference profile id>`.
+
+Manifests, policies, and the catalog all use these canonical IDs. [Model selection](/docs/capabilities/agent-manifests#model-selection) explains how a manifest names a primary model and fallbacks.
+
+## Curated models and the catalog
+
+The **curated models** are a short list owned by the platform code. An environment without a model policy can run exactly these models. They never need a catalog entry, and their context window and maximum output come from limits in the platform code. List them with `deployments model list --curated`.
+
+The **model catalog** holds every other model the platform can route. It refreshes every 6 hours. OpenRouter models always sync, OpenAI models sync when the operator configures OpenAI access, and Amazon Bedrock models sync when the operator enables Bedrock. A model that disappears from a later snapshot becomes retired, and only active entries can be admitted. Catalog entries carry the context window, maximum output, and prices the runtime uses to pack context and meter cost.
+
+`GET /v1/models` returns the active catalog entries and the curated models in one list, ordered by model ID. Each item says whether this environment allows it.
+
+| Field                                        | Meaning                                                                                                                                                                                                                                      |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `modelId`                                    | The canonical platform ID.                                                                                                                                                                                                                   |
+| `provider`                                   | `bedrock`, `openai`, or `openrouter`.                                                                                                                                                                                                        |
+| `providerModelId`, `displayName`             | The provider's own ID and a display name.                                                                                                                                                                                                    |
+| `contextWindowTokens`, `maximumOutputTokens` | The limits the runtime uses for [context management](/docs/capabilities/context-management).                                                                                                                                                 |
+| `capabilities`                               | `toolCalling`, `structuredOutputs`, `imageInput`, and `reasoning` flags, when known.                                                                                                                                                         |
+| `pricing`                                    | USD per million input, output, cache-read, and cache-write tokens, with optional tiers.                                                                                                                                                      |
+| `curated`                                    | Whether the model is curated.                                                                                                                                                                                                                |
+| `allowed`                                    | Whether publishing would admit the model in this environment. It applies the environment's policy and the operator grants for the environment's organization, including deployment-wide grants. Agent and workspace grants do not show here. |
+
+The response also has a `policy` object. Its `source` is `curated_defaults` when the environment has no policy, or `model_policy` with the `modelPolicyId` that applies.
+
+Filter the list with `provider`, `capability` (`tool_calling`, `structured_outputs`, `image_input`, or `reasoning`), `allowed`, `curated`, and `search`, a case-insensitive substring of the ID or display name of at most 100 characters. Pages hold at most 100 items.
+
+<Callout type="warn" title="Availability">
+  An installation from `infrastructure/environments/customer` hosts only Amazon Bedrock unless its
+  operator adds OpenAI or OpenRouter. The curated models include two Bedrock models,
+  `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0` and `bedrock/global.cohere.embed-v4:0`.
+  The curated models of a provider the installation does not host are admitted but fail when the
+  gateway calls them. Bedrock models appear in the catalog only when the installation hosts Bedrock.
+</Callout>
+
+## Environment model policies
+
+A model policy replaces the curated defaults for one environment. An environment has at most one active policy. Creating a second one fails with `409 model_policy_exists`. Archive the active policy to return to the curated defaults.
+
+| Field                  | Rules                                                                                                                   |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `name`, `description`  | Display text.                                                                                                           |
+| `includeCuratedModels` | Required on create. `true` keeps the curated models allowed next to `models`. `false` allows only the listed models.    |
+| `models`               | At most 256 entries. Each is a canonical model ID or a provider-wide entry: `openai/*`, `openrouter/*`, or `bedrock/*`. |
+
+The platform validates the whole entry list on create and on every update that changes `models` or `includeCuratedModels`:
+
+- An entry must be trimmed, at most 256 characters, and start with `openai/`, `openrouter/`, or `bedrock/`.
+- `*` is allowed only as the whole model part of a provider-wide entry.
+- An exact entry must already be canonical. The platform rejects an entry that it would rewrite.
+- An exact entry for a model that is not curated must be an active catalog entry.
+- An entry cannot repeat.
+- A policy with `includeCuratedModels: false` must list at least one model.
+
+A failed check returns `422 invalid_model_policy` with one line per rejected entry.
+
+Policies use optimistic versions. A new policy has `version` 1. Send the current version as `expectedVersion` on update and archive. A stale value fails with `version_conflict`, and an archived policy rejects changes with `resource_inactive`. Every policy mutation needs an `Idempotency-Key` header, which the CLI generates for you.
+
+## Admission
+
+The platform admits the primary model and every fallback when you publish a release, create or change a deployment, create a preview, and when the worker starts each run. It admits them again when it issues the run's model gateway token, so the gateway serves only admitted models. Every model the release names must pass, including fallbacks. The steps are:
+
+1. The model ID must use a known provider prefix and parse as a valid ID.
+2. The environment policy must allow the model. Without a policy, only curated models pass. With a policy, a curated model passes when `includeCuratedModels` is `true`, and any model passes when an entry matches its exact ID or its provider.
+3. A model that is not curated must also be an active catalog entry.
+4. If the policy or the catalog rejects the model, an operator grant that lists the model can still admit it.
+
+| Reason                                    | Cause                                                                   |
+| ----------------------------------------- | ----------------------------------------------------------------------- |
+| `unknown_model_provider`                  | The ID has a prefix other than `openai/`, `openrouter/`, or `bedrock/`. |
+| `invalid_model_id`                        | The ID does not parse.                                                  |
+| `model_not_allowed_by_environment_policy` | The curated defaults or the environment policy do not allow the model.  |
+| `model_not_in_catalog`                    | The policy allows the model, but it is not an active catalog entry.     |
+
+Publishing, deploying, and creating a preview return these reasons as the code of a `422` response. A run checks its models when the worker executes it, so a denied model fails the run with the reason as its error code. Because of that check, a policy change applies to running deployments too. If you remove a model from the policy, the next runs of releases that name it fail.
+
+Operator grants are platform configuration that only the operator can change. A grant can admit a model that has no catalog entry. In that case the release must set `modelInputTokenBudget` and `modelOutputTokenReserve`, because the runtime has no limits for the model. See [Model gateway](/docs/operate/model-gateway) for how operators run the gateway.
+
+## Image input
+
+A run whose [input artifacts](/docs/capabilities/artifacts#attach-files-to-a-run) include an image needs a primary model that reads images. The platform takes that from the model's active catalog entry, `capabilities.imageInput`. A curated model without an active entry uses the platform's own record for it. Any other model, such as one admitted only by an operator grant, has unknown image support, and the platform refuses images for it.
+
+- Run submission checks the release's primary model. It fails with `422 model_image_input_unsupported` when the model cannot read images, and with `422 model_image_input_unknown` when the platform cannot tell. Audio-only input skips this check.
+- The worker checks again when it starts the run, because the catalog can change after submission. The primary model stays first. Fallbacks that do not read images are left out for that run, so a fallback never receives images it cannot read. If the primary model no longer reads images, a run submitted through the API fails with `model_image_input_unsupported` or `model_image_input_unknown`. A run from a channel or agent email message drops its images and runs as text.
+
+## Access
+
+The model routes take a platform bearer credential, either an API key or a user sign-in, and need the `x-deployments-environment` header. Reads need the `models:read` scope, and policy changes need `models:write`. A person also needs the `owner` or `admin` organization role to change a policy; other roles receive `403 insufficient_role`, and `GET /v1/whoami` reports only `models:read` for them. API keys are governed by their scopes alone.
+
+## Use it
+
+1. Find a model that supports tool calling.
+
+   ```bash
+   deployments model list --provider openrouter --capability tool_calling --search glm
+   ```
+
+2. Allow every OpenRouter model in addition to the curated models. Quote the entry so your shell does not expand `*`.
+
+   ```bash
+   deployments model-policy create --name "Agent models" --include-curated-models --model 'openrouter/*'
+   ```
+
+3. Check which models the environment now denies.
+
+   ```bash
+   deployments model list --no-allowed
+   ```
+
+4. Restrict the environment to two models. `--model` replaces the whole list, and `--no-include-curated-models` drops the curated defaults.
+
+   ```bash
+   deployments model-policy update $MODEL_POLICY_ID --no-include-curated-models --model openai/gpt-4o --model openrouter/z-ai/glm-5.2 --expected-version 1
+   ```
+
+5. Archive the policy to return to the curated defaults.
+
+   ```bash
+   deployments model-policy archive $MODEL_POLICY_ID --expected-version 2
+   ```
+
+The same policy create through the SDK:
+
+```ts
+import { createClient, createConfig, createModelPolicy } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data, error } = await createModelPolicy({
+  client,
+  headers: {
+    "x-deployments-environment": "env_123",
+    "idempotency-key": crypto.randomUUID(),
+  },
+  body: {
+    name: "Agent models",
+    includeCuratedModels: true,
+    models: ["openrouter/*"],
+  },
+});
+```
+
+## Use the management console
+
+The [management console](/docs/getting-started/console#manage-the-model-policy) covers the same steps under **Govern**, **Models**. The **Catalog** tab takes the same filters as `deployments model list`. The **Policy** tab creates, edits, and archives the policy. Before each change it lists the releases of live deployments whose primary or fallback model the change would deny. You type the policy name to confirm when it finds one, when it could not check every live release, and for every change in a production environment.
+
+## Reference
+
+- API: [list models](/docs/api/reference/models/list-models), [create policy](/docs/api/reference/models/create-model-policy), [update policy](/docs/api/reference/models/update-model-policy), [archive policy](/docs/api/reference/models/archive-model-policy)
+- CLI: [`deployments model`](/docs/cli/reference/model), [`deployments model-policy`](/docs/cli/reference/model-policy)
+- SDK: [Models functions](/docs/sdk/reference#models)

@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/packages/sandbox-hosts",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/packages/sandbox-hosts.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../db" }, { "path": "../events" }]
+}

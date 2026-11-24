@@ -1,0 +1,26 @@
+{
+  "name": "@deployments-ai/identity-api",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bun build src/lambda-main.ts src/principal-status.ts src/public-email-worker.ts --target=node --format=esm --outdir=dist",
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1090.0",
+    "@aws-sdk/client-kms": "3.1090.0",
+    "@aws-sdk/client-sqs": "3.1090.0",
+    "@aws-sdk/lib-dynamodb": "3.1090.0",
+    "@deployments-ai/db": "workspace:*",
+    "@deployments-ai/identity": "workspace:*",
+    "@deployments-ai/secret-store": "workspace:*",
+    "effect": "4.0.0-beta.92",
+    "ulid": "3.0.2"
+  }
+}

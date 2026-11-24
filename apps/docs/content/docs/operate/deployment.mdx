@@ -1,0 +1,320 @@
+---
+title: "Deploying the platform"
+description: "Build a release bundle and deploy it into your AWS account with the deploy tool: target files, profiles, the operational posture, pipeline steps, verification, and the installation record."
+---
+
+The deploy tool installs the platform into an AWS account. It builds a release bundle from one commit, then deploys that bundle with OpenTofu plus every step OpenTofu cannot do on its own: image and Lambda publication, model provider keys, identity client bootstrap, Lambda code release, and verification. A target file holds every account-specific value, so one bundle can deploy to any account you describe. To prepare a new account first, see [Install in your AWS account](/docs/operate/install).
+
+Run the tool from the repository root:
+
+```bash
+bun run deploy -- <command> [flags]
+```
+
+The tool writes progress to stderr. A failure exits non-zero and prints the error, then each underlying cause on its own line after `Caused by:`.
+
+## Before you start
+
+You need these tools on the machine that deploys:
+
+- Bun and OpenTofu. The repository's `deploy-platform` GitHub action pins Bun 1.4.4 and OpenTofu 1.13.2. The tool runs the `tofu` binary.
+- The AWS CLI, with credentials for the target account in the standard SDK and CLI chain. The tool sets `AWS_REGION` from the target for every command it runs.
+- Docker Buildx with a builder that supports attestations, such as the `docker-container` driver, to run `release build`. `deploy` needs no Docker. It copies images with `crane` and extracts them with `tar`.
+- Git, because `release build` reads the commit from `git rev-parse HEAD`.
+
+You also need an S3 bucket for OpenTofu state. The tool passes its name to `tofu init` and does not create it. The account bootstrap creates one; see [Install in your AWS account](/docs/operate/install).
+
+## Commands
+
+| Command                                                        | What it does                                                                                                                           |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `release build [--bundle <dir>]`                               | Builds the Lambda archives, the console assets, and every platform image from `HEAD` into a release bundle.                            |
+| `deploy --target <file> [--bundle <dir>] [--result <file>]`    | Runs the full deployment pipeline with a verified bundle.                                                                              |
+| `secrets sync model-runtime --target <file> [--prepare-empty]` | Writes model provider keys and operator model grants. `--prepare-empty` only seeds values that are absent.                             |
+| `identity bootstrap --target <file>`                           | Creates and validates the identity OAuth clients.                                                                                      |
+| `admin bootstrap --target <file> --email <email>`              | Creates or promotes the first platform administrator for the email address. See [Install in your AWS account](/docs/operate/install).  |
+| `lambdas deploy --target <file> [--bundle <dir>] [--dry-run]`  | Uploads the console assets, then updates Lambda functions whose code changed. `--dry-run` uploads nothing and lists what would change. |
+| `verify --target <file>`                                       | Checks the API `/health`, runs the public end-to-end suite, then checks the console `/health`.                                         |
+
+`--bundle` defaults to `.artifacts/deployment`. Before they act, the `secrets sync`, `identity bootstrap`, `lambdas deploy`, and `verify` commands check the caller account, initialize the OpenTofu backend, and read the outputs of the root you already applied. `--result` writes a JSON file with the target name, the source commit, the image URIs, and the API endpoint.
+
+The `release` commands below manage a [release registry](/docs/operate/release-registry), an S3 bucket you own that keeps published bundles. [Upgrades and rollbacks](/docs/operate/upgrades) shows when to use them.
+
+| Command                                                                                            | What it does                                                                                                                                   |
+| -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `release publish --bundle <dir> --bucket <name> [--ci-run-id <n>] [--deployer-image <ref@sha256>]` | Verifies a bundle, uploads it under `releases/<digest>/`, and writes its record. Prints the release digest.                                    |
+| `release fetch --bucket <name> --release <digest> --bundle <dir> [--profile <name>]`               | Downloads a release from the registry into a bundle directory.                                                                                 |
+| `release retain --bucket <name> --release <digest>`                                                | Tags a release `retention=customer` so the registry lifecycle never expires its files.                                                         |
+| `release verify --bundle <dir>` or `release verify --bucket <name> --release <digest>`             | Verifies a local bundle or a registry release.                                                                                                 |
+| `release compat --from <commit> --to <commit>`                                                     | Prints the rollback barriers between two commits as JSON.                                                                                      |
+| `release rollback-check --bucket <name> --from <digest> --to <digest>`                             | Checks the registry's barrier chain between the running release and a rollback target.                                                         |
+| `release share-ami --ami <ami id> --account <account id> --region <region>`                        | Lets another account launch and copy an AMI this account owns, such as the [ClickHouse hot-plane AMI](/docs/operate/observability-clickhouse). |
+
+## Write a deployment target
+
+A target is a JSON file you pass with `--target`. It names the account, the root profile, the OpenTofu root, and the state location:
+
+```json
+{
+  "version": 1,
+  "name": "production",
+  "profile": "platform-customer",
+  "aws": { "accountId": "<account-id>", "region": "us-east-2" },
+  "terraform": {
+    "stateBucket": "<state-bucket>",
+    "varFiles": ["production.tfvars.json"]
+  }
+}
+```
+
+The tool rejects unknown keys. The `terraform` key keeps its name for compatibility; it configures OpenTofu.
+
+| Field                   | Rules                                                                                                                                                                                                                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `version`               | Always `1`.                                                                                                                                                                                                                                                              |
+| `name`                  | Matches `^[a-z][a-z0-9-]{1,30}$`. It names the deployment and sets the default state key.                                                                                                                                                                                |
+| `profile`               | `platform-customer`, `platform-dev`, or `platform-prod`. See [choose a profile](#choose-a-profile).                                                                                                                                                                      |
+| `aws.accountId`         | The 12-digit account ID. The caller's credentials must belong to this account.                                                                                                                                                                                           |
+| `aws.region`            | A region name such as `us-east-2`.                                                                                                                                                                                                                                       |
+| `terraform.root`        | Optional. The directory of the OpenTofu root to deploy. A relative path resolves against the directory of the target file, and the directory must exist. When you leave it out, the tool uses the profile's in-repository root.                                          |
+| `terraform.stateBucket` | The S3 bucket that holds OpenTofu state.                                                                                                                                                                                                                                 |
+| `terraform.stateKey`    | Optional. Defaults to `platform/<name>/terraform.tfstate`.                                                                                                                                                                                                               |
+| `terraform.varFiles`    | Optional. Extra variable files. Each one must exist and hold a JSON object. Relative paths resolve against the directory of the target file.                                                                                                                             |
+| `ecrRepositories`       | Optional. Overrides the ECR repository name per image. The configured defaults are `deployments-ai/platform/<image>`.                                                                                                                                                    |
+| `lambdaMicrovm`         | Optional. `false` turns off the profile's Lambda MicroVM steps, for a region without Lambda MicroVMs, and makes the tool set `sandbox_lambda_microvm_enabled = false`.                                                                                                   |
+| `lambdaMicrovmImage`    | Optional. `sandbox`, the default, or `desktop`. `desktop` publishes the sandbox image plus a Linux desktop for the `computer.*` tools, and every sandbox then runs with 4,096 MiB and 2 vCPU instead of 2,048 MiB and 1 vCPU. A target without MicroVM steps rejects it. |
+
+The tool initializes the backend with your bucket, key, and region, with `encrypt=true` and `use_lockfile=true`. Each run uses a private temporary OpenTofu data directory and deletes it at the end, because saved plans can hold secrets.
+
+OpenTofu receives your var files first and a generated var file last. The generated file sets `aws_account_id`, `aws_region`, the image URIs, the Firecrawl table definition `web_tools_firecrawl_table` when the profile deploys firecrawl, the MicroVM image and its capacity, or `sandbox_lambda_microvm_enabled = false` when the target sets `lambdaMicrovm` to `false`, the Lambda artifact locations, `platform_identity_enabled` (always `true`), and `platform_identity_publish_domain`. Because it comes last, it wins over the same variables in your files.
+
+When an ECR repository does not exist, the tool creates it with immutable tags, scan on push, and AES-256 encryption. On every run it also sets the repository's lifecycle policy: ECR keeps the 30 newest tagged images and deletes older ones, and deletes untagged manifests a day after no tagged image references them. ECR does not check which images your services run, so a service still pinned to an image older than the 30 newest cannot pull it again after a task restarts. Redeploy before then.
+
+### Keep your configuration in your own repository
+
+`terraform.root` lets you keep the root, its var files, and the target in a separate repository, for example one that adds this repository as a git submodule at a pinned commit. The root then calls the stack with a relative module source such as `../../deployments/infrastructure/modules/platform`, and the target points at the root. The example below uses `platform-prod`, one of the two profiles that describe roots kept outside this repository:
+
+```json
+{
+  "version": 1,
+  "name": "production",
+  "profile": "platform-prod",
+  "aws": { "accountId": "<account-id>", "region": "us-east-2" },
+  "terraform": {
+    "root": "../environments/production",
+    "stateBucket": "<state-bucket>",
+    "varFiles": ["production.tfvars.json"]
+  }
+}
+```
+
+## Choose a profile
+
+A profile describes the code shape of an OpenTofu root: the images it runs, two optional behaviors, and, for a root in this repository, its path. It holds no account-specific values.
+
+| Profile             | Default root                           | Images                                                                                                                                                    | Lambda MicroVM | Missing Lambda functions |
+| ------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | ------------------------ |
+| `platform-customer` | `infrastructure/environments/customer` | `agent-worker`, `app-gateway`, `bifrost`, `durable-streams`, `firecrawl`, `model-gateway`, `observability-hot-plane`, `stream-gateway`, `web-tools-proxy` | yes            | skipped                  |
+| `platform-prod`     | none; set `terraform.root`             | `agent-worker`, `app-gateway`, `bifrost`, `durable-streams`, `firecrawl`, `model-gateway`, `observability-hot-plane`, `stream-gateway`, `web-tools-proxy` | yes            | skipped                  |
+| `platform-dev`      | none; set `terraform.root`             | `agent-worker`, `app-gateway`, `bifrost`, `durable-streams`, `firecrawl`, `model-gateway`, `observability-hot-plane`, `stream-gateway`, `web-tools-proxy` | yes            | fail the deploy          |
+
+Use `platform-customer` for an installation. `platform-prod` and `platform-dev` are examples of profiles for roots kept outside this repository: their roots, var files, and targets live in a separate configuration repository, so a target that uses either must set `terraform.root`. Copy one only when your own root matches its code shape.
+
+Every profile applies the sandbox prerequisites, publishes the MicroVM image, and verifies it live on every deploy, unless the target sets `"lambdaMicrovm": false`. With `platform-dev`, a missing Lambda function fails the deploy unless its component is turned off in the root: agent email, observability history, the console, the identity service, or event analytics. With the other profiles, the tool skips any function that does not exist, but it still fails when the account has none of the platform functions. [Features](/docs/operate/features) lists which features each profile's images support.
+
+Profiles live in `scripts/platform-deploy/profiles.ts`. Every root must call the stack as `module "platform"`.
+
+## Set the operational posture
+
+Every root passes the stack an `operations` object, and every field is required. The table shows values for an account that serves real traffic. Start from them for any production installation.
+
+| Field                             | Production value | What it controls                                                                                                                |
+| --------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `deletion_protection`             | `true`           | Deletion protection and retention of stateful resources                                                                         |
+| `secret_recovery_window_days`     | `30`             | Secrets Manager recovery window. Must be 0 or from 7 through 30.                                                                |
+| `kms_deletion_window_days`        | `30`             | KMS key deletion window. Must be from 7 through 30.                                                                             |
+| `high_availability`               | `true`           | Multi-instance and multi-AZ service layouts                                                                                     |
+| `enhanced_monitoring`             | `true`           | Container Insights, detailed API metrics, and detailed EC2 monitoring                                                           |
+| `compact_sizing`                  | `false`          | Smaller task sizes and worker capacity                                                                                          |
+| `fargate_spot`                    | `false`          | Fargate Spot capacity for ECS services other than the model gateway                                                             |
+| `web_application_firewall`        | `true`           | AWS WAF on the identity API stage                                                                                               |
+| `shared_search_domain`            | `false`          | One OpenSearch domain for memory and brains, or one domain each                                                                 |
+| `dedicated_public_load_balancers` | `true`           | An internet-facing load balancer for the stream gateway, or CloudFront in front of the shared internal one                      |
+| `operator_shell_access`           | `false`          | ECS Exec into the observability hot plane                                                                                       |
+| `test_fixtures`                   | `false`          | End-to-end test OAuth client and API fixtures                                                                                   |
+| `log_retention_days`              | `90`             | CloudWatch log groups                                                                                                           |
+| `service_log_retention_days`      | `30`             | Model gateway and web tools service logs                                                                                        |
+| `failure_retention_days`          | `365`            | Stored failure payloads                                                                                                         |
+| `query_result_retention_days`     | `90`             | Athena query results                                                                                                            |
+| `observability_retention_days`    | `180`            | Observability history                                                                                                           |
+| `backup_retention_days`           | `90`             | ClickHouse backups and snapshots of the observability hot plane, capped at 7 days by default                                    |
+| `webhook_delivery_retention_days` | `30`             | Webhook delivery and attempt records                                                                                            |
+| `ops_alerts_slack_channel_id`     | `""`             | The Slack channel that receives alarm notifications. Empty leaves them undelivered. See [Ops alerts](/docs/operate/ops-alerts). |
+| `ops_alerts_email`                | `""`             | An email address subscribed to alarm notifications as a backstop. Empty means no subscription.                                  |
+| `public_api_throttle`             | See below        | The whole installation's public API stage throttle: `rate_limit` and `burst_limit`, in requests per second                      |
+| `tenant_limit_defaults`           | See below        | Default per-organization rate, burst, concurrent runs, and active sandboxes. See [Tenant limits](/docs/operate/tenant-limits).  |
+
+The two objects take these production values, which the sample var file uses:
+
+```json
+{
+  "public_api_throttle": { "rate_limit": 200, "burst_limit": 400 },
+  "tenant_limit_defaults": {
+    "api_requests_per_second": 50,
+    "api_request_burst": 100,
+    "concurrent_runs": 16,
+    "active_sandboxes": 16
+  }
+}
+```
+
+`public_api_throttle` needs whole numbers with `rate_limit` of at least 1 and `burst_limit` of at least `rate_limit`. `tenant_limit_defaults` needs whole numbers: `api_requests_per_second` from 1 through 500 and no higher than `public_api_throttle.rate_limit`, `api_request_burst` from 1 through 1,000 and at least `api_requests_per_second`, `concurrent_runs` from 1 through 256, and `active_sandboxes` from 0 through 256.
+
+The two log retention fields must be periods CloudWatch Logs accepts, such as 14, 30, 90, or 365. The other retention fields must be positive whole days.
+
+## Build a release bundle
+
+```bash
+bun run deploy -- release build
+```
+
+The command needs a full 40-character commit from `git rev-parse HEAD`. It refuses to replace a non-empty directory that is not a release bundle. The bundle holds:
+
+- Fourteen Lambda archives: `agent-email-runtime`, `agent-runtime`, `app-domains`, `apps-database`, `channel-provider-runtime`, `console`, `document-extraction`, `event-analytics-projector`, `event-dispatcher`, `identity-api`, `identity-email-worker`, `memory-runtime`, `ops-alerts-notifier`, and `platform-api`.
+- The console's static assets as one archive.
+- One OCI image layout archive per platform image under `images/`. The tool builds every image with `docker buildx build --provenance=mode=max --sbom=true --output type=oci`, so each archive carries the image index with its SLSA provenance and SPDX SBOM. `durable-streams` targets `linux/amd64`, and every other image targets `linux/arm64`.
+- `release.json`, version 4, which records the source commit and the SHA-256 of every file, plus each image's platform and OCI index digest, and for the firecrawl image the SHA-256 of the DynamoDB table definition the release build exported from that exact image (`images/firecrawl.dynamodb-table.json`). It holds `"consoleBuild": "install"` only when the console came from [your own build](#ship-your-own-console-build).
+
+### Ship your own console build
+
+An installation can run its own TanStack Start application in the console slot instead of `apps/console`. The application then serves `platform_identity_application_origin` with the console's Lambda, CloudFront distribution, assets bucket, `deployments-web` OAuth client, and alarms. The platform does not build that application. The slot runs the server on `nodejs26.x` for `arm64`, and CloudFront serves only `/assets/*` from the assets bucket and sends every other path to the Lambda.
+
+Build the application with the nitro `aws-lambda` preset, then point `release build` at its output directory:
+
+```bash
+DEPLOYMENTS_AI_CONSOLE_OUTPUT_DIR=../my-console/.output bun run deploy -- release build
+```
+
+`bun run` starts the tool in the repository root, so a relative path resolves against the repository root. The release build skips the `apps/console` build. It packages `server/` as the `console` Lambda archive and `public/` as the console assets archive, so the bundle holds the same files under the same names. It refuses a directory without a `server/index.mjs` that exports `handler`, or without `public/assets/`, and names what is missing. `bun run deployment:artifacts:build` reads the same variable. When the variable is unset or empty, the release ships `apps/console`.
+
+`release.json` then records `"consoleBuild": "install"`, and `release verify --bundle` reports it. The [release registry](/docs/operate/release-registry#install-supplied-console-builds) refuses such a bundle, because installations deploy what they fetch from it. Deploy your build from its local bundle, and publish the platform build of the same commit.
+
+Two inputs of `module "platform"` let your application reach its own services. Both default to nothing, which leaves the console Lambda unchanged.
+
+| Input                            | Type          | Effect                                                                                                                                                                                                                                   |
+| -------------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `console_additional_environment` | `map(string)` | Adds Lambda environment variables. Keys that start with `CONSOLE_` belong to the console module, and OpenTofu refuses them at plan time.                                                                                                 |
+| `console_additional_policy_json` | `string`      | Attaches this IAM policy document to the console Lambda role as a second inline policy, `console-additional`. When the root sets `iam_permissions_boundary_arn`, that boundary limits this policy like every other platform role policy. |
+
+The customer root in `infrastructure/environments/customer` does not expose these inputs. Pass them from an installation root you own.
+
+## Deploy a bundle
+
+```bash
+bun run deploy -- deploy --target production.json --result result.json
+```
+
+Set the model provider keys in the environment before the first deploy. The tool reads the OpenAI key from `DEPLOYMENTS_AI_OPENAI_API_KEY` or `OPENAI_API_KEY`, and the OpenRouter key from `DEPLOYMENTS_AI_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY`. It reads a key only for a hosted provider your root enables. When a variable is unset, the tool keeps the stored key, and it fails if no key is stored yet. `DEPLOYMENTS_AI_MODEL_GRANTS_JSON` sets the operator model grants. When it is unset, the tool keeps the stored grants, and a first deploy stores an empty list. [Model gateway](/docs/operate/model-gateway) explains grants and providers.
+
+### Pipeline steps
+
+The order of these steps is fixed. Every OpenTofu step writes a saved plan and applies that plan, with `-parallelism=30`.
+
+1. Verify the bundle. `release.json` must be version 3 or 4, and the tool names any other version it finds. Every file must match its SHA-256 in `release.json`. The bundle must hold exactly the fourteen Lambda archives and the console assets, plus an archive for each image in the profile and, for firecrawl, its table definition, which must decode as table definition version 1. The deploy tool must run from a checkout of `release.json`'s `sourceCommit` with no tracked modifications, and no flag skips this check.
+2. Require `aws sts get-caller-identity` to return `aws.accountId`.
+3. Run `tofu init` against your state bucket.
+4. Create the artifact store when state does not have it yet. This targeted apply creates the versioned artifact bucket and its controls.
+5. Publish the profile's images to ECR. When the repository already holds an image's index digest, the tool reuses it. Otherwise `crane` pushes the archive's index with its attestations under the tag `<sourceCommit>-<first 12 hex characters of the digest>`, and the tool fails unless the pushed digest equals the one in `release.json`. OpenTofu always receives that digest-pinned URI, so every account runs the image index the bundle recorded. When the profile deploys firecrawl, the tool also passes the verified table definition to OpenTofu as `web_tools_firecrawl_table`, which renders the Firecrawl DynamoDB table.
+6. For Lambda MicroVM profiles, apply the sandbox runtime module and publish the MicroVM image.
+7. Upload the Lambda archives to the artifact bucket.
+8. Apply the model runtime parameters, then seed any absent provider key or grants parameter.
+9. Create or repair each organization's gate lanes from its gate sources: the organization, its erasure fence, its memory and Brain search placements, and its provider mutation gates. Each organization is repaired in one transaction conditioned on the sources it read, so the step is safe while the running code does not maintain lanes.
+10. Decide whether to publish the identity custom domain. Once the domain exists, it stays published. Otherwise the tool publishes it only when a previous client bootstrap finished for the current web client secret. Any error other than a missing marker stops the deploy.
+11. Plan and apply the full root.
+12. For Lambda MicroVM profiles, verify the sandbox live. The tool runs a command, checks network isolation, round-trips a file, checkpoints, resumes, and destroys the sandbox.
+13. Wait for the agent worker ECS service to finish its rollout. The tool polls every 15 seconds, up to 80 times. A failed rollout, or a circuit-breaker rollback to the previous task definition, fails the deploy before any Lambda code changes.
+14. Write changed model runtime parameters. When a provider key changed, roll the model gateway service so it reads the new key.
+15. When the root runs agent-built apps, bootstrap the app database cluster through the RDS Data API.
+16. Bootstrap the identity OAuth clients. The tool updates the CLI client, writes a client secret to each confidential client's `/identity/*-oauth-client` SecureString parameter when the parameter is missing or does not match the client record, validates every client, and records a completion marker.
+17. Upload the console's static assets. They go before the new server code, so new pages never reference missing assets.
+18. Release Lambda code. A function receives only its own entry module and the archive's `package.json`. The console receives its whole archive. The tool compares each function's deployed code hash with that code and updates only the functions that changed, eight at a time. After a failure, it starts no new updates.
+19. Repair the gate lanes again, now that the released code maintains them.
+20. Fold each organization's override from the removed `organization-limits` routes into its operator grant, then delete the override. A field the operator grant already sets keeps its value. When an override's `apiRequestBurst` would sit below the grant's `apiRequestsPerSecond`, or its rate above the grant's burst, the tool drops that field and logs it. The tool deletes each override and its tenant inventory entry in one transaction. It also deletes any inventory entry whose override is already gone, and logs how many. Each delete is conditional on the override being unchanged since the tool read it, and an override that changed is left for the next deploy. Once a run leaves no override, the tool writes a completion record, and every later deploy reads only that record.
+
+    The step runs after the Lambda release because no released code reads or writes the overrides after it. New code ignores a stored override, so an organization that still has one is limited differently until the step folds it. From step 11, the new agent worker enforces the default or granted `concurrentRuns` and `activeSandboxes`. From step 18, each API function the tool updates enforces the default or granted `apiRequestsPerSecond` and `apiRequestBurst`. Tenant export and tenant erasure cannot read that organization's inventory until the step deletes the override. If the step fails, the deploy stops there, and these effects last until a later deploy finishes the step. That run applies each override at most once, including an override that a failed run had begun to fold.
+
+    The next run merges an operator grant you change during this window under the pending override. Fields the grant sets win, and the override fills the fields the grant leaves unset. Clearing the operator grant during the window therefore does not stop the next run from writing the override's fields into a new operator grant. After the deploy that finishes this step, check `deployments system standing $ORGANIZATION_ID` and adjust the grant.
+
+21. When the root runs memory or Brain search, activate the default search placement of every organization that still has none. See [features](/docs/operate/features).
+22. Publish the identity custom domain if step 10 left it unpublished, the client bootstrap ran, and OpenTofu reports the identity service ready for publication.
+23. Verify the public API and the console. See [verify a deployment](#verify-a-deployment).
+24. Wait until every invocation of replaced Lambda code has ended, then repair the gate lanes a final time. Replaced code can change gate sources without moving lanes, and can create organizations the earlier repairs never listed.
+25. Turn shard writes on for governance inventory locators. The tool waits until every invocation of replaced Lambda code has ended, writes the `governance-inventory-shard-writes` marker, and waits 60 seconds more so every process sees it. It then re-checks each organization's shard locators against their records and writes the `governance-inventory-shard-recheck` marker, so later deploys only read that marker. The step never reads locators written before the switch. Those stay on each organization's legacy partition, and tenant export, erasure, and retention keep listing them. To move them, see [move legacy governance inventory locators](#move-legacy-governance-inventory-locators).
+26. Name the workspace on meter events stored before meter events named one. The tool waits until every invocation of replaced Lambda code has ended, because that code writes a run's meter events without their workspace. It then reads the meter events of every environment, archived ones included, of every organization, finds those whose run context names a workspace that the event does not, and writes each one back with that workspace and nothing else changed. Until this step finishes, usage reads that page over one of those events fail. Each write is conditional on the event being unchanged since the tool read it, and an event that changed is left for the next deploy. An event that still fails validation once it names its workspace stops the deploy, and the tool writes nothing for it. The tool logs how many meter events it read and how many it fixed. Once a run leaves no event behind, the tool writes the `meter-event-workspaces` marker, and every later deploy reads only that marker. The step does not change usage counters or spend. The usage materializer counted each of those events once, when it was written without a workspace, so workspace usage summaries and workspace spend do not include them, and a rewritten event is not counted again.
+27. Record the installation. See [the installation record](#the-installation-record).
+28. Write the `--result` file.
+
+OpenTofu owns Lambda configuration, permissions, and event mappings. The release step changes only function code, so an unchanged bundle produces no Lambda changes.
+
+## Verify a deployment
+
+The deploy pipeline and the `verify` command run the same checks:
+
+1. Request `<api endpoint>/health` and require `status: "ok"`. The tool tries nine times, five seconds apart, with a 15-second timeout per request.
+2. Run `bun run e2e:public` against the API endpoint and the stream gateway. The suite checks that the deployed OpenAPI document matches the contract, that every protected route rejects unauthenticated requests, and that the unauthenticated provider and device authorization routes behave as specified.
+3. If the root runs the console, request `<console url>/health` with the same retries.
+
+```bash
+bun run deploy -- verify --target production.json
+```
+
+A deploy skips API verification when the root has no `platform_api_endpoint` output.
+
+## The installation record
+
+After every check passes, the tool writes the installation record to the `control` table in one transaction. The transaction replaces the current installation record and adds an entry to the deployment history. The tool never records a deployment that failed verification.
+
+Each record holds the target name, profile, account and region, source commit, the SHA-256 of `release.json`, every Lambda archive digest with the functions the deploy released it to and the SHA-256 of the code each function received, the digest-pinned image URIs, the public endpoints, the deploy time, and the caller ARN as `deployedBy`. The deploying credentials need permission to read and write the `control` table.
+
+The [system operator](/docs/operate/system-operator) API and the console's **System** page read this record.
+
+## Move legacy governance inventory locators
+
+Every tenant record has a governance inventory locator in the `control` table. Before shard writes turned on, each organization kept all of its locators on one legacy partition. The deploy leaves them there, because moving millions of them takes hours. Run `scripts/governance-inventory-migration.ts` from a checkout of the deployed release to move them when you choose. The script needs credentials that can read and write the platform tables, and the initialized OpenTofu root of the installation to read the table names from. It takes the region from `--region`, `AWS_REGION`, or `AWS_DEFAULT_REGION`.
+
+1. Count the legacy locators and price the move. A dry run writes nothing, and you can run it before or after the deploy.
+
+   ```bash
+   bun run governance:inventory:migrate -- --root <OpenTofu root> --region us-east-2 --dry-run
+   ```
+
+   The script prints one line per organization with its legacy locators, estimated write units, estimated read units, and estimated dollars. It then prints the total and how many hours the move takes at the write budget. Each move takes two strongly consistent reads and a three-item transaction, so a locator under 1 KB costs about 6 write units. A locator that the Brain or thread index also holds costs 2 more write units per index. The dollar figure uses on-demand prices of $0.625 per million write units and $0.125 per million read units.
+
+2. Move the locators. The script refuses to start until a deploy has written the `governance-inventory-shard-recheck` marker.
+
+   ```bash
+   bun run governance:inventory:migrate -- --root <OpenTofu root> --region us-east-2 --write-units-per-second 1000 --time-budget-minutes 50
+   ```
+
+   `--write-units-per-second` caps the sustained write rate. The default is 1,000. `--time-budget-minutes` stops the run after the page in flight once the budget is spent. The default is 50 minutes, so a run ends inside a one-hour role session. The AWS SDK refreshes SSO and profile role credentials on its own, but credentials exported as environment variables cannot refresh.
+
+3. Rerun the same command until it finishes. A moved locator leaves the legacy partition, so a rerun reads only the locators not moved yet. It needs no checkpoint file. A run over every organization that finishes writes the `governance-inventory-shards` marker.
+
+To move only some organizations, pass `--org <organization ID>` once per organization. A run with `--org` never writes the completion marker. Organizations use separate partitions, so you can run one process per organization at the same time. Each process keeps its own write budget.
+
+## Deploy from GitHub Actions
+
+The repository includes a composite action at `.github/actions/deploy-platform`. It installs Bun 1.4.4, OpenTofu 1.13.2, and `crane`, then runs `deploy` with the `target`, `bundle`, and `result` inputs. Run it on a Linux runner, and set up AWS credentials for the target account before the step. Set the provider key and grants variables on the step itself.
+
+From another repository, pin the action to the full 40-character commit SHA of the release:
+
+```yaml
+- uses: Agentifiers/deployments/.github/actions/deploy-platform@<40-hex commit SHA>
+  with:
+    target: targets/production.json
+    bundle: .artifacts/deployment
+```
+
+The deploy tool checks that it runs from the release's commit, and a remote action has no git checkout to read it from, so a tag or branch ref fails.
+
+When your configuration repository adds this repository as a git submodule, check out with submodules, build the release bundle inside the submodule, and call the action by path, for example `uses: ./deployments/.github/actions/deploy-platform`. The tool then reads the release commit from the submodule's checkout, so the submodule pin is the one place that chooses the platform version.

@@ -1,0 +1,154 @@
+---
+title: "MCP servers"
+description: "Connect your own remote Model Context Protocol servers or vendor-hosted MCP servers and expose their tools to agents."
+---
+
+Agents can call tools on remote Model Context Protocol (MCP) servers. The agent worker is the MCP client and talks to the server over Streamable HTTP. There are two paths. Register a **custom MCP server** when you run the server yourself. Connect a **vendor-hosted MCP server** when the provider catalog already lists the vendor.
+
+|                  | Custom MCP server                           | Vendor-hosted MCP server                          |
+| ---------------- | ------------------------------------------- | ------------------------------------------------- |
+| Registered with  | `/v1/mcp-servers` and `/v1/mcp-connections` | A provider connection for a `vendor_mcp` provider |
+| Tools created by | You, as `mcp` extension tools               | Connection tool sync                              |
+| Allowed effects  | `read` only                                 | `read` and `write`                                |
+| Credential       | Optional static token                       | OAuth or API key, kept by the connection          |
+
+Both kinds are `connection` tools. A call needs a connection grant and an `authorization: "workspace"` capability in the agent manifest, and the deployment's pinned tool policy decides it. See [Tools and tool policies](/docs/capabilities/tools).
+
+## Custom MCP servers
+
+### Resources
+
+- An **MCP server** records the HTTPS `endpointOrigin` (scheme, host, and optional port only), the `endpointPath`, a `toolAllowlist` of raw remote tool names, and optional `auth`.
+- An **MCP connection** selects an active MCP server so you can grant it to a workspace.
+- An **MCP extension tool** maps a platform tool name to one remote tool: `execution: { "type": "mcp", "mcpServerId", "remoteToolName" }`.
+
+The platform stores `auth` in the [credential vault](/docs/capabilities/credential-vault) and returns only `hasAuth`. It accepts exactly one of these shapes:
+
+```json
+{ "apiToken": "token" }
+```
+
+```json
+{ "bearerToken": "token" }
+```
+
+```json
+{ "authorization": "Bearer token" }
+```
+
+`apiToken` and `bearerToken` are sent as `authorization: Bearer <token>`. Changing the endpoint of a server that has auth requires new auth in the same update (`mcp_auth_replacement_required`).
+
+### Rules
+
+| Rule                                                               | Error code                      |
+| ------------------------------------------------------------------ | ------------------------------- |
+| An MCP extension tool must have the `read` effect.                 | `mcp_effect_unsupported`        |
+| Its `remoteToolName` must be on the active server's allowlist.     | `mcp_tool_not_allowed`          |
+| It cannot declare a `providerKey`.                                 | `mcp_provider_forbidden`        |
+| Discovery fails if the server lists a tool outside the allowlist.  | `mcp_discovery_mismatch`        |
+| Discovery fails if the response contains the server's credential.  | `mcp_discovery_credential_echo` |
+| Creating a connection or running discovery needs an active server. | `mcp_server_inactive`           |
+
+`POST /v1/mcp-servers/:id/discover` connects with the stored auth and returns the allowlisted tools with their input schemas and a `verifiedAt` timestamp. Use it to copy each tool's input schema into your extension.
+
+Archiving a server revokes its stored auth. Neither archiving a server nor revoking an MCP connection revokes the grants on its connections or changes deployments that pin them. The runtime denies those tools instead.
+
+### Grants for MCP connections
+
+A grant on an MCP connection records the provider key `mcp` and the server ID as the external account. The scopes you grant must come from the `requiredScopes` of the active MCP extension tools on that server.
+
+## Vendor-hosted MCP servers
+
+Providers with the route `vendor_mcp` describe an official MCP server that a vendor hosts. The definition pins the server URL and its authorization details in code. `GET /v1/providers/:providerKey` shows them under `metadata.mcpServer`.
+
+1. **Connect.** OAuth providers connect with `POST /v1/connections`. API-key providers connect with `POST /v1/credentials`. Servers whose URL has a tenant placeholder need the tenant endpoint as `requestedResource` (CLI `--resource`). See [Providers and connections](/docs/capabilities/providers-and-connections).
+2. **Verify.** Verification opens an MCP session with the connection's credential and lists tools. Success records a capability with the scopes `tools:read` and `tools:write`.
+3. **Sync tools.** `POST /v1/connections/:connectionId/tools/sync` lists the server's tools and reconciles the environment's tools for that provider. New tools are created, changed tools are updated, and tools the server no longer lists are archived. Sync requires an active, verified `vendor_mcp` connection (`connection_not_verified`, `connection_not_vendor_mcp`).
+4. **Grant and bind.** Grant the connection to a workspace, declare the synced tool names in the manifest, and bind them in `toolAuthorizations`.
+
+### How sync names and classifies tools
+
+A synced tool is named `<providerKey>.<normalized remote name>`. Normalization turns camelCase boundaries into `_`, lowercases the name, replaces other runs of characters outside `[a-z0-9]` with `_`, and adds a `t_` prefix when the result does not start with a letter.
+
+The platform never trusts the server's own tool annotations. Each provider definition carries a code-owned classification of its remote tools.
+
+| Classification       | Effect  | Default action     | Required scope |
+| -------------------- | ------- | ------------------ | -------------- |
+| Read                 | `read`  | `allow`            | `tools:read`   |
+| Write or destructive | `write` | `require_approval` | `tools:write`  |
+| Not classified       | `write` | `require_approval` | `tools:write`  |
+
+The sync response lists every remote tool with its `change`: `created`, `updated`, `unchanged`, `archived`, or `rejected`. A rejected tool carries a `reason`, and the rest of the sync continues.
+
+| Reason                         | Cause                                                                                     |
+| ------------------------------ | ----------------------------------------------------------------------------------------- |
+| `invalid_name`                 | The normalized name is empty, invalid, or longer than 128 characters.                     |
+| `name_collision`               | Another listed tool, or another tool in the environment, has the same name.               |
+| `name_reserved`                | A platform catalog tool has the same name.                                                |
+| `input_schema_not_object`      | The input schema is not an object schema.                                                 |
+| `input_schema_too_large`       | The input schema is larger than 64 KiB.                                                   |
+| `input_schema_unrepresentable` | The platform cannot store the schema, for example an integer bound beyond the safe range. |
+| `description_too_large`        | The description is larger than 8 KiB.                                                     |
+| `record_unrepresentable`       | The tool record could not be built.                                                       |
+
+Each synced tool stores a `toolHash` of its name, description, and input schema. At call time the worker lists the server's tools again and fails the call when the hash changed: "changed since it was synced; re-run tool sync." Re-run tool sync to accept the new definition.
+
+## What happens during a call
+
+For every call the worker opens a new MCP session, initializes it, requires the `tools` capability, checks the tool, calls it, and ends the session.
+
+- The endpoint must resolve to public addresses. The worker pins the resolved address for the connection and does not follow redirects.
+- Responses are limited to 8 MiB.
+- One deadline covers initialization, discovery, and the call. The operator sets it. Keep MCP tools short and request-response.
+- OAuth connections whose access token expires within 120 seconds are refreshed before the call. A connection that needs re-authorization fails the call.
+- A `write` call to a vendor server takes a durable claim on the call's idempotency key first. MCP has no idempotency key on the wire, so once the request is sent, any failure other than an HTTP 4xx is recorded as an unknown outcome and the call is not sent again.
+
+## Use it
+
+Register a custom server and expose one of its tools:
+
+1. Create the server with an allowlist, reading the auth JSON from an environment variable.
+
+   ```bash
+   deployments mcp-server create --name "Docs search" \
+     --endpoint-origin https://mcp.example.com --endpoint-path /mcp \
+     --tools '["search_docs"]' --auth-env DOCS_MCP_AUTH
+   ```
+
+2. Discover the allowlisted tools and copy the input schema.
+
+   ```bash
+   deployments mcp-server discover $MCP_SERVER_ID
+   ```
+
+3. Create the extension tool, the MCP connection, and a grant for your workspace.
+
+   ```bash
+   deployments extension create --name docs.search --description "Search product docs." \
+     --effect read --default-action allow --scopes '["docs:read"]' \
+     --execution '{"type":"mcp","mcpServerId":"'$MCP_SERVER_ID'","remoteToolName":"search_docs"}' \
+     --input-schema "$(cat search-input.json)"
+   deployments mcp-connection create --server $MCP_SERVER_ID
+   deployments grant create --connection $MCP_CONNECTION_ID --workspace $WORKSPACE_ID \
+     --purpose agent-runtime --scopes docs:read
+   ```
+
+4. Declare `docs.search` in the manifest with `authorization: "workspace"`, bind it to the grant in `toolAuthorizations`, and deploy.
+
+The [management console](/docs/getting-started/console#manage-mcp-servers) registers, edits, discovers, and archives custom servers and creates and revokes their connections under **Connect** › **MCP servers**.
+
+For a vendor-hosted server, connect it and sync its tools:
+
+```bash
+deployments connection authorize --provider $PROVIDER_KEY
+deployments connection verify $CONNECTION_ID
+deployments connection tools-sync $CONNECTION_ID
+```
+
+In the console, **Sync tools** on the connection's page runs the same sync and lists each remote tool's change and rejection reason.
+
+## Reference
+
+- API: [Create an MCP server](/docs/api/reference/extensions/create-mcp-server), [Discover MCP server tools](/docs/api/reference/extensions/discover-mcp-server), [Create an MCP connection](/docs/api/reference/extensions/create-mcp-connection), [Sync connection tools](/docs/api/reference/providers/sync-connection-tools)
+- CLI: [`deployments mcp-server`](/docs/cli/reference/mcp-server#mcp-server-create), [`deployments mcp-connection`](/docs/cli/reference/mcp-connection#mcp-connection-create), [`deployments connection tools-sync`](/docs/cli/reference/connection#connection-tools-sync)
+- SDK: [Extensions functions](/docs/sdk/reference#extensions), [Providers functions](/docs/sdk/reference#providers)

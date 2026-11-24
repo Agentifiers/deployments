@@ -1,0 +1,65 @@
+{
+  "id": "gen-1791811584-C5bh54VhjH1jVEcIAOv8",
+  "object": "chat.completion",
+  "created": 1791811584,
+  "model": "google/gemini-3.6-flash",
+  "provider": "Google",
+  "system_fingerprint": null,
+  "service_tier": "default",
+  "choices": [
+    {
+      "index": 0,
+      "logprobs": null,
+      "finish_reason": "tool_calls",
+      "native_finish_reason": "STOP",
+      "message": {
+        "role": "assistant",
+        "content": "Among Berlin, Tokyo, Canberra, and Ottawa, Canberra has the longest name with 8 letters.",
+        "refusal": null,
+        "reasoning": "**Analyzing City Name Lengths**\n\nI've been focused on the primary task of comparing city name lengths. My analysis reveals Canberra as the longest, with eight characters. The next step involves fetching weather data for these cities.\n\n",
+        "tool_calls": [
+          {
+            "type": "function",
+            "index": 0,
+            "id": "call_403383",
+            "function": { "name": "get_weather", "arguments": "{\"city\":\"Canberra\"}" }
+          }
+        ],
+        "reasoning_details": [
+          {
+            "type": "reasoning.text",
+            "text": "**Analyzing City Name Lengths**\n\nI've been focused on the primary task of comparing city name lengths. My analysis reveals Canberra as the longest, with eight characters. The next step involves fetching weather data for these cities.\n\n",
+            "format": "google-gemini-v1",
+            "index": 0
+          },
+          {
+            "type": "reasoning.encrypted",
+            "data": "AY89a183E+4oeb+caRoRiw5TlXOsIHvs/QgXFDj9gQZJazMLdWAZYcONKc4PZfXldd+WjeUr/c/e7DNCVtGttwKsr751EVME7Inn91lIqZm752NUUMAIrb5+32pVl+xVinxirPn+XJ7YtSVb8BMCUbEFeSbN8YWu5bVJAHdxR0VrwZ6r7rOqvTfbE5WSy9UhdyL72vMxIvWPkgE7euEQDNvFheFbtvyuj47/9JaQLoB6hTe4m67y5suu8H2ILJu2fueu3TYcEA6NDwzJtNFbySyHNIC4GMLsQFGpD9CYIOwRn0L46/B9y4whzBbRMJeTLg1D59OP0t1sRorHBVKuLAbwPA1mNAmBTlwZMIPo6BtUnMQVk44umD4CRE+z3STYAhuyVH9dD+H/Yu0JC0oU2Z/2lj8sD6dkNDh6+6YsQrgIgar7jrDQGgicUF7qYaBK9TyT3iliE9hLwiNTa4ufOOvfN7m8Dylc8IC03SO8WNlSLRJyFaUiCdzLgWuJoc85Hf2F538LSeeJOZHINLToFA5Jf2BD3oCHdp8t5gMfDCGXr4KptFmhQfFVZVxJaQ6p8nB4msO9gVpJkW9UrkLpHLOhti7yu52/uVpvO49dNTiFeZ6rNme+GM//u244fQt8nVYykEezL8FZq/VDiyiZ0Y5rVErxJKtpyGhuwUoMhSkPmdcPoRBeF4D8HhxOvA487hrH1D+b2pd3g8pE8U1HicBn42e/X5Sn5T7mUjjtfccAFPRgziPKlrc8fHuGrcAEzFi6MHOJFRKd5mouSqSMCXr3EwrzO3BAfysO1YXI1GZrRYS3WMmobnzJATiJB3E3S77+I6BSseUi8QkDYhnEFmoUoj28HIrKNiTQO4dTzkh/hHmmgvvY8lp1DKzGdbzS+s5pQd7BruTu81kl/c8h+GSUi5ym0rz/I6ZTLwKw5NBRZOVwf5vk16sHzTZuOBZ0bnHT9Rcfzv9mB6dhdKVG1CXydKqeCCM/zuJHUGaUK/195KffM1fSHyqSzmyRf+u+CspOTVwy4RF9qkKQ2jIoS79p3jjMPzMMe11yZWT8L6f0Y+i/18sO9axp82BMXA78jxZpsEEe/+NWJiCCD0MnGzF/40yeHpm8bP1MnaTwLWBH6D7JCSKZQ7j3LVpFNm82gjy9GyrVr/+AtQfXdca4eN/FUmcEPYWDt7CrZsZSyS9M/ZptIOWbyUFZ2Eyutw29sxvEASUTm11Opn/fkbcimUTBpUZiP+aciw1tR5jRgFsgzhWxuGvrK55ea1JP2T4nVFirUwj3i9CP6lB1yI25R1ZdpumKSlj2c7VkiDr8aylkIJys1ZktIRXBJ0b81w0BB1Bu5/RSHyHiYzkLfuW5fyvjNkheXodLfFTKJ7tdJJe+gdHOg1wAD4oGxMPp8xH88G5ICwUI4usrueo/88wXJJEWc/pEf3t/zQTqw+qgbCc91j/uud6w8ffJnlRy72g6zl7dvJmP5vZqtyYevqrRjSIfTH4uei0d9XF5Onw+EBHApkcuZprQ5E8PPOKDPLCxxH5n0pXO5pmsMwTZqWiJ0tCqzgkl4CePiQgHvoAZKIIjqBC5pSPLRs+VD4p86f44kJlxoLEs++NOAO70v/9hTTsVF0mQT38q7pNUR+vLCf7y1bBMZHxpOYiBEgx89GRZLaU0DPg2zCLtjxIREBtlRopocZA0l+9wleHCAVyHAMRYg27TjCww4BKp3ullc3WvEWmcMDcsr5sQxp28bEf9l5qkfCNEVgKPiUXT7rVhSXTdrp8CP2o/Kj5RID2eVNCt7KGXr1wN4iaoJact8i7r3aPQTtGEmWAIXcXk/fnipPepF0EcCXU+3DhZiwRoXKp29ic8XrX0Z+tqNB+bAtg9KdzOvMtFUfWqRfjI/FU55v9UlGKzwRWno7c=",
+            "format": "google-gemini-v1",
+            "id": "call_403383",
+            "index": 1
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 134,
+    "completion_tokens": 369,
+    "total_tokens": 503,
+    "cost": 0.00148425,
+    "is_byok": false,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0,
+      "audio_tokens": 0,
+      "video_tokens": 0
+    },
+    "cost_details": {
+      "upstream_inference_cost": 0.00148425,
+      "upstream_inference_prompt_cost": 0.0001005,
+      "upstream_inference_completions_cost": 0.00138375
+    },
+    "completion_tokens_details": { "reasoning_tokens": 332, "image_tokens": 0, "audio_tokens": 0 }
+  }
+}

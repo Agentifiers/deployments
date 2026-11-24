@@ -1,0 +1,109 @@
+---
+title: "Pagination"
+description: "Cursor-based pagination for list operations, page size limits, and how to walk a full list."
+---
+
+List operations return one page at a time. Each page carries an opaque `nextCursor`. Pass it back as `cursor` to get the next page, and stop when a page comes back without one.
+
+## Request and response
+
+| Where    | Field        | Rule                                                                                   |
+| -------- | ------------ | -------------------------------------------------------------------------------------- |
+| Query    | `cursor`     | The `nextCursor` from the previous page. Omit it for the first page.                   |
+| Query    | `limit`      | The maximum number of items on the page. An integer from 1 to the operation's maximum. |
+| Response | `nextCursor` | The cursor for the next page. It is absent or `null` on the last page.                 |
+
+Most list responses put their items in an `items` array. Some runtime lists name the array after the resource instead, for example `runs`, `threads`, `messages`, `approvals`, `webhooks`, `deliveries`, or `schedules`. Each operation's reference page shows its response schema.
+
+Search operations that take a JSON body, such as searching runs or agent email messages, put `cursor` and `limit` in the body instead of the query string.
+
+## Page size limits
+
+Most lists accept a `limit` from 1 to 100. Some operations allow a different maximum.
+
+| Operations                                                                   | Maximum `limit` |
+| ---------------------------------------------------------------------------- | --------------- |
+| Most list operations                                                         | 100             |
+| Usage, cost, and spend records, and API key usage                            | 1000            |
+| Memory spaces, memory policies, memory space grants, and memory review items | 200             |
+| Run runtime logs                                                             | 500             |
+| Budget periods                                                               | 24              |
+| Memories                                                                     | 20              |
+
+When you omit `limit`, the operation picks its own default page size. Each reference page lists the exact range.
+
+## Cursors are opaque and scoped
+
+Treat a cursor as an opaque string. Do not parse it, build it, or store it for later use in a different context.
+
+- Most cursors are 1 to 4096 characters. Evaluation list cursors can be up to 8192 characters.
+- A cursor is bound to the scope that produced it. Using it with a different organization, project, or environment fails with status 400 and code `invalid_cursor`.
+- A malformed or modified cursor also fails with `invalid_cursor`.
+
+Send the same tenant headers and filters on every page of a walk.
+
+## Walk a full list
+
+<Tabs items={["CLI", "SDK", "HTTP"]}>
+<Tab value="CLI">
+
+List commands take `--page-size` and `--cursor`. With `--json`, the output includes `nextCursor`:
+
+```sh
+deployments project list --page-size 50 --json
+deployments project list --page-size 50 --cursor "$NEXT_CURSOR" --json
+```
+
+`--page-size` accepts only a whole number. Tenancy list commands accept 1 to 100. Other list commands accept 1 to 200 unless the command sets its own maximum, and the API still applies the operation's limit.
+
+</Tab>
+<Tab value="SDK">
+
+```ts
+import { createClient, createConfig, listProjects } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_TENANT_JWT}` },
+  }),
+);
+
+let cursor: string | undefined;
+do {
+  const { data, error } = await listProjects({
+    client,
+    headers: { "x-deployments-organization": process.env.ORG_ID! },
+    query: { limit: 100, ...(cursor ? { cursor } : {}) },
+  });
+  if (error) throw new Error(`${error.code}: ${error.title}`);
+  for (const project of data.items) console.log(project.id, project.name);
+  cursor = data.nextCursor ?? undefined;
+} while (cursor);
+```
+
+</Tab>
+<Tab value="HTTP">
+
+```sh
+curl "$DEPLOYMENTS_API_URL/v1/projects?limit=100" \
+  --header "authorization: Bearer $DEPLOYMENTS_TENANT_JWT" \
+  --header "x-deployments-organization: $ORG_ID"
+
+curl "$DEPLOYMENTS_API_URL/v1/projects?limit=100&cursor=$NEXT_CURSOR" \
+  --header "authorization: Bearer $DEPLOYMENTS_TENANT_JWT" \
+  --header "x-deployments-organization: $ORG_ID"
+```
+
+URL-encode the cursor if your client does not do it for you.
+
+</Tab>
+</Tabs>
+
+## Reference
+
+- [List projects](/docs/api/reference/tenancy/list-projects)
+- [List runs](/docs/api/reference/runtime/list-runs)
+- [List budget periods](/docs/api/reference/budgets/list-budget-periods)
+- [Global CLI flags](/docs/cli/reference#global-flags)
+- [Making requests with the SDK](/docs/sdk/making-requests)

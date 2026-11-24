@@ -1,0 +1,172 @@
+---
+title: "Making requests"
+description: "Call operation functions with path, query, header, and body options, send idempotency keys, page through lists, and control timeouts."
+---
+
+Every operation function takes one options object and returns a promise. This page shows the parts of that object, what comes back, and the patterns you need for writes and lists.
+
+## The shape of a call
+
+```ts
+import { createClient, createConfig, submitAgentRun } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data, error, response } = await submitAgentRun({
+  client,
+  path: { agentDeploymentId: "<agent-deployment-id>" },
+  headers: { "idempotency-key": crypto.randomUUID() },
+  body: { content: "Summarize the latest release notes." },
+});
+
+if (data) console.log(data.run.id, data.run.status, data.thread.id);
+```
+
+| Option    | Holds                                                                            | Example                                  |
+| --------- | -------------------------------------------------------------------------------- | ---------------------------------------- |
+| `client`  | The client to send the request with                                              | `client`                                 |
+| `path`    | Values for the `{name}` segments of the path                                     | `{ agentDeploymentId: "..." }`           |
+| `query`   | Query string parameters. The client leaves out `undefined` and `null` values.    | `{ limit: 20, cursor }`                  |
+| `headers` | Tenant headers, the idempotency key, and any other header the operation declares | `{ "x-deployments-environment": "..." }` |
+| `body`    | The JSON request body                                                            | `{ content: "..." }`                     |
+
+TypeScript checks each option against the operation's schema, so a missing required path parameter or header is a compile error. The [function reference](/docs/sdk/reference) links every function to its API reference page, which lists the parameters and shows a complete example.
+
+The other examples on this page continue this one. They reuse its `client` and the imports of the examples before them.
+
+## What a call returns
+
+A call resolves to an object with these fields:
+
+| Field      | On success                                        | On failure                                                                                     |
+| ---------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `data`     | The parsed response body, typed for the operation | `undefined`                                                                                    |
+| `error`    | `undefined`                                       | The parsed error body, usually a problem details object, or the error that stopped the request |
+| `request`  | The `Request` the client sent                     | The `Request`, if the client built one                                                         |
+| `response` | The `Response`                                    | The `Response`, or `undefined` when no response arrived                                        |
+
+The call does not throw on an HTTP error or a network failure. Check `error` before you use `data`. [Error handling](/docs/sdk/errors) explains what `error` can hold.
+
+Use `response` for status codes and headers. Most API areas return an `x-request-id` response header, and error bodies can carry the same ID in `requestId`. Log it, because it identifies the request in support conversations:
+
+```ts continues
+console.log(response?.status, response?.headers.get("x-request-id"));
+```
+
+## Change how a call returns
+
+Three options change the return value. Set them per call or in `createConfig` for every call:
+
+- `throwOnError: true` makes a failed call throw the value it would have put in `error`. For an error status, the thrown value is the parsed error body, which is a plain object, not an `Error` instance.
+- `responseStyle: "data"` resolves to the response body alone instead of the object with `data` and `error`.
+- `parseAs` overrides how the client reads the body. The default, `"auto"`, picks JSON, text, or binary from the `content-type` header. `"stream"` returns the unread body stream.
+
+```ts continues
+import { listAgentDefinitions } from "@agentifiers/deployments-sdk";
+
+const { data: definitions } = await listAgentDefinitions({
+  client,
+  headers: { "x-deployments-environment": "<environment-id>" },
+  throwOnError: true,
+});
+```
+
+## Send an idempotency key with every write
+
+Most operations that create a resource or cause a side effect take an `idempotency-key` header, and most of those require it. The API reference page for each operation says whether it does. If the API already completed a request with the same key and the same input, it returns the stored result instead of doing the work again.
+
+To make a write safe to retry, create the key once for the logical operation, store it with your own record of the operation, and send the same key on every attempt:
+
+```ts continues
+import { readFile } from "node:fs/promises";
+import { createAgentDefinition } from "@agentifiers/deployments-sdk";
+
+const manifest = JSON.parse(await readFile("agent.json", "utf8"));
+const idempotencyKey = crypto.randomUUID(); // Store this before the first attempt.
+
+const { data: definition, error: createError } = await createAgentDefinition({
+  client,
+  headers: {
+    "x-deployments-environment": "<environment-id>",
+    "idempotency-key": idempotencyKey,
+  },
+  body: { manifest },
+});
+```
+
+A new key on each attempt defeats the purpose, because each attempt then counts as a new request. Reusing a key with a different body fails with status `409`. The maximum key length differs by API area. [Idempotency](/docs/api/idempotency) lists the limits and the other rules.
+
+## Page through a list
+
+List operations take a `cursor` and a `limit` query parameter and return a page of items with a `nextCursor` when more pages exist. The name of the items array differs between operations, for example `items` for agent definitions and `runs` for runs, and so does the maximum `limit`. The operation's API reference page shows both.
+
+This async generator yields every agent definition in an environment:
+
+```ts continues
+async function* agentDefinitions(environmentId: string) {
+  let cursor: string | undefined;
+  do {
+    const { data, error } = await listAgentDefinitions({
+      client,
+      headers: { "x-deployments-environment": environmentId },
+      query: { limit: 100, cursor },
+    });
+    if (error) throw new Error("listAgentDefinitions failed", { cause: error });
+    yield* data.items;
+    cursor = data.nextCursor ?? undefined;
+  } while (cursor);
+}
+
+for await (const definition of agentDefinitions("<environment-id>")) {
+  console.log(definition.id, definition.name);
+}
+```
+
+Treat a cursor as an opaque string and pass it back unchanged. [Pagination](/docs/api/pagination) explains cursors in more detail.
+
+## Set a timeout or cancel a call
+
+The options object also accepts standard `fetch` options. Pass an `AbortSignal` to time out or cancel a call:
+
+```ts continues
+const result = await listAgentDefinitions({
+  client,
+  headers: { "x-deployments-environment": "<environment-id>" },
+  signal: AbortSignal.timeout(10_000),
+});
+```
+
+When the signal aborts, the call resolves with the abort error in `error` and no `response`.
+
+To route every request through your own `fetch` implementation, for example to add tracing, pass `fetch` to `createConfig`.
+
+## Run code on every request
+
+A client has interceptors for requests, responses, and errors. A response interceptor receives the `Response`, the `Request`, and the call options, and must return the response:
+
+```ts continues
+client.interceptors.response.use((response, request) => {
+  if (!response.ok) {
+    console.warn(
+      request.method,
+      request.url,
+      response.status,
+      response.headers.get("x-request-id"),
+    );
+  }
+  return response;
+});
+```
+
+`use` returns an ID. Pass it to `client.interceptors.response.eject` to remove the interceptor.
+
+## Reference
+
+- [SDK function reference](/docs/sdk/reference)
+- [Idempotency](/docs/api/idempotency) and [Pagination](/docs/api/pagination) in the API guide
+- [Authentication](/docs/sdk/authentication) for credentials and tenant headers

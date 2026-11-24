@@ -1,0 +1,30 @@
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-1791811495-reN2vg0uNjvYoCty9CC6","object":"chat.completion.chunk","created":1791811495,"model":"anthropic/claude-haiku-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"Comparing let","reasoning_details":[{"type":"reasoning.text","text":"Comparing let","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-1791811495-reN2vg0uNjvYoCty9CC6","object":"chat.completion.chunk","created":1791811495,"model":"anthropic/claude-haiku-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ter counts: Berlin has 6, Tokyo has 5, Canberra has 8, Ottawa has 6. Canberra wins with no tie, so I'll check the weather there.","reasoning_details":[{"type":"reasoning.text","text":"ter counts: Berlin has 6, Tokyo has 5, Canberra has 8, Ottawa has 6. Canberra wins with no tie, so I'll check the weather there.","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1791811495-reN2vg0uNjvYoCty9CC6","object":"chat.completion.chunk","created":1791811495,"model":"anthropic/claude-haiku-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning_details":[{"type":"reasoning.text","signature":"CAQS8QUKEAgSGAI4AUIIdGhpbmtpbmcSDFsbW18V0G49PKCC4RoMZLkhCQg3d+XgeykeIjArGnVRbw+rEIsmgvbZFI4xr0fyCT0tVA2Cd53+hveHUOMZrzPOPldkwDXySKSQgWoqjgXF8etM8hdQMeshG01u2UnpIbpJTiGzNmhYTophCavQuheFeoanvMeQS8+0RwltzYbN4t0C0w+hgvcFoKJ7sT3vTDcylP/gejpO+0jJntVHXgjuDR+gDWObd3k66P2NeacJENUpDjjsvRxbC2iMN99wNDZQ9ByZ00iZ4EHB16TEH+2z/t+4BUwPm+q9BGEExSt1ZGzwFmoMXtyy3s/I1H1AU1/R363zhryiquYK84mhcE4ZtDCnrc+AH3pJY49/G8NQpU1efJ/vWyPb+qCEefD2nw5xwuRMSzNx8FB0MvBlKWmZJgVvLssztNqYHdnxRyTVjKG0xBZUuc5SUxEHv65dNj1lgFofdB9Jc4Sk2U4DNpJm+ZLX+a/uPCXyOXHw5mysK34CCODPYOwImRV4cVgctZOVdK9c2ldF4dImnl5/YlAQCiWXq/3yzVS0DEz5pOcR07RvcU7G21D4sTFI4c5bEEWb5d1Q6HVD0dklNy/IZwE1ewSi6sn6+lhdZ2xvZL7/4Or2G+xPR0waxcBasO7V+pepMB4PN2IEGmL/iNJBq2qH1OVZDkEuhF3udJ26kXJGUKU5bQzV9OOps176cD5PWY7Q3sHtJitPDWDwlheECnySLK22cJJ4rXMu7kn2h+W0ddmhZ2yWBf9EdRm4Bf0rxYKFQpPM8OKFkfGBckz31n61wyJIHVjtMqgtyI62kFW13QrQnnsg3j0To5INWWmsWRWJyNdRKeflFz7g/+BfYdlZpmuDz72Te6yipvbPizQTzRLcjcbhhbKHYe+Ox6EXVN3u10F7IqKbwA8PS1VAabMQLiDqg+4pF1sEgW9CDU+Rc1r7Ag/SXr5FSCW0KhBu8Rbm/eXyh5h5vqI+EMMYAQ==.eyJlbmRwb2ludF9zbHVnIjoiYW50aHJvcGljL2NsYXVkZS1oYWlrdS01LjUtMjAyNjEwMDd8Y2xhdWRlLW9uLWF3cyJ9","format":"anthropic-claude-v1","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1791811495-reN2vg0uNjvYoCty9CC6","object":"chat.completion.chunk","created":1791811495,"model":"anthropic/claude-haiku-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"The","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1791811495-reN2vg0uNjvYoCty9CC6","object":"chat.completion.chunk","created":1791811495,"model":"anthropic/claude-haiku-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":" capitals are Berlin (6 letters), Tokyo (5), Canberra (8), and Ottawa (6). Canberra has the most letters, so I'll get the weather there.","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1791811495-reN2vg0uNjvYoCty9CC6","object":"chat.completion.chunk","created":1791811495,"model":"anthropic/claude-haiku-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"id":"toolu_01Ucnh2btEt1q3C1c1fyf7xU","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1791811495-reN2vg0uNjvYoCty9CC6","object":"chat.completion.chunk","created":1791811495,"model":"anthropic/claude-haiku-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":""}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1791811495-reN2vg0uNjvYoCty9CC6","object":"chat.completion.chunk","created":1791811495,"model":"anthropic/claude-haiku-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"{\"city\": \"Canberra"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1791811495-reN2vg0uNjvYoCty9CC6","object":"chat.completion.chunk","created":1791811495,"model":"anthropic/claude-haiku-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1791811495-reN2vg0uNjvYoCty9CC6","object":"chat.completion.chunk","created":1791811495,"model":"anthropic/claude-haiku-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":null},"finish_reason":"tool_calls","native_finish_reason":"tool_use"}]}
+
+data: {"id":"gen-1791811495-reN2vg0uNjvYoCty9CC6","object":"chat.completion.chunk","created":1791811495,"model":"anthropic/claude-haiku-5.5","provider":"Claude Platform on AWS","service_tier":"default","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"tool_calls","native_finish_reason":"tool_use"}],"usage":{"prompt_tokens":479,"completion_tokens":192,"total_tokens":671,"cost":0.0001439,"is_byok":false,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0,"audio_tokens":0,"video_tokens":0},"cost_details":{"upstream_inference_cost":0.0001439,"upstream_inference_prompt_cost":0.0000479,"upstream_inference_completions_cost":0.000096},"completion_tokens_details":{"reasoning_tokens":81,"image_tokens":0,"audio_tokens":0}}}
+
+data: [DONE]
+

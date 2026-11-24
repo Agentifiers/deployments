@@ -1,0 +1,37 @@
+@import "tailwindcss";
+@import "fumadocs-ui/css/neutral.css";
+@import "fumadocs-ui/css/preset.css";
+@import "fumadocs-openapi/css/preset.css";
+
+@theme {
+  --color-fd-primary: #5108bd;
+  --color-fd-primary-foreground: #fcfdfc;
+  --color-fd-ring: #6507f1;
+}
+
+.dark {
+  --color-fd-primary: #07f1ce;
+  --color-fd-primary-foreground: #0d0d0d;
+  --color-fd-ring: #07f1ce;
+}
+
+.api-method {
+  @apply ms-auto font-mono text-xs font-medium text-nowrap;
+}
+
+.api-method-get {
+  @apply text-green-600 dark:text-green-400;
+}
+
+.api-method-post {
+  @apply text-blue-600 dark:text-blue-400;
+}
+
+.api-method-put,
+.api-method-patch {
+  @apply text-orange-600 dark:text-orange-400;
+}
+
+.api-method-delete {
+  @apply text-red-600 dark:text-red-400;
+}

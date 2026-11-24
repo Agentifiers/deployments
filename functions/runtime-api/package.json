@@ -1,0 +1,53 @@
+{
+  "name": "@deployments-ai/runtime-api",
+  "version": "0.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "test": "bun test",
+    "typecheck": "tsrs -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1090.0",
+    "@aws-sdk/client-kms": "3.1090.0",
+    "@aws-sdk/client-lambda": "3.1090.0",
+    "@aws-sdk/client-s3": "3.1090.0",
+    "@aws-sdk/client-secrets-manager": "3.1090.0",
+    "@aws-sdk/client-sesv2": "3.1090.0",
+    "@aws-sdk/client-sqs": "3.1090.0",
+    "@aws-sdk/lib-dynamodb": "3.1090.0",
+    "@aws-sdk/s3-request-presigner": "3.1090.0",
+    "@deployments-ai/agent-email": "workspace:*",
+    "@deployments-ai/agent-manifest": "workspace:*",
+    "@deployments-ai/api-contract": "workspace:*",
+    "@deployments-ai/automations": "workspace:*",
+    "@deployments-ai/brains": "workspace:*",
+    "@deployments-ai/channel-adapters": "workspace:*",
+    "@deployments-ai/conversations": "workspace:*",
+    "@deployments-ai/credential-vault": "workspace:*",
+    "@deployments-ai/db": "workspace:*",
+    "@deployments-ai/events": "workspace:*",
+    "@deployments-ai/file-text": "workspace:*",
+    "@deployments-ai/identity": "workspace:*",
+    "@deployments-ai/identity-emails": "workspace:*",
+    "@deployments-ai/model-gateway": "workspace:*",
+    "@deployments-ai/net-security": "workspace:*",
+    "@deployments-ai/observability": "workspace:*",
+    "@deployments-ai/organization-admission": "workspace:*",
+    "@deployments-ai/secret-store": "workspace:*",
+    "@deployments-ai/streaming": "workspace:*",
+    "@deployments-ai/tenant-limits": "workspace:*",
+    "@deployments-ai/tools": "workspace:*",
+    "@deployments-ai/webhooks": "workspace:*",
+    "@deployments-ai/worker": "workspace:*",
+    "effect": "4.0.0-beta.92"
+  },
+  "devDependencies": {
+    "jose": "6.2.4"
+  }
+}

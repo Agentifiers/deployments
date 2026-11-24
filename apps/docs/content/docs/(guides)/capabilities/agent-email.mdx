@@ -1,0 +1,171 @@
+---
+title: "Agent email"
+description: "Give agents inboxes that receive, thread, draft, and send email, with approval, policy, and suppression controls."
+---
+
+Agent email gives an agent its own email address. Mail sent to the inbox is stored, threaded, and can start a run on a bound agent deployment, and the inbox sends replies, forwards, and new messages. Use agent email when an agent should hold a two-way email conversation. To send one-way transactional mail from your own domain, use [Sending email](/docs/capabilities/email) instead.
+
+<Callout type="warn" title="Availability">
+  An installation from the customer root runs the agent email runtime by default, with inbound
+  receiving on the operator's `agent_email_domain`. Receiving needs an AWS region where SES supports
+  email receiving.
+</Callout>
+
+## Resources
+
+| Resource    | What it is                                                                                                                     |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Domain      | A verified domain that inboxes live on. Each environment can use the install's hosted domain, or you register a custom domain. |
+| Inbox       | One address on a verified domain. Status is `active`, `paused`, or `archived`.                                                 |
+| Binding     | Connects an inbox to an agent deployment (`platform_agent`) or to an external system (`external`).                             |
+| Message     | One inbound or outbound email, with attachments and threading headers.                                                         |
+| Thread      | Messages grouped into one conversation, with participants and a message count.                                                 |
+| Draft       | An outbound message that goes through approval before it is sent.                                                              |
+| Placement   | The sending region, an optional secondary region, and whether the organization uses a dedicated sending pool.                  |
+| Policy      | Outbound limits and controls for the environment.                                                                              |
+| Suppression | An address the inbox must not send to.                                                                                         |
+
+All routes are environment scoped through the `x-deployments-environment` header. The organization and project come from your credential.
+
+## Domains and inboxes
+
+When you create an inbox without a `domainId`, the platform uses the install's hosted domain for the environment. To use your own domain, register it and publish the records in the response's `dnsRecords`. The first is an ownership `TXT` record at `_agent-email.<your-domain>`. Then call refresh. A domain stays `pending_dns` until its records verify, and it moves to `verified` when they do. Domain statuses are `pending`, `provisioning`, `pending_dns`, `verified`, `failed`, and `revoked`.
+
+An inbox address is `localPart@domain`. The local part defaults to the inbox ID. Inbox creation fails with `domain_not_verified` until the domain is verified.
+
+## Receiving mail
+
+When mail arrives, the platform stores the raw message, parses it, files it into a thread, and records it. For each `active` `platform_agent` binding on the inbox, it starts a run on the bound deployment with channel and trigger `email`. The run's thread title starts with `Email:` and the subject. `external` bindings and bindings that are not active never start runs, and one failing binding does not stop the others.
+
+The run's message lists every attachment's file name, type, and size. If the bound deployment's release sets `spec.runtime.ingressAttachments: "attach"`, the run also receives up to four images and four documents of at most 10 MiB each as private input files. Attached files come first, in message order. Inline parts, such as a logo in an email signature, fill only the slots that attached files leave. Images are JPEG, PNG, and WebP. Documents are PDF, DOCX, XLSX, CSV, TXT, Markdown, JSON, HTML, and ZIP, and the agent reads a document as its extracted text. Other file types, legacy Office files (`.doc`, `.xls`, `.ppt`), files larger than 10 MiB, and files past the per-run limits are skipped and never read, and the agent is told each skipped file's name and why. A 12 MiB PDF, for example, reaches the agent as its attachment-list line and a note that the file is larger than 10 MiB. Each binding gets its own copy on its own thread. An attachment that cannot be read is left out, and the run still starts. When the platform stored a document but cannot read it, because it is corrupt, encrypted, or has no readable text, the agent is told the file's name and why it was left out. A scanned PDF has readable text only where the installation turns on [OCR](/docs/operate/features#ocr-for-scanned-pdf-pages) and OCR finds text. A run names at most eight files it left out and tells the agent how many more there were. See [Agent manifests](/docs/capabilities/agent-manifests) for the setting.
+
+Search messages or threads by text, sender, recipient, participants, direction, status, or attachments. Attachment content and the raw message are available through short-lived access URLs. The raw message is kept for the policy's `rawRetentionDays`. An administrator can reprocess a stored raw message.
+
+## Sending mail
+
+An inbox sends in three ways:
+
+- **Directly.** Send a new message, or reply, reply-all, or forward an existing one. A send can set `scheduledAt` to send later.
+- **Through a draft.** Create a draft, edit it, and submit it for approval. An administrator approves or rejects it, and an approved draft is sent.
+- **Scheduled.** A scheduled draft can be cancelled until it starts sending.
+
+| Draft status                            | Next steps                                                |
+| --------------------------------------- | --------------------------------------------------------- |
+| `draft`                                 | Edit, submit, or cancel                                   |
+| `pending_approval`                      | Approve or reject (administrator), or cancel              |
+| `approved`                              | Send or cancel                                            |
+| `rejected`                              | Edit and resubmit, or cancel. Rejection records a reason. |
+| `scheduled`                             | Cancel until it starts sending                            |
+| `queued`, `sent`, `failed`, `cancelled` | Final for the draft                                       |
+
+Only an `approved` draft can be sent. Sending any other draft fails with `draft_not_approved`.
+
+Each outbound message passes these checks before it is accepted:
+
+- The inbox is `active` and its domain is verified.
+- The policy's `sendingStatus` is `active`.
+- The recipient count is within `maxRecipientsPerMessage`, and no recipient is on the `blocklist` or suppressed.
+- Attachments fit `maxAttachmentBytes`. A message carries at most 35 attachments.
+- Today's outbound count is under the effective daily limit.
+
+## Policy and warmup
+
+Each environment starts with a default policy:
+
+| Setting                             | Default   | Range                                                 |
+| ----------------------------------- | --------- | ----------------------------------------------------- |
+| `warmupStage`                       | `sandbox` | `sandbox`, `ramp_1`, `ramp_2`, `ramp_3`, `production` |
+| `dailyOutboundMessageLimit`         | 1,000     | 0 or more                                             |
+| `maxRecipientsPerMessage`           | 47        | 1 to 47                                               |
+| `maxAttachmentBytes`                | 4 MiB     | Up to 4 MiB                                           |
+| `rawRetentionDays`                  | 30        | 1 to 365                                              |
+| `bounceRateThresholdBasisPoints`    | 500       | 0 to 10,000                                           |
+| `complaintRateThresholdBasisPoints` | 10        | 0 to 10,000                                           |
+
+The warmup stage caps the daily limit. The effective limit is the lower of `dailyOutboundMessageLimit` and the stage cap.
+
+| Warmup stage | Daily cap | Recipients must be verified |
+| ------------ | --------- | --------------------------- |
+| `sandbox`    | 20        | Yes                         |
+| `ramp_1`     | 50        | Yes                         |
+| `ramp_2`     | 250       | No                          |
+| `ramp_3`     | 1,000     | No                          |
+| `production` | None      | No                          |
+
+In `sandbox` and `ramp_1`, a recipient must be on the policy `allowlist` or otherwise verified. Other recipients fail with `recipient_not_verified`.
+
+Suppressions block sends to an address. The platform adds `bounce` and `complaint` suppressions, and administrators add `manual` and `policy` suppressions or remove them. Usage reports inbound messages, outbound messages, attachment bytes, and stored bytes, and exports by hour, day, or month as CSV or JSON.
+
+## Permissions
+
+| Capability          | Allows                                                                                                                                   |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent-email:read`  | Read inboxes, bindings, messages, threads, drafts, domains, placements, policy, suppressions, and usage. Search, and create access URLs. |
+| `agent-email:write` | Create and update inboxes, create and delete bindings, send, reply, forward, and create, edit, submit, cancel, and send drafts           |
+| `agent-email:admin` | Domains, placements, policy, suppressions, draft approval and rejection, and raw message reprocessing                                    |
+
+A human keeps `agent-email:admin` only with the organization `owner` or `admin` role. Agent email capabilities do not authorize [Sending email](/docs/capabilities/email) routes.
+
+## Use it
+
+1. Create an inbox on the hosted domain:
+
+   ```sh
+   deployments inbox create --local-part support --name "Support agent"
+   ```
+
+2. Bind it to a deployment so inbound mail starts runs:
+
+   ```sh
+   deployments inbox-binding create $INBOX_ID --binding-type platform_agent --agent-deployment-id $AGENT_DEPLOYMENT_ID
+   ```
+
+3. Read what arrived:
+
+   ```sh
+   deployments inbox messages $INBOX_ID --direction inbound
+   ```
+
+4. Draft a reply, submit it, approve it, and send it:
+
+   ```sh
+   deployments draft create $INBOX_ID --to customer@example.com --subject "Re: Your question" --text "Thanks, here is the answer." --reply-to-message-id $MESSAGE_ID
+   deployments draft submit $DRAFT_ID
+   deployments draft approve $DRAFT_ID
+   deployments draft send $DRAFT_ID
+   ```
+
+The same draft through the SDK:
+
+```ts
+import { createAgentEmailDraft, createClient, createConfig } from "@agentifiers/deployments-sdk";
+
+const client = createClient(
+  createConfig({
+    baseUrl: "https://api.example.com",
+    headers: { authorization: `Bearer ${process.env.DEPLOYMENTS_API_KEY}` },
+  }),
+);
+
+const { data, error } = await createAgentEmailDraft({
+  client,
+  path: { inboxId: "inb_123" },
+  headers: {
+    "idempotency-key": crypto.randomUUID(),
+    "x-deployments-environment": "env_123",
+  },
+  body: {
+    to: ["customer@example.com"],
+    subject: "Re: Your question",
+    text: "Thanks, here is the answer.",
+  },
+});
+```
+
+In the [management console](/docs/getting-started/console#manage-agent-email), **Connect › Email** shows whether the environment can send, and manages inboxes, bindings, domains, placements, policy, suppressions, and usage. An inbox's page reads its threads and messages, sends, replies, and forwards, and moves drafts through approval.
+
+## Reference
+
+- API: [Agent email operations](/docs/api/reference/agent-email/create-agent-email-inbox), including [Create a binding](/docs/api/reference/agent-email/create-agent-email-binding), [Create a draft](/docs/api/reference/agent-email/create-agent-email-draft), [Approve a draft](/docs/api/reference/agent-email/approve-agent-email-draft), and [Update the policy](/docs/api/reference/agent-email/update-agent-email-policy)
+- CLI: [`deployments inbox`](/docs/cli/reference/inbox#inbox-create), [`deployments inbox-binding`](/docs/cli/reference/inbox-binding#inbox-binding-create), [`deployments inbox-domain`](/docs/cli/reference/inbox-domain#inbox-domain-create), [`deployments draft`](/docs/cli/reference/draft#draft-create), [`deployments email-policy`](/docs/cli/reference/email-policy#email-policy-update), [`deployments email-suppression`](/docs/cli/reference/email-suppression#email-suppression-create)
+- SDK: [Agent email functions](/docs/sdk/reference#agent-email)

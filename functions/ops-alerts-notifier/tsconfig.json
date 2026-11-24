@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/functions/ops-alerts-notifier",
+    "rootDir": ".",
+    "tsBuildInfoFile": "../../dist/functions/ops-alerts-notifier.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    {
+      "path": "../../packages/secret-store"
+    }
+  ]
+}
