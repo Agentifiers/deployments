@@ -24,7 +24,7 @@ jobs:
     environment: npm
     permissions:
       actions: read # Reads the CI runs of the release commit.
-      contents: read
+      contents: write # Creates the release's tag and GitHub release.
       id-token: write # npm trusted publishing and provenance.
     concurrency:
       group: release-client-packages
@@ -65,3 +65,11 @@ jobs:
         env:
           DIST_TAG: ${{ inputs.dist_tag }}
         run: bun run packages:publish -- "$DIST_TAG"
+
+      - name: Create the GitHub release
+        env:
+          DIST_TAG: ${{ inputs.dist_tag }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: bash scripts/create-github-release.sh "$DIST_TAG"
