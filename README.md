@@ -1,4 +1,9 @@
-# Deployments
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/deployments-logo-dark.svg">
+    <img alt="Deployments" src=".github/assets/deployments-logo-light.svg" height="56">
+  </picture>
+</h1>
 
 Deployments is a multi-tenant control plane and runtime for building,
 versioning, deploying, and operating AI agents on AWS. You describe an agent in
@@ -6,6 +11,14 @@ a manifest, publish it as an immutable release, deploy that release into an
 environment with its own credentials and tool policies, and send it work
 through the API, the CLI, the SDK, schedules, webhooks, email, or chat
 channels. Every run pins the exact release it executed.
+
+<p>
+  Built by&nbsp;
+  <a href="https://agentifiers.com"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/agentifiers-logo-dark.svg">
+    <img alt="Agentifiers" src=".github/assets/agentifiers-logo-light.svg" height="36" align="absmiddle">
+  </picture></a>
+</p>
 
 The platform covers tenancy and identity, agent releases and deployments,
 durable threads and runs, approvals, workflows, memory, credentials, tools and
